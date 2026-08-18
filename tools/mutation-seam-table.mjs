@@ -193,6 +193,7 @@ for (const [label, verdict, fails] of rows) {
 const survived = rows.filter(r => r[1] === 'SURVIVES');
 const unanchored = rows.filter(r => r[1] === 'ANCHOR MISSING');
 console.log(`\n${rows.length - survived.length - unanchored.length}/${rows.length} mutations die.`);
+reportIndistinguishableRows(rows);
 
 // A mutation whose anchor no longer matches measured NOTHING, and it degrades
 // exactly when the code moves — which is when this table is most worth running.
@@ -206,3 +207,43 @@ if (unanchored.length) {
   process.exit(1);
 }
 if (survived.length) process.exit(1);
+
+/**
+ * Rows the suite cannot tell apart: two mutations that die on exactly the same
+ * set of test names are, as far as this table can see, the same intervention.
+ *
+ * This is the only check here aimed at the TABLE rather than the apparatus.
+ * Every other guard — anchor matched, file present, run completed, output not
+ * truncated — asks whether the machinery worked. All of them can pass while a
+ * row quietly tests something other than what its label says, and then the
+ * table over-reports its own coverage with nothing visibly wrong. That is not
+ * hypothetical: a row labelled "endSession moved out of the finally" carried an
+ * edit that simply DELETED the call, making it a copy of the row above it. It
+ * applied cleanly, ran cleanly and died — so it read as coverage of a property
+ * nothing was testing, across many runs, until someone compared the columns.
+ *
+ * Flagged, never failed: collapsing is often correct. `endSession(null)` returns
+ * early, so dropping the argument and dropping the call ARE one edit, and the
+ * table tests both deliberately. The question "are these meant to be the same?"
+ * has to be answered by a person, which is why this prints and exits 0.
+ */
+function reportIndistinguishableRows(all) {
+  const groups = new Map();
+  for (const [label, verdict, fails] of all) {
+    // Only a row that died has a meaningful set. A survivor's set is empty by
+    // definition, and a runaway's is whatever was captured before it was killed.
+    if (verdict !== 'DIES' || !fails.length) continue;
+    const key = [...fails].sort().join(' ');
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(label);
+  }
+  const collisions = [...groups.values()].filter(g => g.length > 1);
+  if (!collisions.length) return;
+  console.log('\nRows the suite cannot tell apart — each group died on exactly the same tests.');
+  console.log('Fine where the interventions really are one edit; otherwise a row is not testing');
+  console.log('what its label claims, and its coverage is imaginary:');
+  for (const group of collisions) {
+    console.log('');
+    for (const label of group) console.log(`  · ${label}`);
+  }
+}

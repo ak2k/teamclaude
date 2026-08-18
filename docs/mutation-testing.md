@@ -56,6 +56,60 @@ raise `maxBuffer` well past a normal run's output.
 A sixth, adjacent: a duplicated row in the mutation table over-reported 23
 mutations as 22 for several runs. Count what you ran, not what you listed.
 
+## The table can lie even when every mechanism works
+
+Everything above validates the *apparatus*. None of it asks whether a row tests
+what its label says — and a row can be specified wrongly while every mechanism
+performs perfectly.
+
+The case study is in this repo's own history. A row labelled `endSession moved
+out of the finally into the try` carried an edit that simply **deleted** the
+call, making it a copy of the row two above it. The anchor matched. The suite
+ran. The mutation genuinely died. There was nothing wrong to see in the
+machinery, which is what everyone was checking — so a table of 23 rows reported
+22 distinct interventions for many runs, and a real defect (the in-flight hold
+leaking when the request path throws) sat undetected behind the duplicate.
+
+**Flag any two rows that die on exactly the same set of test names.** It is free:
+those names are already collected in order to print them. Two rows the suite
+cannot tell apart are, as far as the table can see, one intervention.
+
+It must **flag, not fail**. Rows collapse legitimately: `endSession(null)`
+returns early, so dropping the argument and dropping the call *are* the same
+edit, and both are tested deliberately. The output is a question — "are these
+meant to be indistinguishable?" — and a person answers it. Only a row that
+claims a different property while sharing a fingerprint is a defect.
+
+## Checking the checker
+
+The guards above are code, and code can be wrong in exactly the way it exists to
+detect. Two people here independently wrote a broken instrument-check on their
+first attempt within the same hour — both grepping `^# pass` against a reporter
+that emits `ℹ pass`, so the check matched nothing and reported success on every
+run.
+
+So keep **one known-caught canary row**: a mutation certain to be caught. Its
+value is not that it catches more — it catches less than the per-row guards. It
+is that its expected value is known *independently of the run*, which makes it
+the only check that still works when the checking logic itself is wrong. If the
+known-caught row reads as surviving, the harness is broken and no other number
+in the table means anything.
+
+State its limit in the same breath, or it will be trusted past it: **it certifies
+the harness on the canary's own path, not per row.** It would not have caught the
+truncated-output misread, because a fast-failing canary never blows the buffer —
+that row reads as a survivor while the canary reads as caught and the harness
+looks healthy. Truncation is caught per row by "did the observation complete",
+not by any canary.
+
+A known-*survivor* canary row is unnecessary. It asserts the same thing as a
+green unmutated baseline run at the start of the table, which you need anyway: if
+the suite is red or flaky before any mutation is applied, every row reads as
+caught and the whole table is meaningless in the confident direction.
+
+**A green instrument tells you nothing until you have seen it go red, and a full
+table tells you nothing until you have checked that its rows differ.**
+
 ## The harness can hang the thing grading it
 
 A test that waits for a condition the production code normally produces will
