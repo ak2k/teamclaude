@@ -78,6 +78,7 @@ Step-by-step lifecycle: [docs/routing.md](docs/routing.md#request-lifecycle).
 | [Configuration](docs/configuration.md) | Config format, every field, environment variables, network tuning |
 | [Proxy modes](docs/proxy-modes.md) | MITM forward proxy, sx.org residential egress |
 | [Compliance](docs/compliance.md) | Terms of service notes |
+| [Mutation testing](docs/mutation-testing.md) | How the routing tests are held down, and the ways a mutation harness reports success while measuring nothing |
 
 ## Security
 
