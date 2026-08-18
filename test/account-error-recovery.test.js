@@ -137,6 +137,26 @@ test('a removal mid-refresh does not land the tokens on another account', async 
   assert.equal(configAccounts.find(c => c.name === 'other').refreshToken, 'r');
 });
 
+// The persistence callback is only half of it. The manager's OWN record is what
+// the next request's Authorization header is built from, so a crossing there is
+// not a wrong line in a config file — it is the victim's brand-new access token
+// sent upstream as somebody else, and the victim left holding a refresh token
+// the provider has already rotated away.
+test('a removal mid-refresh does not land the tokens on another account in memory', async () => {
+  const { am, release } = gatedManager(['doomed', 'victim', 'other']);
+  const inFlight = am.ensureTokenFresh(1, true); // 'victim'
+  am.removeAccount(0);                           // 'victim' slides down to index 0
+  release();
+  await inFlight;
+
+  const victim = am.accounts.find(a => a.name === 'victim');
+  const other = am.accounts.find(a => a.name === 'other');
+  assert.equal(victim.credential, 'FRESH', 'the refreshing account did not receive its own token');
+  assert.equal(victim.refreshToken, 'FRESH-R');
+  assert.equal(other.credential, 't', "the victim's access token was injected as another account's");
+  assert.equal(other.refreshToken, 'r', "the victim's rotated refresh token replaced another account's");
+});
+
 test('an account removed mid-refresh persists nothing', async () => {
   const { am, configAccounts, release } = gatedManager(['victim', 'other']);
   const inFlight = am.ensureTokenFresh(0, true);
