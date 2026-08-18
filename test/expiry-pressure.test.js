@@ -744,6 +744,32 @@ test('an advisor request follows the executor\'s pin, not the advisor\'s', () =>
   assert.equal(am.getActiveAccount(null, OPUS, FABLE, 's1').name, 'opus-home');
 });
 
+// The advisor-constrained pass has a last resort — "every account is
+// unavailable, take whatever just reset" — that reopens an account without
+// re-checking the advisor's weekly bucket. Serving the request from there is
+// the point of that branch. Claiming the advisor's family for it is not: that
+// sub-inference is refused upstream exactly as it would be on the degrade path.
+test('the exhausted-fleet last resort serves the request without claiming the advisor family', () => {
+  const am = manager([
+    // Opus-serviceable, Fable spent — and a 5h reset left in the past with no
+    // utilization beside it, which is what makes the last-resort branch reopen
+    // it (_clearExpiredQuotas only retires a window that has a value).
+    { name: 'a', used: 0.2, resetH: 50, fableUsed: 0.99, fableResetH: 50 },
+    { name: 'b', used: 0.2, resetH: 60 },
+  ]);
+  am.accounts[0].quota.unified5hReset = Date.now() - 1000;
+  am.accounts[1].disabled = true;
+
+  const decision = {};
+  const acc = am.getActiveAccount(null, OPUS, FABLE, 's1', decision);
+  assert.equal(acc?.name, 'a', 'the last resort must still serve the request');
+  assert.equal(decision.advisorServed, false,
+    'the request claimed an advisor family the account cannot serve');
+  am.recordSession('s1', acc.index, OPUS, FABLE, decision);
+  assert.equal(am.sessionTracker.pinnedAccount('s1', 'unified7d'), 0);
+  assert.equal(am.sessionTracker.pinnedAccount('s1', 'unified7dFable'), null);
+});
+
 // An advisor request pins both families because the account serves both. When
 // no account is eligible for both, selection degrades to executor-only and the
 // advisor sub-inference is dropped upstream — so that account served the

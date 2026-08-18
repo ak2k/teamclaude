@@ -11,6 +11,22 @@ import { SESSION_KNOWN_TTL_MS } from '../src/session-tracker.js';
 // validates its own ordering, not the server's, and every one of them is a line
 // that can be dropped from src/server.js without any such test noticing. These
 // drive the real server for that reason.
+//
+// If you extend this file, two things about grading it are worth knowing,
+// because both once produced a clean bill that was not one:
+//
+//   - Some of these mutations do not FAIL, they run away. Dropping the
+//     per-request exclusion set makes failover re-offer an account the request
+//     already tried, and the retry loop then logs until it drowns the runner's
+//     stdout buffer — which reads, on truncated output, as a mutation nothing
+//     caught. A grader has to treat a run that cannot finish as a caught
+//     mutation, not a passing one. Two tests below bound their refusing
+//     upstream so the outcome is a wrong hit sequence instead; stock 403 tests
+//     still loop.
+//   - A test here can hang the harness meant to grade it. The overlapping-
+//     sibling test waits for a preemption to reach the second account, and
+//     under a mutation that changes routing it may never arrive; the wait is
+//     bounded and the latch released in a `finally` for that reason.
 
 const H = 3600_000;
 const OPUS = 'claude-opus-5';

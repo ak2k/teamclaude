@@ -414,7 +414,16 @@ export class AccountManager {
     }
     if (advisorModel) {
       const account = this._select(exclude, model, advisorModel, false, decision);
-      if (account) { if (decision) decision.advisorServed = true; return account; }
+      if (account) {
+        // Normally the constraint guarantees this. Its last resort does not:
+        // when every account is unavailable, _selectNext reopens whichever one
+        // has already reset without re-checking the advisor's bucket. Serving
+        // the request from there is that branch's whole purpose; claiming the
+        // advisor's family for it is not, since upstream refuses that
+        // sub-inference exactly as it does on the degrade path below.
+        if (decision) decision.advisorServed = this._canServeAdvisor(account, advisorModel);
+        return account;
+      }
       // Throttled so a busy advisor session doesn't flood the activity log.
       if (Date.now() >= (this._advisorDegradeLogAt || 0)) {
         this._advisorDegradeLogAt = Date.now() + 60_000;
@@ -839,15 +848,25 @@ export class AccountManager {
     if (model && !this._routeAllows(account, model)) return false;
 
     // An advisor request additionally needs the account to serve the ADVISOR's
-    // model: its family bucket must have headroom (the shared buckets were
-    // already checked above for the executor) and any route/ownership rule for
-    // it must allow this account.
-    if (advisorModel) {
-      if (this._modelWeeklyExhausted(account, advisorModel)) return false;
-      if (!this._routeAllows(account, advisorModel)) return false;
-    }
+    // model (the shared buckets were already checked above for the executor).
+    if (advisorModel && !this._canServeAdvisor(account, advisorModel)) return false;
 
     return true;
+  }
+
+  /**
+   * Can `account` run the ADVISOR's sub-inference — its family bucket has
+   * headroom and any route/ownership rule for that model allows this account?
+   * The sub-inference runs on whatever account serves the request, so this is
+   * both a constraint on selection (_isAvailable) and the fact that decides
+   * whether that family's quota is actually spent there (decision.advisorServed).
+   * One predicate, because those two answers must never differ: claiming a
+   * family the account cannot serve pins — and settles — a bucket for work
+   * upstream refused.
+   */
+  _canServeAdvisor(account, advisorModel) {
+    return !this._modelWeeklyExhausted(account, advisorModel)
+      && this._routeAllows(account, advisorModel);
   }
 
   /**
