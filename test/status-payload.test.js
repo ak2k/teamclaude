@@ -99,6 +99,19 @@ test('the server block reports the upstream, port and blocklist it is running wi
     assert.ok(Number.isFinite(started), `startedAt is not a time: ${s.server.startedAt}`);
     assert.ok(Math.abs(Date.now() - started) < 120_000,
       `startedAt is not this run's clock: ${s.server.startedAt}`);
+
+    // uptimeSeconds has to ADVANCE. A constant satisfies any "is it a number"
+    // check and any bound generous enough not to flake, and frozen at 0 it reads
+    // as "just restarted" to whoever is looking during an incident — the same
+    // family of misdirection as reporting the wrong upstream. Asserting growth
+    // rather than a value keeps it independent of how long the boot took.
+    await new Promise(r => setTimeout(r, 2100));
+    const later = await status(port);
+    assert.ok(later.server.uptimeSeconds > s.server.uptimeSeconds,
+      `uptime is a constant, not a clock: ${s.server.uptimeSeconds} then ${later.server.uptimeSeconds}`);
+    assert.ok(Math.abs(later.server.uptimeSeconds - (Date.now() - started) / 1000) < 2,
+      'uptime and startedAt disagree, so at most one of them is being read');
+    assert.equal(later.server.startedAt, s.server.startedAt, 'startedAt moved while the server ran');
   });
 });
 

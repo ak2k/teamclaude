@@ -14,10 +14,15 @@ function oauth(name, extra = {}) {
 // Manager with per-account weekly buckets set from { used, resetH } (hours from
 // now; fableUsed/fableResetH for the Fable bucket). Expiry routing on by default;
 // `er: null` omits the config key entirely (the shipped default).
-function manager(specs, { er = { enabled: true }, distribute = true, tracker } = {}) {
+// `now` is the instant the fixture's reset times are stamped from. It is a
+// parameter because two fixtures built from one spec list are only comparable
+// when they share it: each reset is an ABSOLUTE time derived from `resetH`, so
+// two constructors either side of a millisecond boundary produce windows 1ms
+// apart, and any exact comparison of a clock-derived quantity across the pair
+// then fails on a stalled box — a flake that lands on whatever else was running.
+function manager(specs, { er = { enabled: true }, distribute = true, tracker, now = Date.now() } = {}) {
   const am = new AccountManager(specs.map(s => oauth(s.name, s.extra)), 0.98,
     { distributeSessions: distribute, sessionTracker: tracker, ...(er ? { expiryRouting: er } : {}) });
-  const now = Date.now();
   specs.forEach((s, i) => {
     const q = am.accounts[i].quota;
     if (s.used != null) { q.unified7d = s.used; q.unified7dReset = now + s.resetH * H; }
@@ -90,11 +95,12 @@ test('pressure prefers ample quota that expires soonest', () => {
   ];
   // With equal session counts the flag-off tiebreak also lands on 'soon', so give
   // it a session first: only the band still prefers it once it is the loaded one.
-  const am = manager(specs);
+  const now = Date.now();          // one clock, so the two fixtures are comparable
+  const am = manager(specs, { now });
   route(am, 'existing');
   assert.equal(route(am, 's1').name, 'soon');
 
-  const flagOff = manager(specs, { er: null });
+  const flagOff = manager(specs, { er: null, now });
   route(flagOff, 'existing');
   assert.equal(route(flagOff, 's1').name, 'later');
 });
@@ -138,11 +144,12 @@ test('band beats load when pressures differ; flag off prefers load', () => {
     { name: 'soon', used: 0.07, resetH: 50 },
     { name: 'later', used: 0.05, resetH: 160 },
   ];
-  const banded = manager(specs);
+  const now = Date.now();          // one clock, so the two fixtures are comparable
+  const banded = manager(specs, { now });
   route(banded, 'existing'); // one session already on 'soon'
   assert.equal(route(banded, 'fresh').name, 'soon'); // band excludes 'later' anyway
 
-  const flagOff = manager(specs, { er: { enabled: false } });
+  const flagOff = manager(specs, { er: { enabled: false }, now });
   route(flagOff, 'existing');
   assert.equal(route(flagOff, 'fresh').name, 'later'); // least-loaded wins without the band
 });
@@ -411,13 +418,16 @@ test('a finite negative utilization scores as an empty window, not unbounded hea
     { name: 'ok1', used: 0.1, resetH: 60 },
     { name: 'ok2', used: 0.2, resetH: 70 },
   ];
-  const am = manager(specs);
-  const ref = manager(specs);
+  // One clock for both fixtures: the assertion below is exact equality on a
+  // value derived from each account's reset, so the two have to be scored
+  // against windows stamped from the same instant.
+  const now = Date.now();
+  const am = manager(specs, { now });
+  const ref = manager(specs, { now });
   // Finite, so every Number.isFinite guard passes it through; only the 0-1
   // domain clamp keeps its headroom from dwarfing every real account's.
   am.accounts[0].quota.unified7d = -1e300;
   ref.accounts[0].quota.unified7d = 0; // the emptiest window it can possibly mean
-  const now = Date.now();
   assert.equal(am._expiryPressure(am.accounts[0], OPUS, now),
     ref._expiryPressure(ref.accounts[0], OPUS, now));
   const band = am._topPressureBand(am.accounts.slice(), OPUS).map(a => a.name);
@@ -1026,9 +1036,10 @@ test('distribute off: the band overrides the soonest-reset tiebreak', () => {
     { name: 'drained-sooner', used: 0.95, resetH: 50 },
     { name: 'ample-later', used: 0.05, resetH: 90 },
   ];
-  const am = manager(specs, { distribute: false });
+  const now = Date.now();          // one clock, so the two fixtures are comparable
+  const am = manager(specs, { distribute: false, now });
   assert.equal(am._pickBestAvailable(null, OPUS).name, 'ample-later');
-  const flagOff = manager(specs, { er: { enabled: false }, distribute: false });
+  const flagOff = manager(specs, { er: { enabled: false }, distribute: false, now });
   assert.equal(flagOff._pickBestAvailable(null, OPUS).name, 'drained-sooner');
 });
 
@@ -1425,8 +1436,9 @@ test('flag off matches an absent config step for step', () => {
     am => route(am, 's3', OPUS),
     am => route(am, 's1', OPUS),
   ];
-  const absent = manager(specs, { er: null });
-  const disabled = manager(specs, { er: { enabled: false } });
+  const now = Date.now();          // one clock, so the two fixtures are comparable
+  const absent = manager(specs, { er: null, now });
+  const disabled = manager(specs, { er: { enabled: false }, now });
   steps.forEach((step, i) => {
     assert.equal(step(absent).name, step(disabled).name, `step ${i} diverged`);
   });
