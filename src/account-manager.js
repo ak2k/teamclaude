@@ -408,9 +408,16 @@ export class AccountManager {
     // if nothing session-eligible is found (e.g. the whole tier is exhausted).
     if (this.distributeSessions && sessionId && !this._pinnedAccountForModel(model, advisorModel)) {
       const acc = this._selectForSession(sessionId, exclude, model, advisorModel);
-      // Every account this path can return was filtered through _isAvailable
-      // with the advisor's model, so it can serve both.
-      if (acc) { if (decision && advisorModel) decision.advisorServed = true; return acc; }
+      // Every account this path can return is filtered through _isAvailable with
+      // the advisor's model, so the answer here is always true today. It is
+      // asked rather than asserted because the walk below made exactly that
+      // argument and a last resort was added underneath it: the record of what
+      // was served and the constraint on serving it are the same predicate, or
+      // the next branch added here claims a family upstream refuses.
+      if (acc) {
+        if (decision && advisorModel) decision.advisorServed = this._canServeAdvisor(acc, advisorModel);
+        return acc;
+      }
     }
     if (advisorModel) {
       const account = this._select(exclude, model, advisorModel, false, decision);
@@ -667,12 +674,20 @@ export class AccountManager {
 
   /**
    * Read-only: the index of the account a request for `model` would be served by
-   * right now — the same decision getActiveAccount makes (manual pin → the global
-   * current account if it can serve the model → best-available), but WITHOUT
-   * mutating currentIndex and without the exhausted-fleet probe fallback. Returns
-   * null when nothing can serve `model` at the moment. The TUI uses this to mark
-   * the single account each secondary bucket (Fable/Sonnet) currently routes to —
-   * the F7/S7 analogue of the ► that marks the default route's current account.
+   * right now — getActiveAccount's walk (manual pin → the global current account
+   * if it can serve the model → best-available) without mutating currentIndex.
+   * Returns null when nothing can serve `model` at the moment. The TUI uses this
+   * to mark the single account each secondary bucket (Fable/Sonnet) currently
+   * routes to — the F7/S7 analogue of the ► that marks the default route's
+   * current account.
+   *
+   * It answers for a SESSION-LESS request and says so here rather than in the
+   * caller, because a preview that quietly stood for more than it computes is
+   * the shape this branch has been fixing all round. Three things the real walk
+   * does are deliberately absent, each because it has no meaning without a
+   * request: the exhausted-fleet probe (which mutates and sends traffic), the
+   * session-affinity path (there is no session), and rollover preemption (which
+   * consumes an event a preview must not spend).
    */
   previewRouteIndex(model) {
     const pinned = this._pinnedAccountForModel(model);
@@ -883,14 +898,20 @@ export class AccountManager {
   }
 
   /**
-   * Whether a request right now would actually route to an account, with a short
-   * reason when it would not. A caller that records a manual choice (the control
-   * plane's switch endpoint) needs to report whether that choice will take
-   * effect, not merely that it was stored: selection drops the choice on the very
+   * Whether the CURRENT-ACCOUNT WALK would route to an account right now, with a
+   * short reason when it would not. A caller that records a manual choice (the
+   * control plane's switch endpoint) needs to report whether that choice will
+   * take effect, not merely that it was stored: the walk drops it on the very
    * next request both when the account cannot serve traffic and when another
-   * available account outranks it on priority. Both are asked here through the
-   * same helpers _select uses, so the flag cannot promise more than the selector
-   * delivers.
+   * available account outranks it on priority. Both are asked through the same
+   * `_isAvailable` / `_preemptedBy` the walk itself gates on, so the flag cannot
+   * promise more than that walk delivers.
+   *
+   * It answers for that walk and no other, which is the whole scope of a manual
+   * switch: a session's pin, a route pin and the keep-warm scheduler never
+   * consult `currentIndex`, so with `distributeSessions` on, existing session
+   * traffic will not follow this choice however eligible the account is. Asked
+   * without a model, since the switch is not about one.
    * @returns {{eligible: boolean, reason?: string}}
    */
   eligibility(accountIndex) {
