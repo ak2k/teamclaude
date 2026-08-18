@@ -446,6 +446,39 @@ test('a current-account attempt that failed back does not settle its rollover', 
     'an attempt that never reached the client settled the rollover');
 });
 
+// endSession is in a `finally`, and only that placement covers the path where
+// the request throws. Everything downstream of the hold now depends on it: the
+// hold is what defers settlement (endSession settles only at inFlight === 0),
+// what keeps a session from expiring on the idle TTL, and what the cap's
+// eviction probe deliberately spares. A hold that is never released therefore
+// strands the session's pending rollover forever, leaks the record past its
+// TTL, and makes it the one entry eviction will not reclaim — three of this
+// branch's bug classes from a single thrown request.
+//
+// The throw is injected on recordSession because that is a real call the
+// request path makes after the hold is taken and outside forwardRequest's own
+// catch, which is where an unforeseen internal error would surface. Which call
+// throws is not the point; that any of them can is.
+test('a request that throws still releases the session\'s in-flight hold', async () => {
+  const am = fleet([{ name: 'a', used: 0.2, resetH: 50 }]);
+  const realRecord = am.recordSession.bind(am);
+  let reached = false;
+  am.recordSession = (...args) => {
+    realRecord(...args);
+    reached = true;
+    throw new Error('injected failure on the request path');
+  };
+  const upstream = scriptedUpstream();
+  await withProxy(am, upstream, async (send) => {
+    assert.equal(await send({ model: OPUS, messages: [] }), 502);
+  });
+  assert.ok(reached, 'the request never reached the injected throw, so this proves nothing');
+  const s = am.sessionTracker.sessions.get('sess-1');
+  assert.ok(s, 'the session record went away entirely');
+  assert.equal(s.inFlight, 0,
+    'a thrown request left the session held in flight: it can never settle a rollover, never expire on the idle TTL, and is the entry eviction spares');
+});
+
 // A request with no session header must not fall over on any of the session
 // calls, and must not create session state.
 test('a request with no session id routes without touching session state', async () => {
