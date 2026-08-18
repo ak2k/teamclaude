@@ -625,23 +625,38 @@ export class AccountManager {
     return max;
   }
 
-  /** Utilization (0-1) of the weekly bucket that governs `model` on this account:
-   * unified7dFable for Fable, unified7dSonnet for Sonnet, unified7d otherwise.
-   * Falls back to the shared unified7d when a family-specific bucket isn't
-   * reported. Returns null when nothing is known. */
-  _governingWeekly(account, model) {
-    const q = account.quota;
-    const key = this._weeklyBucketFor(model);
-    if (q[key] != null) return q[key];
-    return key !== 'unified7d' ? q.unified7d : null;
+  /**
+   * THE rule for which weekly bucket governs a request for `model` on this
+   * account: the model family's own bucket (unified7dFable for Fable,
+   * unified7dSonnet for Sonnet, a route's `bucket` override where one applies)
+   * when the account reports a UTILIZATION for it, else the shared unified7d it
+   * spends from otherwise. One rule, asked by everything: the availability
+   * gate, the pressure ranking and the rollover window key.
+   *
+   * Presence of the utilization decides it, and only that, because the gate is
+   * the one thing that must never read as unknown — an account reporting Fable
+   * at 0.9 has to be barred from Fable traffic. When the same bucket reports no
+   * reset, its pressure is simply unknown: substituting the shared window's
+   * horizon would divide one bucket's headroom by another bucket's clock and
+   * rank an account on quota it does not have, steering Fable traffic straight
+   * into the most Fable-spent account in the fleet.
+   */
+  _governingBucket(account, model) {
+    return this._windowForBucket(account, this._weeklyBucketFor(model));
   }
 
-  /** Reset timestamp (ms) of the weekly bucket that governs `model`, falling back
-   * to the shared weekly reset. Used to spend the soonest-expiring quota first. */
+  /** Utilization (0-1) of the bucket that governs `model` here, or null when
+   * that bucket reports none. */
+  _governingWeekly(account, model) {
+    return account.quota[this._governingBucket(account, model)] ?? null;
+  }
+
+  /** Reset timestamp (ms) of the bucket that governs `model` here, or null when
+   * that bucket reports none. Used to spend the soonest-expiring quota first;
+   * unknown sorts first, so an account whose governing window is unreported is
+   * probed rather than ranked on a window that is not its own. */
   _governingWeeklyReset(account, model) {
-    const q = account.quota;
-    const key = this._weeklyBucketFor(model);
-    return q[`${key}Reset`] || q.unified7dReset || null;
+    return account.quota[`${this._governingBucket(account, model)}Reset`] || null;
   }
 
   /** True when the family-specific weekly bucket that governs `model` is spent.
@@ -650,10 +665,9 @@ export class AccountManager {
    * false for families without a dedicated bucket (they share unified7d, already
    * covered by _isNearQuota). */
   _modelWeeklyExhausted(account, model) {
-    const q = account.quota;
-    const key = this._weeklyBucketFor(model);
+    const key = this._governingBucket(account, model);
     if (key === 'unified7d') return false;
-    return q[key] != null && q[key] >= this.switchThreshold;
+    return account.quota[key] >= this.switchThreshold;
   }
 
   /**
@@ -851,12 +865,12 @@ export class AccountManager {
    * scored against the same instant.
    */
   _expiryPressure(account, model = null, now = Date.now()) {
-    // Both halves of the ratio are read from ONE bucket. _governingWeekly and
-    // _governingWeeklyReset fall back to the shared weekly independently, so an
-    // account reporting a family utilization without its window would have that
-    // headroom divided by the shared window's horizon — two different weeks in
-    // one score. _windowKeyFor names the bucket that actually governs here.
-    const key = this._windowKeyFor(account, model);
+    // Both halves of the ratio are read from the ONE bucket _governingBucket
+    // names. A family bucket reporting a utilization but no window makes this
+    // unknown rather than borrowing the shared window's horizon: dividing one
+    // bucket's headroom by another bucket's clock scores an account on quota it
+    // does not have.
+    const key = this._governingBucket(account, model);
     const used = account.quota[key];
     const reset = account.quota[`${key}Reset`];
     if (used == null || !reset) return null;
@@ -991,19 +1005,15 @@ export class AccountManager {
     if (sessionId) this.sessionTracker.windowsFor(sessionId)?.noteServed(accountIndex, buckets);
   }
 
-  /** The quota bucket whose reset actually governs `model` on this account: the
-   * family bucket when the account reports one, else the shared weekly that
-   * _governingWeeklyReset falls back to. Keying by the family while reading the
-   * fallback's value would compare two different windows, so a family bucket
-   * appearing or being cleared would read as a rollover. */
+  /** As _governingBucket, from the bucket rather than the model — the form the
+   * pin path needs, since a pin is already keyed by bucket. */
   _windowKeyFor(account, model) {
     return this._windowForBucket(account, this._weeklyBucketFor(model));
   }
 
-  /** As _windowKeyFor, from the bucket rather than the model — the form the pin
-   * path needs, since a pin is already keyed by bucket. */
   _windowForBucket(account, bucket) {
-    return account.quota[`${bucket}Reset`] == null ? 'unified7d' : bucket;
+    if (bucket === 'unified7d') return bucket;
+    return account.quota[bucket] == null ? 'unified7d' : bucket;
   }
 
   /** Every bucket a request could be governed by here: the model families' own

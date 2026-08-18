@@ -474,15 +474,44 @@ test('the usage endpoint cannot write a value outside its field\'s domain', () =
 // reports a utilization for it. Its window being unreported makes the PRESSURE
 // unknown — it must not be scored on the shared weekly's horizon, which would
 // rank this account on headroom its Fable bucket does not have.
-test('a family utilization with no family reset is scored from one bucket', () => {
-  const am = manager([{ name: 'a', used: 0.5, resetH: 100 }]);
+// One rule for what governs a request: the family bucket as soon as the account
+// reports a utilization for it. Its window being unreported makes the PRESSURE
+// unknown — it must not be scored on the shared weekly's horizon, which would
+// rank this account on headroom its Fable bucket does not have.
+test('a family utilization with no family reset gates as family and ranks as unknown', () => {
+  const am = manager([{ name: 'a', used: 0.1, resetH: 100 }]);
   const q = am.accounts[0].quota;
-  // The Fable utilization is known but its window is not, so the shared weekly
-  // is what governs — both halves of the ratio must come from it.
-  q.unified7dFable = 0.1;
+  q.unified7dFable = 0.9;
+  const now = Date.now();
+  assert.equal(am._expiryPressure(am.accounts[0], FABLE, now), null);
+  assert.ok(am._expiryPressure(am.accounts[0], OPUS, now) > 0);
+  assert.equal(am._governingWeekly(am.accounts[0], FABLE), 0.9, 'the family gate was lost');
+});
+
+test('a family utilization without its reset cannot band out the accounts that have that quota', () => {
+  // 'spent' has almost no Fable left and reports no Fable window; 'fresh' has
+  // plenty. Scoring 'spent' from the shared pair credits it with the shared
+  // weekly's 0.9 headroom over a 50h horizon — a pressure high enough to set
+  // the band floor and exclude the one account that can actually serve Fable.
+  const am = manager([
+    { name: 'spent', used: 0.1, resetH: 50 },
+    { name: 'fresh', used: 0.1, resetH: 400, fableUsed: 0.05, fableResetH: 400 },
+  ]);
+  am.accounts[0].quota.unified7dFable = 0.9;
+  const band = am._topPressureBand(am.accounts.slice(), FABLE).map(a => a.name);
+  assert.ok(band.includes('fresh'), `the account holding the Fable quota was banded out: ${band}`);
+  // With both in the band, load decides — and 'spent' is the loaded one.
+  route(am, 'existing', FABLE);
+  assert.equal(route(am, 's1', FABLE).name, 'fresh');
+});
+
+test('a family reset with no family utilization is governed by the shared weekly', () => {
+  const am = manager([{ name: 'a', used: 0.5, resetH: 100 }]);
+  am.accounts[0].quota.unified7dFableReset = Date.now() + 300 * H;
   const now = Date.now();
   assert.equal(am._expiryPressure(am.accounts[0], FABLE, now),
     am._expiryPressure(am.accounts[0], OPUS, now));
+  assert.equal(am._windowKeyFor(am.accounts[0], FABLE), 'unified7d');
 });
 
 test('non-finite quota headers are ignored rather than stored', () => {
