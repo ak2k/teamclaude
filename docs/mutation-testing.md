@@ -137,3 +137,35 @@ refusal for every tree including the one you are standing in:
 Also: a kill between write and restore leaves the mutation behind. The harness
 can only restore what it read, so if it dies mid-cycle, check `git status`
 before trusting the tree.
+
+## Known equivalent mutants
+
+Both committed tables report zero survivors, which is the state you want and
+also the state that erases information: a survivor that was *investigated and
+found harmless* is indistinguishable, in a clean table, from one nobody ever
+wrote. These are the mutations that survive a wider table than the two here —
+each checked and found unobservable, with the argument, so the next person can
+disagree with the reasoning instead of rediscovering the row.
+
+An equivalent mutant is not a coverage gap. Writing a test to kill one means
+asserting an implementation detail that no behaviour depends on, which is a test
+that will fail the next time somebody refactors correctly.
+
+| Mutation | Why nothing can observe it |
+|---|---|
+| `advisorServed = true` without an advisor model | Only read under `if (advisorModel && …)` in `_requestBuckets`. |
+| `_requestBuckets` stops de-duplicating executor and advisor buckets | The consumers are `Map`s (`s.pins`, `served`); a repeated bucket writes the same key twice. |
+| `confirmRouted` drops its `if (sessionId)` guard | `windowsFor(null)` returns null and the call is `?.`-chained. |
+| `endSession` runs for a session the tracker no longer has | The substituted record has `windows: null`, so `windows?.settleServed()` is a no-op. |
+| `beginRequest` stops refreshing `lastSeen` | A record with a request in flight is active and non-expirable whatever `lastSeen` says, and `endRequest` sets it again on the way out. |
+| `activeCountFor` drops its `_isActive` guard | `_pinsInclude` is true only if `now - pin.at <= activeTtlMs` (and `lastSeen >= pin.at` always, since `touch` sets both and `lastSeen` only moves forward) or if `inFlight > 0`. Either implies `_isActive`. The guard is defensive, not load-bearing. |
+| `stats()` reports `known` as the raw map size | The loop deletes expired records *before* the return, so the two are equal by construction. |
+| `ctx.decision ??= {}` instead of `= {}` | Every `getActiveAccount` path that can reach a flag writes both flags, and the `/tc-acct/` path never calls it. |
+| `beginSession` moved inside the inner `try` | Both catches now answer the socket, so this only changes which one handles it. |
+
+One that is NOT equivalent and is deliberately unheld: the stuck-rollover log
+throttle's one-minute window. It reads the wall clock directly where the rest of
+the tracker takes an injectable `now`, so widening it breaks no test. Adding a
+clock parameter for one log throttle would be source that exists only to be
+tested. The line's content and its per-(account, bucket) key are both held; the
+duration is not.

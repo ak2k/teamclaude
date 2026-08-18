@@ -653,3 +653,56 @@ test('a fleet answering 403 is tried once per account, then reported', async () 
   assert.deepEqual(upstream.hits.map(h => h.account), ['a', 'b', 'c'],
     'a refused account was offered to the same request twice');
 });
+
+// ── telling "wrong session" from "wrong account" ──────────────────────────
+// The confirmation carries two identities, and dropping either one leaves the
+// rollover unsettled — so a single test cannot say WHICH was lost, and the two
+// seam mutations are indistinguishable. They are different failures: one loses
+// the session's bookkeeping, the other settles against an account that did not
+// serve the request. These separate them by choosing where `currentIndex` sits,
+// which is the only thing the two mutations disagree about.
+
+// `currentIndex` parked on a THIRD account, so substituting it for the serving
+// account still differs from the rolled one and still settles. Only losing the
+// session id can fail this: with no session, there is no `served` record at all.
+test('the confirmation names the session whose rollover it settles', async () => {
+  const am = fleet([
+    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'b', used: 0.1, resetH: 60 },
+    { name: 'c', used: 0.1, resetH: 400 },
+  ]);
+  const upstream = scriptedUpstream();
+  await withProxy(am, upstream, async (send) => {
+    assert.equal(await send({ model: OPUS, messages: [] }), 200);   // pinned to 'a'
+    am.setCurrentAccount(2);                                        // parked away from both
+    am.accounts[0].quota.unified7d = 0;
+    am.accounts[0].quota.unified7dReset += 168 * H;                 // 'a' rolls
+    assert.equal(await send({ model: OPUS, messages: [] }), 200);   // preempted off 'a'
+  });
+  assert.equal(am.currentIndex, 2, 'the fixture moved currentIndex, so this proves nothing');
+  assert.notEqual(upstream.hits.at(-1).account, 'a', 'the rollover never preempted');
+  assert.equal(am.getStatus().expiryRouting.stats.rolloversOwed, 0,
+    'the settlement was told no session, so the event stayed owed on a session that had moved');
+});
+
+// `currentIndex` parked ON the rolled account, so substituting it for the
+// serving account reads as "the traffic came back" and settles nothing. Only
+// losing the served account's identity can fail this.
+test('the confirmation names the account that served, not the fleet\'s current one', async () => {
+  const am = fleet([
+    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'b', used: 0.1, resetH: 60 },
+  ]);
+  const upstream = scriptedUpstream();
+  await withProxy(am, upstream, async (send) => {
+    assert.equal(await send({ model: OPUS, messages: [] }), 200);   // pinned to 'a'
+    am.setCurrentAccount(0);                                        // parked ON the rolled one
+    am.accounts[0].quota.unified7d = 0;
+    am.accounts[0].quota.unified7dReset += 168 * H;
+    assert.equal(await send({ model: OPUS, messages: [] }), 200);   // preempted onto 'b'
+  });
+  assert.equal(upstream.hits.at(-1).account, 'b', 'the rollover never preempted, so this proves nothing');
+  assert.equal(am.currentIndex, 0, 'the fixture moved currentIndex off the rolled account');
+  assert.equal(am.getStatus().expiryRouting.stats.rolloversOwed, 0,
+    'the settlement was told the fleet\'s current account instead of the one that served, so it read as traffic coming back');
+});
