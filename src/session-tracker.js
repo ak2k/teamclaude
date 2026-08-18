@@ -157,6 +157,22 @@ export class SessionTracker {
     return !!s && s.pins.size > 0;
   }
 
+  // Re-point every pin through `mapFn` after the account list is renumbered
+  // (see AccountManager.removeAccount). A pin is a bare index into that list, so
+  // a removal one slot below silently hands the session to a different account;
+  // returning null drops that pin instead, and the session re-routes that bucket
+  // on its next request. Every bucket is mapped — a session may hold pins on
+  // several accounts, and the removal shifts all of them.
+  remapAccounts(mapFn) {
+    for (const s of this.sessions.values()) {
+      for (const [bucket, idx] of [...s.pins]) {
+        const moved = mapFn(idx);
+        if (moved == null) s.pins.delete(bucket);
+        else s.pins.set(bucket, moved);
+      }
+    }
+  }
+
   // Does any of this session's pins point at `accountIndex`?
   _pinsInclude(s, accountIndex) {
     for (const idx of s.pins.values()) if (idx === accountIndex) return true;

@@ -1812,6 +1812,11 @@ export class AccountManager {
     // follow: the removed slot is gone and everything above it moves down one.
     // A null result means this entry's account is the one that went away.
     const remap = idx => (idx === index ? null : idx > index ? idx - 1 : idx);
+    // Session pins are indices into the same list and shift with it: without
+    // this, every session pinned above the removed account is served by its
+    // neighbour, and the removed account's own sessions land on whatever slid
+    // into its slot. Unpinned sessions simply re-route on their next request.
+    this.sessionTracker.remapAccounts(remap);
     // The rollover detectors store an account index alongside the windows they
     // saw on it, so they shift with the list too: left alone that index names a
     // DIFFERENT account, whose window would read as a jump and preempt for

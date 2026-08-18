@@ -474,13 +474,14 @@ test('a rollover that moves nothing is not consumed (current account)', () => {
 
 test('removing an account does not make the renumbering look like a rollover', () => {
   const am = manager([
-    { name: 'x', used: 0.2, resetH: 100 },
     { name: 'a', used: 0.5, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 70 },
+    { name: 'c', used: 0.1, resetH: 80 },
   ]);
-  am.recordSession('s1', 1); // session pinned to 'a', windows seeded from it
-  am.removeAccount(0);       // 'a' → 0, 'b' → 1: the stored index now names 'b'
-  assert.equal(route(am, 's1').name, 'b');
+  am.recordSession('s1', 0); // session pinned to 'a', windows seeded from it
+  am.removeAccount(0);       // 'b' slides into index 0, which 's1' still records
+  assert.equal(route(am, 's1').name, 'b'); // unpinned, re-routed, re-pinned
+  assert.equal(route(am, 's1').name, 'b'); // 'a' windows must not be read as 'b' rolling over
 });
 
 test('a sub-window forward move of the reset is not a rollover', () => {
