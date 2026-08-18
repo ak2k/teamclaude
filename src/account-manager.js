@@ -260,6 +260,20 @@ export class AccountManager {
     if (account && this.ramp.enabled) account.rampStartedAt = Date.now();
   }
 
+  /**
+   * Make `account` the current one. EVERY writer of currentIndex goes through
+   * here, because establishing the account and recording a rollover baseline
+   * for it are one act: a baseline is what makes that window's next roll a
+   * detected jump rather than a first sight, and an account established
+   * without one rides its freshly-rolled window until the following week.
+   * Sessions route without ever consulting currentIndex, so a stretch of
+   * session traffic is exactly the gap in which that roll goes unseen.
+   */
+  _setCurrent(account) {
+    this.currentIndex = account.index;
+    this._currentSeen.seed(account.index, this._windowResets(account));
+  }
+
   /** Max concurrent upstream requests allowed to `account` right now. Infinity
    * once the ramp window has elapsed (or ramping is off / never started). */
   _rampCap(account, now = Date.now()) {
@@ -336,8 +350,20 @@ export class AccountManager {
    * bucket, so the account must be eligible for both models. When no account
    * satisfies both, selection degrades to executor-only routing so the main
    * request keeps flowing (upstream then fails just the advisor call).
+   *
+   * `decision` is an optional out-object recording what this selection actually
+   * did, for the bookkeeping that runs after it:
+   *   - `viaCurrent`: the sticky current-account walk produced this account.
+   *     Only such a request may settle that walk's pending rollover — a session
+   *     pin, a /tc-acct/ pin and the keep-warm scheduler never consult
+   *     `currentIndex`, so confirming one of those would swallow an event
+   *     nothing acted on.
+   * Hand the same object to confirmRouted. Deriving the answer at that call
+   * site instead would be re-deriving it from state that has moved on; absent,
+   * it reads as "cannot tell", which is the safe direction — an event stays
+   * owed rather than being consumed wrongly.
    */
-  getActiveAccount(exclude = null, model = null, advisorModel = null, sessionId = null) {
+  getActiveAccount(exclude = null, model = null, advisorModel = null, sessionId = null, decision = null) {
     // Clear expired quotas across all accounts and switch proactively if a
     // session reset made a sooner-expiring account the better choice. This runs
     // on every request so the behaviour holds without the TUI render loop.
@@ -352,7 +378,7 @@ export class AccountManager {
       if (acc) return acc;
     }
     if (advisorModel) {
-      const account = this._select(exclude, model, advisorModel, false);
+      const account = this._select(exclude, model, advisorModel, false, decision);
       if (account) return account;
       // Throttled so a busy advisor session doesn't flood the activity log.
       if (Date.now() >= (this._advisorDegradeLogAt || 0)) {
@@ -360,19 +386,23 @@ export class AccountManager {
         console.log(`[TeamClaude] No account eligible for advisor model "${advisorModel}" — routing by request model only`);
       }
     }
-    return this._select(exclude, model, null, true);
+    return this._select(exclude, model, null, true, decision);
   }
 
   /** The selection walk getActiveAccount runs: manual pin → current account →
    * best-available. `allowProbe` gates the exhausted-fleet probe fallback so the
    * advisor-constrained pass can fail soft (degrade to executor-only) instead of
    * burning the throttled probe slot on the stricter constraint. */
-  _select(exclude, model, advisorModel, allowProbe) {
+  _select(exclude, model, advisorModel, allowProbe, decision = null) {
     // A manual per-route pin biases selection for that route's models (independent
     // of the global currentIndex). Honored only while eligible — otherwise we fall
     // through to normal best-available selection so requests keep flowing.
     const pinned = this._pinnedAccountForModel(model, advisorModel);
     if (pinned && this._isAvailable(pinned, model, advisorModel) && !exclude?.has(pinned.index)) return pinned;
+    // Past the manual pin, this request's account comes from the sticky
+    // current-account walk — which is what makes it the request entitled to
+    // settle that walk's pending rollover, whether it stays put or is moved off.
+    if (decision) decision.viaCurrent = true;
     const current = this.accounts[this.currentIndex];
     // `model` scopes availability: an account whose Fable weekly bucket is spent
     // is still fully usable for other models, so it is only excluded when THIS
@@ -553,8 +583,8 @@ export class AccountManager {
    * 401. A token that is merely expiring soon (still valid) is left to the
    * caller's opportunistic background refresh; only a hard-expired one blocks.
    */
-  async getActiveAccountFresh(exclude = null, model = null, advisorModel = null, sessionId = null) {
-    const account = this.getActiveAccount(exclude, model, advisorModel, sessionId);
+  async getActiveAccountFresh(exclude = null, model = null, advisorModel = null, sessionId = null, decision = null) {
+    const account = this.getActiveAccount(exclude, model, advisorModel, sessionId, decision);
     if (account && account.type === 'oauth' && account.refreshToken
         && isTokenExpired(account.expiresAt)) {
       await this.ensureTokenFresh(account.index); // coalesces with any in-flight refresh
@@ -707,7 +737,7 @@ export class AccountManager {
     if (!best) return null;
 
     this._nextProbeAt = now + this.probeIntervalMs;
-    this.currentIndex = best.index;
+    this._setCurrent(best);
     this._beginRamp(best);
     if (best.status === 'throttled') {
       console.log(`[TeamClaude] All accounts unavailable — revalidating throttled "${best.name}" with a live request`);
@@ -994,10 +1024,17 @@ export class AccountManager {
    * same session can be served off the rolled account while a slower one is
    * still failing back onto it, and whichever finishes last is the one that
    * says where the session ended up.
+   *
+   * The current account's own event is settled only when `decision` says this
+   * request came from the walk that owns it. A session's pin, a /tc-acct/ pin
+   * and the keep-warm scheduler all route without ever consulting
+   * `currentIndex`, so letting one of those confirm it would consume an event
+   * that walk never acted on — leaving `current` parked on the account that just
+   * gained a full week until the next roll.
    */
-  confirmRouted(sessionId, accountIndex, model = null, advisorModel = null) {
+  confirmRouted(sessionId, accountIndex, model = null, advisorModel = null, decision = null) {
     const buckets = this._requestBuckets(model, advisorModel);
-    this._currentSeen.commitOn(accountIndex, buckets);
+    if (decision?.viaCurrent) this._currentSeen.commitOn(accountIndex, buckets);
     if (sessionId) this.sessionTracker.windowsFor(sessionId)?.noteServed(accountIndex, buckets);
   }
 
@@ -1318,7 +1355,7 @@ export class AccountManager {
       // `current` on a nearly-drained account merely because that window rolls
       // soon, and since drain never preempts, nothing would move it off again.
       if (this.expiryRouting.enabled && !this._bandedCandidates().includes(best)) return;
-      this.currentIndex = best.index;
+      this._setCurrent(best);
       this._beginRamp(best);
       console.log(`[TeamClaude] Account "${best.name}" session quota reset and weekly expires sooner — switching to it`);
     }
@@ -1398,7 +1435,7 @@ export class AccountManager {
     this.refreshExpiredQuotas(); // drop any restored windows that already expired
     const best = this._pickBestAvailable();
     if (!best) return this.accounts[this.currentIndex] || null;
-    this.currentIndex = best.index;
+    this._setCurrent(best);
     this._beginRamp(best);
     best.probing = best.quota.unified7dReset == null;
     const wk = best.quota.unified7d != null
@@ -1412,7 +1449,7 @@ export class AccountManager {
     const best = this._pickBestAvailable(exclude, model, advisorModel);
     if (best) {
       const switched = best.index !== this.currentIndex;
-      this.currentIndex = best.index;
+      this._setCurrent(best);
       // If we switched to an account whose weekly quota is still unknown, flag
       // it so we re-evaluate once that quota is learned (see updateQuota).
       best.probing = best.quota.unified7dReset == null;
@@ -1452,7 +1489,7 @@ export class AccountManager {
     if (soonestAccount && soonestTime <= Date.now()) {
       soonestAccount.status = 'active';
       soonestAccount.rateLimitedUntil = null;
-      this.currentIndex = soonestAccount.index;
+      this._setCurrent(soonestAccount);
       this._beginRamp(soonestAccount);
       console.log(`[TeamClaude] Account "${soonestAccount.name}" reset, switching to it`);
       return soonestAccount;

@@ -738,9 +738,14 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
   // A pinned request (via /tc-acct/<name>) forces one exact account and never
   // rotates or fails over: once that account has been tried, `account` is null
   // and the caller gets the exhausted response rather than leaking to another.
+  // What the selection actually did, for the bookkeeping that follows it: which
+  // walk produced this account, and whether the advisor sub-inference will run
+  // on it. Rebuilt per ATTEMPT — a retry re-selects, and the attempt the client
+  // is finally served by is the one whose decision governs.
+  ctx.decision = {};
   const account = ctx.pinnedIndex != null
     ? (ctx.tried.has(ctx.pinnedIndex) ? null : accountManager.accounts[ctx.pinnedIndex])
-    : accountManager.getActiveAccount(ctx.tried, ctx.model, ctx.advisorModel, ctx.sessionId);
+    : accountManager.getActiveAccount(ctx.tried, ctx.model, ctx.advisorModel, ctx.sessionId, ctx.decision);
   if (!account) {
     // Every candidate was refused by upstream (403). Waiting will not help — the
     // account needs attention, not a retry — so say so plainly rather than
@@ -1064,7 +1069,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
     // Routing needs that confirmation, not merely the selection — a rollover
     // preemption that re-routed and then failed back onto the original account
     // must stay pending rather than bank a move that never happened.
-    accountManager.confirmRouted(ctx.sessionId, account.index, ctx.model, ctx.advisorModel);
+    accountManager.confirmRouted(ctx.sessionId, account.index, ctx.model, ctx.advisorModel, ctx.decision);
 
     // Log the request head (once) followed by the response headers, streaming
     // to disk from here on.

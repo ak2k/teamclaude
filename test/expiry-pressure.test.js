@@ -34,10 +34,11 @@ function manager(specs, { er = { enabled: true }, distribute = true, tracker } =
 function route(am, sid, model = OPUS, advisorModel = null) {
   am.beginSession(sid);
   try {
-    const acc = am.getActiveAccount(null, model, advisorModel, sid);
+    const decision = {};
+    const acc = am.getActiveAccount(null, model, advisorModel, sid, decision);
     if (acc) {
       am.recordSession(sid, acc.index, model, advisorModel);
-      am.confirmRouted(sid, acc.index, model, advisorModel);
+      am.confirmRouted(sid, acc.index, model, advisorModel, decision);
     }
     return acc;
   } finally {
@@ -763,6 +764,73 @@ test('a current-account rollover survives a retry that lands back on it', () => 
   assert.equal(am.getActiveAccount(new Set([1]), OPUS).name, 'a'); // 'b' threw
   am.confirmRouted(null, 0);
   assert.equal(am.getActiveAccount(null, OPUS).name, 'b');
+});
+
+// `_currentSeen` belongs to the sticky current-account walk. Everything else
+// that routes a request — a session's pin, a /tc-acct/ pin, the keep-warm
+// scheduler — never consults `currentIndex`, so confirming one of those must
+// not consume an event that walk is still owed.
+test('a request that never consulted the current account does not settle its rollover', () => {
+  const am = manager([
+    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'b', used: 0.1, resetH: 60 },
+  ]);
+  am.currentIndex = 0;
+  const seen = {};
+  assert.equal(am.getActiveAccount(null, OPUS, null, null, seen).name, 'a'); // baseline seeded
+  assert.equal(seen.viaCurrent, true);
+  rollWeekly(am, 0);
+  // An advisor-carrying request observes the rollover but cannot act on it, so
+  // the event is owed when the next requests arrive.
+  assert.equal(am.getActiveAccount(null, OPUS, FABLE).name, 'a');
+
+  // A /tc-acct/ pin: the server forces the account and never calls selection.
+  am.recordSession('pinned-sess', 1, OPUS);
+  am.confirmRouted('pinned-sess', 1, OPUS);
+  // A distributed session's request: routed by its own pin, not by currentIndex.
+  const sessionDecision = {};
+  const acc = am.getActiveAccount(null, OPUS, null, 's1', sessionDecision);
+  assert.equal(sessionDecision.viaCurrent, undefined, 'the session path claimed the current-account walk');
+  am.recordSession('s1', acc.index, OPUS, null, sessionDecision);
+  am.confirmRouted('s1', acc.index, OPUS, null, sessionDecision);
+
+  assert.equal(am.getActiveAccount(null, OPUS).name, 'b',
+    'an unrelated request swallowed the current account\'s rollover');
+});
+
+test('a request routed by the current-account walk does settle its rollover', () => {
+  const am = manager([
+    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'b', used: 0.1, resetH: 60 },
+  ], { distribute: false });
+  am.currentIndex = 0;
+  assert.equal(am.getActiveAccount(null, OPUS).name, 'a');
+  rollWeekly(am, 0);
+  const decision = {};
+  assert.equal(am.getActiveAccount(null, OPUS, null, null, decision).name, 'b');
+  am.confirmRouted(null, 1, OPUS, null, decision);
+  // Settled: 'a' is an ordinary candidate again rather than one the walk is
+  // still owed a move off.
+  am.accounts[1].disabled = true;
+  assert.equal(am.getActiveAccount(null, OPUS).name, 'a');
+  am.accounts[1].disabled = false;
+  assert.equal(am.getActiveAccount(null, OPUS).name, 'a');
+});
+
+// Every writer of `currentIndex` has to leave a baseline behind, or the first
+// pass that consults it after a quiet stretch first-sights the window instead
+// of comparing against it — and a rollover in between is gone for a week.
+test('the account chosen at launch is a rollover baseline, not a first sight', () => {
+  const am = manager([
+    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'b', used: 0.1, resetH: 60 },
+  ]);
+  assert.equal(am.selectActiveAccount().name, 'a');
+  // Every request in between is session-routed, so nothing consults currentIndex.
+  for (let i = 0; i < 5; i++) route(am, `s${i}`);
+  rollWeekly(am, 0);
+  assert.equal(am.getActiveAccount(null, OPUS).name, 'b',
+    'the launch-time account had no baseline, so its rollover read as first sight');
 });
 
 test('the current-account baseline covers every bucket, not only the one first served', () => {
