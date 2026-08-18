@@ -5,9 +5,9 @@ import { AccountManager } from '../src/account-manager.js';
 import { createProxyServer } from '../src/server.js';
 
 // POST /teamclaude/switch is the headless equivalent of picking an account with
-// 's' in the TUI: both only move the manager's currentIndex. The TUI is not
-// reachable when the proxy runs as a background service, which is what this
-// endpoint exists for. currentIndex is a weak preference — selection drops it
+// 's' in the TUI: both go through the manager's one currentIndex writer. The
+// TUI is not reachable when the proxy runs as a background service, which is
+// what this endpoint exists for. currentIndex is a weak preference — selection drops it
 // when the account is unavailable and also when an available account has a
 // lower priority value — so "recorded" and "in effect" are tested separately.
 
@@ -273,4 +273,37 @@ test('a remote client with the proxy key can switch', async () => {
     assert.equal(res.status, 200);
     assert.equal(am.currentIndex, 1);
   });
+});
+
+// A manual switch establishes an account, which is the same act rotation
+// performs — so it carries the same rollover baseline. Without one the account
+// an operator parked the fleet on first-sights its own window, and the roll
+// that should have moved the fleet off it is invisible for the rest of the week.
+test('the switch endpoint establishes its account as a rollover baseline', async () => {
+  const H = 3600_000;
+  const now = Date.now();
+  const am = new AccountManager([
+    { name: 'a@example.com', type: 'apikey', apiKey: 'k1' },
+    { name: 'b@example.com', type: 'apikey', apiKey: 'k2' },
+    { name: 'c@example.com', type: 'apikey', apiKey: 'k3' },
+  ], 0.98, { expiryRouting: { enabled: true } });
+  const weekly = [[0.2, 50], [0.5, 60], [0.1, 70]];
+  am.accounts.forEach((acct, i) => {
+    acct.quota.unified7d = weekly[i][0];
+    acct.quota.unified7dReset = now + weekly[i][1] * H;
+    acct.probing = false;
+  });
+  const proxy = createProxyServer(am, CONFIG, {});
+  const port = await listen(proxy);
+  try {
+    assert.equal((await post(port, JSON.stringify({ account: 'b@example.com' }))).status, 200);
+    assert.equal(am.currentIndex, 1);
+    am.accounts[1].quota.unified7d = 0;
+    am.accounts[1].quota.unified7dReset += 168 * H; // 'b' rolls over a week out
+    assert.notEqual(am.getActiveAccount(null, 'claude-opus-5').name, 'b@example.com',
+      'the account the switch established first-sighted its own window, so its roll never fired');
+    assert.equal(am.getStatus().expiryRouting.stats.rolloversDetected, 1);
+  } finally {
+    proxy.close();
+  }
 });

@@ -6,6 +6,7 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { SESSION_MAX } from '../src/session-tracker.js';
 
 // The config → AccountManager wiring for expiryRouting is one argument in one
 // constructor call plus one line in the reload path. Deleting either left the
@@ -24,7 +25,7 @@ function freePort() {
   });
 }
 
-function configFor(port, expiryRouting) {
+function configFor(port, expiryRouting, extra = {}) {
   return {
     proxy: { port, host: '127.0.0.1', apiKey: 'tc-test' },
     upstream: 'https://api.anthropic.com',
@@ -32,6 +33,7 @@ function configFor(port, expiryRouting) {
     autoUpdate: false,
     accounts: [{ name: 'a', type: 'apikey', apiKey: 'k1' }],
     ...(expiryRouting ? { expiryRouting } : {}),
+    ...extra,
   };
 }
 
@@ -45,11 +47,11 @@ async function status(port) {
 
 // Start the daemon headless against a throwaway config and hand the test its
 // port plus the config path, so it can rewrite the file and reload.
-async function withServer(expiryRouting, fn) {
+async function withServer(expiryRouting, fn, extra = {}) {
   const port = await freePort();
   const dir = await mkdtemp(join(tmpdir(), 'teamclaude-expiry-'));
   const configPath = join(dir, 'config.json');
-  await writeFile(configPath, JSON.stringify(configFor(port, expiryRouting)));
+  await writeFile(configPath, JSON.stringify(configFor(port, expiryRouting, extra)));
 
   const child = spawn(process.execPath, [cliPath, 'server', '--headless'], {
     env: { ...process.env, TEAMCLAUDE_CONFIG: configPath, TEAMCLAUDE_DISABLE_AUTOUPDATE: '1' },
@@ -104,9 +106,30 @@ test('the session view reaches the wire with its cap and pin breakdown', async (
     assert.equal(s.sessions.known, 0);
     assert.equal(s.sessions.active, 0);
     assert.equal(s.sessions.evicted, 0);
-    assert.ok(s.sessions.max > 0, 'the session cap is not reported, so cap pressure cannot be read');
+    // The cap the tracker is actually holding, not merely "some positive
+    // number": an evicted count is only readable against the bound that
+    // produced it, and any constant satisfies a `> 0` test — including one that
+    // stopped tracking the bound it claims to report.
+    assert.equal(s.sessions.max, SESSION_MAX, 'the reported cap is not the one the tracker holds');
     assert.deepEqual(s.sessions.perAccount, {});
     assert.deepEqual(s.sessions.perBucket, {});
+    // The rest of the routing view an operator reads a decision off. Each of
+    // these was satisfied by a hardcoded constant.
+    assert.equal(s.sessions.distribute, false, 'the distribution flag is reported, not read');
+    assert.equal(s.switchThreshold, 0.9, 'the switch threshold is reported, not read');
+    assert.equal(s.currentAccount, 'b');
+    assert.deepEqual(s.accounts.map(a => [a.name, a.priority, a.disabled]),
+      [['a', 0, true], ['b', 3, false]],
+      'the account view reports constants rather than what each account is set to');
+  }, {
+    // Every value asserted above is set away from its default here, so a
+    // reporter that publishes the default instead of the setting is visible.
+    switchThreshold: 0.9,
+    distributeSessions: false,
+    accounts: [
+      { name: 'a', type: 'apikey', apiKey: 'k1', disabled: true },
+      { name: 'b', type: 'apikey', apiKey: 'k2', priority: 3 },
+    ],
   });
 });
 

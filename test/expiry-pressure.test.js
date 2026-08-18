@@ -1405,3 +1405,224 @@ test('flag off matches an absent config step for step', () => {
     assert.equal(step(absent).name, step(disabled).name, `step ${i} diverged`);
   });
 });
+
+// ---------------------------------------------------------------------------
+// One validating writer for currentIndex. Establishing an account and recording
+// what its windows looked like at that moment are ONE act: an account
+// established without a baseline first-sights its own window, so the roll that
+// should have moved the fleet off it is invisible and it keeps the traffic for
+// the rest of the week.
+// ---------------------------------------------------------------------------
+
+test('a manual switch establishes its account as a baseline, not a first sight', () => {
+  const am = manager([
+    { name: 'a', used: 0.2, resetH: 50 },
+    { name: 'b', used: 0.5, resetH: 60 },
+    { name: 'c', used: 0.1, resetH: 70 },
+  ], { distribute: false });
+  assert.equal(am.setCurrentAccount(1), true);
+  rollWeekly(am, 1);
+  const acc = am.getActiveAccount(null, OPUS);
+  assert.notEqual(acc.name, 'b',
+    'the account an operator switched to first-sighted its own window, so its roll never fired');
+  assert.equal(rolloverStats(am).rolloversDetected, 1);
+});
+
+test('a switch to an index that names no account changes nothing', () => {
+  const am = manager([{ name: 'a', used: 0.2, resetH: 50 }], { distribute: false });
+  assert.equal(am.setCurrentAccount(7), false);
+  assert.equal(am.currentIndex, 0);
+});
+
+test('removing the current account establishes its replacement with a baseline', () => {
+  const am = manager([
+    { name: 'doomed', used: 0.2, resetH: 50 },
+    { name: 'b', used: 0.5, resetH: 60 },
+    { name: 'c', used: 0.1, resetH: 70 },
+  ], { distribute: false });
+  am.setCurrentAccount(0);
+  am.removeAccount(0);            // 'b' takes the slot and is now current
+  assert.equal(am.accounts[am.currentIndex].name, 'b');
+  rollWeekly(am, 0);
+  assert.notEqual(am.getActiveAccount(null, OPUS).name, 'b',
+    'the account a removal made current first-sighted its own window');
+  assert.equal(rolloverStats(am).rolloversDetected, 1);
+});
+
+// A record already past selection goes on naming its account by index. After a
+// removal every survivor's index means someone else's slot, so a late call from
+// that request lands on a neighbour: its concurrency slot, its quota.
+test('a removed account\'s late calls stop naming its neighbour', () => {
+  const am = manager([
+    { name: 'doomed', used: 0.2, resetH: 50 },
+    { name: 'b', used: 0.5, resetH: 60 },
+  ], { distribute: false });
+  const doomed = am.accounts[0];
+  am.accounts[1].inFlight = 3;
+  am.removeAccount(0);                 // 'b' slides into index 0
+  am.release(doomed.index);            // the in-flight request finishes
+  assert.equal(am.accounts[0].inFlight, 3,
+    "a removed account's release decremented its neighbour's concurrency");
+  am.updateQuota(doomed.index, { 'anthropic-ratelimit-unified-5h-utilization': '0.99' });
+  assert.equal(am.accounts[0].quota.unified5h, null,
+    "a removed account's response wrote its quota onto its neighbour");
+});
+
+// ---------------------------------------------------------------------------
+// A counter names exactly one event, counted once, at that event.
+// ---------------------------------------------------------------------------
+
+// Selection ASKS for a move; the move is a fact only once a response the client
+// got came off the rolled account. Counted where it is asked for, a preemption
+// that failed back is counted anyway — and the gauge reports more moves than
+// there were rollovers to move.
+test('a preemption that failed back onto the rolled account is not counted as a move', () => {
+  const am = manager([
+    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'b', used: 0.1, resetH: 60 },
+  ]);
+  assert.equal(route(am, 's1').name, 'a');
+  rollWeekly(am, 0);
+  // The attempt is preempted onto 'b' and then fails back onto 'a', which is the
+  // response the client gets — exactly what confirmRouted is told.
+  am.beginSession('s1');
+  const decision = {};
+  const preempted = am.getActiveAccount(null, OPUS, null, 's1', decision);
+  assert.equal(preempted.name, 'b', 'the rollover never preempted, so this proves nothing');
+  am.recordSession('s1', 0, OPUS, null, decision);
+  am.confirmRouted('s1', 0, OPUS, null, decision);
+  am.endSession('s1');
+  assert.deepEqual(rolloverStats(am),
+    { rolloversDetected: 1, rolloversPreempted: 0, rolloversOwed: 1 },
+    'a re-route that came back to the rolled account was banked as a preemption');
+});
+
+test('preemptions never outrun the rollovers there were to preempt', () => {
+  const am = manager([
+    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'b', used: 0.1, resetH: 60 },
+  ]);
+  route(am, 's1');
+  rollWeekly(am, 0);
+  for (let i = 0; i < 8; i++) route(am, 's1');
+  const s = rolloverStats(am);
+  assert.ok(s.rolloversPreempted <= s.rolloversDetected,
+    `${s.rolloversPreempted} moves reported for ${s.rolloversDetected} rollovers`);
+  assert.deepEqual(s, { rolloversDetected: 1, rolloversPreempted: 1, rolloversOwed: 0 });
+});
+
+// `owed` is the silent-failure signal: a rollover that fired and never
+// resolved. A session with a request still in flight has not yet reached the
+// point where settlement is safe, but the move it is waiting on has already
+// happened — reporting that as owed puts the alarm above zero for the whole of
+// every request a session makes after a rollover.
+test('a rollover a request already moved is not owed while its session is busy', () => {
+  const am = manager([
+    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'b', used: 0.1, resetH: 60 },
+  ]);
+  assert.equal(route(am, 's1').name, 'a');
+  rollWeekly(am, 0);
+  // A long request: the preemption has been served off 'a', but the session is
+  // still in flight, so nothing has settled yet.
+  am.beginSession('s1');
+  const decision = {};
+  const acc = am.getActiveAccount(null, OPUS, null, 's1', decision);
+  assert.equal(acc.name, 'b');
+  am.recordSession('s1', acc.index, OPUS, null, decision);
+  am.confirmRouted('s1', acc.index, OPUS, null, decision);
+  assert.equal(rolloverStats(am).rolloversOwed, 0,
+    'a rollover a request already moved reads as the silent failure it is not');
+  am.endSession('s1');
+  assert.deepEqual(rolloverStats(am),
+    { rolloversDetected: 1, rolloversPreempted: 1, rolloversOwed: 0 });
+});
+
+// getActiveAccount runs the selection walk twice for an advisor request, and a
+// manual pin returns before the walk is reached. The out-parameter says what
+// THIS pass did, so a pass that came up empty must not leave its answer behind.
+test('viaCurrent answers for the pass that produced the account', () => {
+  const am = manager([
+    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'b', used: 0.1, resetH: 60 },
+  ], { distribute: false });
+  am.setCurrentAccount(0);
+  am.setRoutePin('fable', 1);
+  const decision = {};
+  const acc = am.getActiveAccount(null, FABLE, null, null, decision);
+  assert.equal(acc.name, 'b', 'the pin did not win, so this proves nothing');
+  assert.equal(decision.viaCurrent, false,
+    'a request served by a manual pin claims to have come from the current-account walk');
+});
+
+test('a manual pin does not settle the current account\'s rollover', () => {
+  const am = manager([
+    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'b', used: 0.1, resetH: 60 },
+  ], { distribute: false });
+  am.setCurrentAccount(0);
+  am.accounts[1].disabled = true;
+  rollWeekly(am, 0);
+  assert.equal(am.getActiveAccount(null, OPUS).name, 'a'); // detected, nowhere to go
+  am.accounts[1].disabled = false;
+  // Now a pinned request is served by 'b'. It never consulted currentIndex, so
+  // it moved nothing the current-account walk asked for.
+  am.setRoutePin('fable', 1);
+  const decision = {};
+  const acc = am.getActiveAccount(null, FABLE, null, null, decision);
+  assert.equal(acc.name, 'b');
+  am.confirmRouted(null, acc.index, FABLE, null, decision);
+  assert.equal(rolloverStats(am).rolloversOwed, 1,
+    'a pinned request settled an event the current-account walk never acted on');
+  assert.equal(rolloverStats(am).rolloversPreempted, 0);
+});
+
+// The advisor-constrained pass and the plain pass are two runs of the same walk
+// against one decision object. A pass that came up empty must not leave its
+// answer for the pass that produced the account.
+test('a pass that came up empty leaves no viaCurrent behind for the next one', () => {
+  const SONNET = 'claude-sonnet-4-6';
+  const am = manager([
+    { name: 'a', used: 0.2, resetH: 50, fableUsed: 0.1, fableResetH: 50 },
+    { name: 'b', used: 0.2, resetH: 60, fableUsed: 0.1, fableResetH: 60 },
+  ], { distribute: false });
+  // Nothing can serve the Sonnet advisor, so the advisor-constrained pass walks
+  // past the pin, sets viaCurrent, and comes up empty.
+  for (const acct of am.accounts) acct.quota.unified7dSonnet = 0.99;
+  am.setRoutePin('fable', 1);
+  const decision = {};
+  const acc = am.getActiveAccount(null, FABLE, SONNET, null, decision);
+  assert.equal(acc.name, 'b', 'the degraded pass did not fall back to the pin, so this proves nothing');
+  assert.equal(decision.advisorServed, false, 'the degrade was not recorded');
+  assert.equal(decision.viaCurrent, false,
+    'the empty advisor pass left its answer behind, so a pinned request claims the current-account walk');
+});
+
+// preempt is the sub-flag that turns rollover preemption off while leaving the
+// pressure band on. It gates both sticky choices, not just the session pin.
+test('preempt off leaves the current-account walk parked through a rollover', () => {
+  const am = manager([
+    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'b', used: 0.1, resetH: 60 },
+  ], { er: { enabled: true, preempt: false }, distribute: false });
+  am.setCurrentAccount(0);
+  assert.equal(am.getActiveAccount(null, OPUS).name, 'a');
+  rollWeekly(am, 0);
+  assert.equal(am.getActiveAccount(null, OPUS).name, 'a',
+    'the current account was preempted with preempt off');
+  assert.deepEqual(rolloverStats(am), noRollovers());
+});
+
+// A session's stickiness must not outrank the operator's explicit priority
+// order — the one thing that is not a heuristic.
+test('a higher-priority account still preempts a session pin', () => {
+  const am = manager([
+    { name: 'fallback', used: 0.1, resetH: 50, extra: { priority: 5 } },
+    { name: 'preferred', used: 0.1, resetH: 60, extra: { priority: 0 } },
+  ]);
+  am.accounts[1].disabled = true;
+  assert.equal(route(am, 's1').name, 'fallback'); // pinned while nothing better exists
+  am.accounts[1].disabled = false;
+  assert.equal(route(am, 's1').name, 'preferred',
+    'the session pin outranked the operator\'s priority order');
+});

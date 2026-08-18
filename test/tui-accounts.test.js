@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { TUI } from '../src/tui.js';
+import { AccountManager } from '../src/account-manager.js';
 
 // TUI account management (settings screen) + the on-demand quota probe (`p`).
 // Same approach as tui-routes.test.js: a minimal AccountManager stand-in and a
@@ -212,4 +213,43 @@ test('re-importing the same account+org still updates in place', async () => {
   assert.equal(config.accounts.length, 1);
   assert.equal(calls.added.length, 0);
   assert.equal(am.accounts[0].credential, 'fresh');
+});
+
+// Picking an account with 's' is the same act as POST /teamclaude/switch, and
+// both have to go through the manager's one currentIndex writer — establishing
+// the account and recording what its windows looked like are one thing. Driven
+// against a REAL AccountManager: a stand-in that reimplements the write is the
+// thing under test reimplemented by its own test.
+test('picking an account in the TUI establishes it as a rollover baseline', () => {
+  const H = 3600_000;
+  const now = Date.now();
+  const am = new AccountManager([
+    { name: 'a', type: 'apikey', apiKey: 'k1' },
+    { name: 'b', type: 'apikey', apiKey: 'k2' },
+    { name: 'c', type: 'apikey', apiKey: 'k3' },
+  ], 0.98, { expiryRouting: { enabled: true } });
+  const weekly = [[0.2, 50], [0.5, 60], [0.1, 70]];
+  am.accounts.forEach((acct, i) => {
+    acct.quota.unified7d = weekly[i][0];
+    acct.quota.unified7dReset = now + weekly[i][1] * H;
+    acct.probing = false;
+  });
+  const tui = new TUI({
+    accountManager: am,
+    config: { proxy: { port: 1 }, accounts: am.accounts.map(a => ({ name: a.name, type: a.type })), routes: [] },
+    sx: null, saveConfig: async () => {}, syncAccounts: async () => 0, onQuit: () => {}, probeQuota: () => {},
+  });
+  tui.render = () => {};
+
+  tui._key('s');
+  assert.equal(tui.mode, 'select', 'the switch picker did not open');
+  tui._key('down');
+  tui._key('enter');
+  assert.equal(am.currentIndex, 1, 'the pick did not move the current account');
+
+  am.accounts[1].quota.unified7d = 0;
+  am.accounts[1].quota.unified7dReset += 168 * H;
+  assert.notEqual(am.getActiveAccount(null, 'claude-opus-5').name, 'b',
+    'the account the TUI switched to first-sighted its own window, so its roll never fired');
+  assert.equal(am.getStatus().expiryRouting.stats.rolloversDetected, 1);
 });
