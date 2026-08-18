@@ -423,14 +423,23 @@ export function createProxyRequestListener({ accountManager, upstream, logDir = 
       // The token runs to the next '/', which also begins the real request path.
       const tokenEnd = afterPrefix == null ? -1 : afterPrefix.indexOf('/');
       if (tokenEnd > 0) {
-        const token = decodeURIComponent(afterPrefix.slice(0, tokenEnd));
-        pinnedIndex = resolveAccountPin(accountManager, token);
+        // This segment comes off the request line, so its escaping is the
+        // client's and a malformed one ("/tc-acct/%/…") makes decodeURIComponent
+        // throw. That is an ordinary bad request, not an internal error: decode
+        // defensively and let it fall through to the unknown-pin 404 below,
+        // which is what a pin nobody can resolve means either way. Undecodable
+        // is reported as it arrived, since there is no decoded form to name.
+        const raw = afterPrefix.slice(0, tokenEnd);
+        let token = null;
+        try { token = decodeURIComponent(raw); } catch { token = null; }
+        pinnedIndex = token == null ? null : resolveAccountPin(accountManager, token);
         if (pinnedIndex == null) {
+          const shown = token ?? raw;
           const reqId = ++counter;
           const sessionId = req.headers['x-claude-code-session-id'] || null;
-          if (!hideActivity) hooks.onRequestEnd?.(reqId, { method: req.method, path: req.url, account: `(unknown pin: "${token}")`, status: 404, model: null, sessionId, pinned: false });
+          if (!hideActivity) hooks.onRequestEnd?.(reqId, { method: req.method, path: req.url, account: `(unknown pin: "${shown}")`, status: 404, model: null, sessionId, pinned: false });
           res.writeHead(404, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ type: 'error', error: { type: 'not_found_error', message: `Unknown account pin "${token}"` } }));
+          res.end(JSON.stringify({ type: 'error', error: { type: 'not_found_error', message: `Unknown account pin "${shown}"` } }));
           return;
         }
         req.url = afterPrefix.slice(tokenEnd);
@@ -517,6 +526,17 @@ export function createProxyRequestListener({ accountManager, upstream, logDir = 
       }
     } catch (err) {
       console.error('[TeamClaude] Unhandled error:', err);
+      // ANSWER THE SOCKET. Everything above the inner try — the egress hold, the
+      // pin parsing, buffering the body, the activity hooks — runs outside the
+      // 502 that guards forwardRequest, and a throw up there used to reach here,
+      // log, and return. The client is then waiting on a request nobody will
+      // ever answer: not an error it can act on, a hang, and Claude Code's own
+      // timeout is long. A malformed percent-escape in a `/tc-acct/` pin reached
+      // this from an ordinary request line.
+      if (!res.headersSent && !res.destroyed) {
+        res.writeHead(502, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ type: 'error', error: { type: 'proxy_error', message: 'Internal proxy error' } }));
+      }
     }
   };
 }

@@ -526,9 +526,10 @@ export class AccountManager {
     // The pin is per governing bucket, and this request is bound by the
     // EXECUTOR's: one request goes to one account, so the executor's affinity is
     // what binds it and the advisor's model is a constraint on that choice
-    // (_isAvailable, below), not a second key. Keyed by _weeklyBucketFor rather
-    // than _windowKeyFor because the lookup happens before an account is chosen,
-    // so it cannot depend on what any particular account reports.
+    // (_isAvailable, below), not a second key. Keyed by _weeklyBucketFor — the
+    // request's own bucket — rather than by the window _governingBucket resolves
+    // it to, because the lookup happens before an account is chosen and so
+    // cannot depend on what any particular account reports.
     const pinIdx = this.sessionTracker.pinnedAccount(sessionId, this._weeklyBucketFor(model));
     if (pinIdx != null) {
       const pinned = this.accounts[pinIdx];
@@ -1186,8 +1187,8 @@ export class AccountManager {
 
   /** Every bucket a request could be governed by here: the model families' own
    * weekly buckets and the shared one, plus whatever a configured route's
-   * `bucket` override names — an override can make _windowKeyFor return a key
-   * the family table never mentions. */
+   * `bucket` override names — an override can make _weeklyBucketFor return a
+   * bucket the family table never mentions. */
   _windowKeys() {
     const keys = new Set(WEEKLY_BUCKET_KEYS);
     for (const route of this.routes) if (route.bucket) keys.add(route.bucket);
