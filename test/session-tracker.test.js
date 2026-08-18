@@ -352,22 +352,23 @@ test('the pin view excludes sessions the sweep has not reached yet', () => {
   const st = new SessionTracker({ now });
   st.touch('s1', 1, [SHARED], clock.t);
   clock.t += SESSION_KNOWN_TTL_MS + 1;
-  assert.deepEqual(st.stats(clock.t).perBucket, {},
-    'a forgotten session is still shown holding its pin');
-  assert.equal(st.stats(clock.t).known, 0);
+  // ONE snapshot: the call is what drops the expired record, so asking twice
+  // reads the second answer off a map the first call already cleaned.
+  const s = st.stats(clock.t);
+  assert.deepEqual(s.perBucket, {}, 'a forgotten session is still shown holding its pin');
+  assert.equal(s.known, 0, 'the known count is the raw map size rather than what is still live');
 });
 
-// The hold is what keeps a multi-minute completion counted; the record has to
-// be recent for that, or the very next read expires it out from under the
-// request it belongs to.
-test('taking the in-flight hold refreshes the session\'s recency', () => {
+// Releasing the hold is the moment a long stream's session was last busy.
+// Without that refresh a five-minute completion drops out of the active window
+// the instant it finishes, and the account serving it reads as idle.
+test('releasing the in-flight hold refreshes the session\'s recency', () => {
   const { clock, now } = fixedClock();
   const st = new SessionTracker({ now });
-  st.touch('s1', 1, [SHARED], clock.t);
-  clock.t += SESSION_ACTIVE_TTL_MS + 1;
   st.beginRequest('s1', clock.t);
-  st.endRequest('s1', clock.t);           // the request ends immediately
-  assert.equal(st.stats(clock.t).active, 1, 'a session that just made a request reads as idle');
+  clock.t += SESSION_ACTIVE_TTL_MS + 1;   // a long completion
+  st.endRequest('s1', clock.t);
+  assert.equal(st.stats(clock.t).active, 1, 'a session that just finished a request reads as idle');
 });
 
 test('a request with no routing decision leaves the pins it did not spend alone', () => {

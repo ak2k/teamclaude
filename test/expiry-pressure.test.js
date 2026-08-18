@@ -1626,3 +1626,29 @@ test('a higher-priority account still preempts a session pin', () => {
   assert.equal(route(am, 's1').name, 'preferred',
     'the session pin outranked the operator\'s priority order');
 });
+
+// The same counter rule on the other sticky choice. The current-account walk
+// re-ranks and can hand back the very account the rollover asked to move off,
+// and an attempt it did move can still fail back — neither is a move.
+test('the current-account walk counts a preemption only once it stuck', () => {
+  const am = manager([
+    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'b', used: 0.1, resetH: 60 },
+  ], { distribute: false });
+  am.setCurrentAccount(0);
+  assert.equal(am.getActiveAccount(null, OPUS).name, 'a');
+  rollWeekly(am, 0);
+  // Re-ranked onto 'b', but the response the client got came off 'a'.
+  const decision = {};
+  assert.equal(am.getActiveAccount(null, OPUS, null, null, decision).name, 'b');
+  am.confirmRouted(null, 0, OPUS, null, decision);
+  assert.deepEqual(rolloverStats(am),
+    { rolloversDetected: 1, rolloversPreempted: 0, rolloversOwed: 1 },
+    'a re-rank the client never landed on was banked as a preemption');
+  // Now one that sticks.
+  const second = {};
+  assert.equal(am.getActiveAccount(null, OPUS, null, null, second).name, 'b');
+  am.confirmRouted(null, 1, OPUS, null, second);
+  assert.deepEqual(rolloverStats(am),
+    { rolloversDetected: 1, rolloversPreempted: 1, rolloversOwed: 0 });
+});
