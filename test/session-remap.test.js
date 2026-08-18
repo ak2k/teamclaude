@@ -116,3 +116,24 @@ test('a surviving pin keeps the rollover baseline the removal renumbered', () =>
   q.unified7dReset += 168 * H;
   assert.equal(am.getActiveAccount(null, OPUS_MODEL, null, 's1').name, 'a');
 });
+
+// A removed account's own `index` is -1, so that late calls from a request
+// already past selection no-op instead of landing on its neighbour. A
+// recordSession arriving after the removal hands that -1 to the tracker, where
+// it is a pin naming no position at all.
+test('a pin for an account that no longer exists is not recorded', () => {
+  const am = new AccountManager([oauth('doomed'), oauth('b')], 0.98,
+    { distributeSessions: true });
+  const doomed = am.accounts[0];   // what a request past selection is holding
+  am.removeAccount(0);
+  assert.equal(doomed.index, -1, 'the removed account kept a usable index, so this proves nothing');
+
+  am.recordSession('s1', doomed.index, OPUS_MODEL);
+  assert.equal(am.sessionTracker.pinnedAccount('s1', SHARED), null,
+    'a session was pinned to a position no account occupies');
+  const s = am.getStatus().sessions;
+  assert.deepEqual(s.perBucket, {}, 'the status payload shows a pin on a nonexistent account');
+  assert.deepEqual(s.perAccount, {}, 'the load metric counts a session on a nonexistent account');
+  // Still routes: the session simply has no pin and picks up a live account.
+  assert.equal(am.getActiveAccount(null, OPUS_MODEL, null, 's1').name, 'b');
+});

@@ -78,7 +78,14 @@ export class SessionTracker {
     const s = this._ensure(sessionId, now);
     s.lastSeen = now;
     s.count += 1;
-    if (accountIndex != null && buckets) {
+    // A pin is a position in the account list, so a negative one names nothing.
+    // AccountManager marks a removed account's own index -1 to make late calls
+    // from an in-flight request no-ops, and a request that was past selection
+    // when the removal landed hands that -1 straight here. Routing shrugs it off
+    // (the next lookup misses and the session re-routes), but the count reaches
+    // the status payload as a `"-1"` key in both perBucket and perAccount, which
+    // is a live account nobody can find.
+    if (accountIndex != null && accountIndex >= 0 && buckets) {
       for (const bucket of buckets) s.pins.set(bucket, { idx: accountIndex, at: now });
     }
     if (now - this._lastSweep > SWEEP_INTERVAL_MS) this.sweep(now);

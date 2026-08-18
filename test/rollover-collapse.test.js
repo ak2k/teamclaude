@@ -150,7 +150,7 @@ test('a bucket the account does not meter is stored under its own name', () => {
   for (const bucket of [SHARED, FABLE_BUCKET, SONNET_BUCKET]) {
     assert.equal(seeded.get(bucket)?.has(0), true,
       `${bucket} has no baseline of its own, so it shares another bucket's`);
-    assert.equal(seeded.get(bucket).get(0).window, SHARED,
+    assert.deepEqual([...seeded.get(bucket).get(0).keys()], [SHARED],
       `${bucket} did not resolve to the shared window, so this fleet does not collapse`);
   }
 });
@@ -297,4 +297,149 @@ test('a collapsed bucket settling does not swallow the shared bucket\'s roll on 
   assert.equal(walk(OPUS).name, 'b',
     "the shared bucket inherited the Fable bucket's banked baseline, so its own roll never fired");
   assert.equal(rolloverStats(am).rolloversDetected, 2, 'one of the two buckets never reported its roll');
+});
+
+// ── the fleet shape every other rollover fixture here cannot reach ────────
+// The fixtures above deliberately meter NO family bucket, so no bucket's window
+// name ever changes and the whole family-window path is unexercised. That gap
+// let a permanent P1 through 723 passing tests: on an account that DOES meter
+// `unified7dFable`, a rollover of that window was never detected at all.
+//
+// The mechanism is why a fixture has to drive the whole transition rather than
+// jump to the end state. A family roll is TWO window flips, because
+// _clearExpiredQuotas nulls the utilization and the reset together at the reset
+// instant and the utilization is what _windowForBucket decides on:
+//
+//   1. metered      -> bucket resolves to `unified7dFable`
+//   2. reset passes -> both nulled -> bucket collapses onto `unified7d`
+//   3. new window   -> bucket resolves to `unified7dFable` again
+//
+// A fixture that only sets up (1) and then jumps to (3) misses step 2, which is
+// the step that used to destroy the pre-roll baseline.
+
+// A fleet that METERS its family bucket, from { used, resetH, fableUsed,
+// fableResetH }, with the premise asserted rather than assumed.
+function meteringManager(specs, { distribute = true } = {}) {
+  const am = new AccountManager(specs.map(s => oauth(s.name)), 0.98,
+    { distributeSessions: distribute, expiryRouting: { enabled: true } });
+  const now = Date.now();
+  specs.forEach((s, i) => {
+    const q = am.accounts[i].quota;
+    q.unified7d = s.used;
+    q.unified7dReset = now + s.resetH * H;
+    q.unified7dFable = s.fableUsed;
+    q.unified7dFableReset = now + s.fableResetH * H;
+    am.accounts[i].probing = false;
+  });
+  for (const account of am.accounts) {
+    assert.equal(am._governingBucket(account, FABLE), FABLE_BUCKET,
+      `"${account.name}" does not meter its Fable bucket, so this fleet cannot reach the family-window path`);
+  }
+  return am;
+}
+
+// Step 2: `idx`'s Fable window reaches its reset, and the request path clears
+// it — which nulls the UTILIZATION, and the utilization is what decides the
+// window. Returns the reset that just lapsed.
+function expireFableWindow(am, idx) {
+  const q = am.accounts[idx].quota;
+  const wasReset = q.unified7dFableReset;
+  q.unified7dFableReset = Date.now() - 1;
+  am.refreshExpiredQuotas();                     // what every request does first
+  assert.equal(q.unified7dFable, null, 'the expired family utilization was not cleared');
+  assert.equal(am._governingBucket(am.accounts[idx], FABLE), 'unified7d',
+    'the bucket did not collapse while its window was gone, so step 2 is untested');
+  return wasReset;
+}
+
+// Step 3: upstream reports the next window, through applyUsageData — the writer
+// the prober and the usage endpoint actually use.
+function reportNewFableWindow(am, idx, resetAt) {
+  am.applyUsageData(idx, { sevenDayFable: { utilization: 0, resetAt } });
+  assert.equal(am._governingBucket(am.accounts[idx], FABLE), FABLE_BUCKET,
+    'the bucket did not return to its own window');
+}
+
+// The whole transition, WITH a request landing in the gap. That request is the
+// point: it is the one that observes the collapsed window, and it is what a
+// fixture jumping straight from step 1 to step 3 never performs. Without it the
+// watcher never sees the intermediate state and a wrong implementation of the
+// baseline slot goes undetected — the exact hole that let this defect ship.
+function rollFableWindowThroughTheGap(am, idx, request) {
+  const wasReset = expireFableWindow(am, idx);
+  request();                                     // traffic keeps arriving meanwhile
+  reportNewFableWindow(am, idx, wasReset + 168 * H);
+}
+
+test('a metered family window rolling over is detected on a session pin', () => {
+  const am = meteringManager([
+    { name: 'a', used: 0.3, resetH: 300, fableUsed: 0.4, fableResetH: 50 },
+    { name: 'b', used: 0.3, resetH: 300, fableUsed: 0.3, fableResetH: 60 },
+  ]);
+  assert.equal(route(am, 's1', FABLE).name, 'a');
+  rollFableWindowThroughTheGap(am, 0, () => route(am, 's1', FABLE));
+  assert.equal(route(am, 's1', FABLE).name, 'b',
+    'the session rode the account whose Fable window just gained a full week');
+  assert.deepEqual(rolloverStats(am), { rolloversDetected: 1, rolloversPreempted: 1, rolloversOwed: 0 });
+});
+
+test('a metered family window rolling over is detected on the current account', () => {
+  const am = meteringManager([
+    { name: 'a', used: 0.3, resetH: 300, fableUsed: 0.4, fableResetH: 50 },
+    { name: 'b', used: 0.3, resetH: 300, fableUsed: 0.3, fableResetH: 60 },
+  ], { distribute: false });
+  am.setCurrentAccount(0);
+  const walk = () => {
+    const decision = {};
+    const acc = am.getActiveAccount(null, FABLE, null, null, decision);
+    am.confirmRouted(null, acc.index, FABLE, null, decision);
+    return acc;
+  };
+  assert.equal(walk().name, 'a');
+  rollFableWindowThroughTheGap(am, 0, walk);
+  assert.equal(walk().name, 'b',
+    'the current-account walk stayed on the account whose Fable window just rolled');
+  assert.deepEqual(rolloverStats(am), { rolloversDetected: 1, rolloversPreempted: 1, rolloversOwed: 0 });
+});
+
+// The shared bucket must not be disturbed by the family bucket's round trip:
+// it never changed window, and its own baseline is a separate slot.
+test('a family window rolling over leaves the shared bucket\'s baseline alone', () => {
+  const am = meteringManager([
+    { name: 'a', used: 0.3, resetH: 300, fableUsed: 0.4, fableResetH: 50 },
+    { name: 'b', used: 0.3, resetH: 300, fableUsed: 0.3, fableResetH: 60 },
+  ]);
+  // One advisor request pins both buckets to one account. Two separate requests
+  // are split by the load tiebreak — the second lands on the OTHER account
+  // because the first made this one the loaded one — and the roll would then
+  // land on a window this session is not pinned to.
+  assert.equal(route(am, 's1', OPUS, FABLE).name, 'a');
+  assert.equal(am.sessionTracker.pinnedAccount('s1', 'unified7d'), 0);
+  assert.equal(am.sessionTracker.pinnedAccount('s1', FABLE_BUCKET), 0);
+  rollFableWindowThroughTheGap(am, 0, () => route(am, 's1', FABLE));
+  assert.equal(route(am, 's1', FABLE).name, 'b');
+  // The shared weekly never moved, so Opus stays put and owes nothing.
+  assert.equal(route(am, 's1', OPUS).name, 'a',
+    "the Fable bucket's round trip moved the shared bucket's traffic");
+  assert.deepEqual(rolloverStats(am), { rolloversDetected: 1, rolloversPreempted: 1, rolloversOwed: 0 });
+});
+
+// The forward flip on its own — an account that starts metering a family bucket
+// it never metered before — is still a first sight, not a jump. This is the
+// property the window-scoped baseline exists to preserve, so a fix for the roll
+// must not buy it by making every window change an event.
+test('an account that starts metering a family bucket does not report a rollover', () => {
+  const am = collapsingManager([
+    { name: 'a', used: 0.3, resetH: 50 },   // the account the Fable band prefers
+    { name: 'b', used: 0.3, resetH: 300 },
+  ]);
+  assert.equal(route(am, 's1', FABLE).name, 'a');
+  // 'a' begins reporting its own Fable window, dated well away from the shared
+  // one it had been collapsing onto.
+  am.applyUsageData(0, { sevenDayFable: { utilization: 0.1, resetAt: Date.now() + 700 * H } });
+  assert.equal(am._governingBucket(am.accounts[0], FABLE), FABLE_BUCKET,
+    'the bucket did not take up its own window, so this proves nothing');
+  assert.equal(route(am, 's1', FABLE).name, 'a',
+    'first sight of a family window was read as that window rolling over');
+  assert.deepEqual(rolloverStats(am), { rolloversDetected: 0, rolloversPreempted: 0, rolloversOwed: 0 });
 });

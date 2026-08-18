@@ -56,6 +56,15 @@ function deletePair(map, bucket, idx) {
   if (!byAccount.size) map.delete(bucket);
 }
 
+// The baseline slot for (bucket, account), created on demand. Its keys are the
+// windows this bucket has resolved to on this account — at most two, since a
+// bucket resolves either to its own window or to the shared weekly.
+function windowSlot(map, bucket, idx) {
+  let byWindow = readPair(map, bucket, idx);
+  if (!byWindow) writePair(map, bucket, idx, byWindow = new Map());
+  return byWindow;
+}
+
 // Renumber the account half of every entry through `mapFn`, dropping the ones
 // whose account went away (and any bucket left holding none).
 function remapPairs(map, mapFn) {
@@ -72,8 +81,10 @@ function remapPairs(map, mapFn) {
 
 export class WindowWatcher {
   constructor() {
-    // request bucket -> account index -> { window, reset }: the reset last seen
-    // for that bucket THERE, and which window it was read from.
+    // request bucket -> account index -> window -> the reset last seen for that
+    // bucket THERE while it resolved to that window. The window is part of the
+    // slot rather than a stamp on one shared entry, because a bucket's window
+    // flips BACK — see seed().
     this.windows = new Map();
     // request bucket -> account index -> { window, reset }: rollovers found but
     // not acted on. Two accounts can owe on one bucket at once — a pin moves
@@ -91,17 +102,28 @@ export class WindowWatcher {
 
   /**
    * Record `resets` — { requestBucket: { window, reset } } — as the baseline for
-   * account `idx`. Seed-only per (bucket, account): overwriting one here would
-   * erase a jump nothing has acted on yet. The exception is a baseline read from
-   * a DIFFERENT window, which is not a baseline for this one at all and is
-   * replaced rather than compared against.
+   * account `idx`. Seed-only per (bucket, account, WINDOW): overwriting one here
+   * would erase a jump nothing has acted on yet.
+   *
+   * The window is part of the slot rather than a stamp on one shared entry,
+   * because a bucket's window does not merely change — it flips BACK, and one
+   * family rollover is two flips in a row. `_clearExpiredQuotas` nulls a family
+   * utilization and its reset together at the reset instant, so the bucket first
+   * collapses onto the shared window (the utilization is what decides it), and
+   * then returns to its own window when upstream reports the new one. A single
+   * slot stamped with its window loses the pre-roll reset to the first flip and
+   * has nothing left to compare on the second, so the roll is never a jump and
+   * the event is swallowed — permanently, every week, in silence. A slot per
+   * window means the flip back finds its OWN last-seen value.
+   *
+   * Bounded at two entries per (bucket, account): _windowForBucket resolves a
+   * bucket either to itself or to `unified7d`, and nothing else.
    */
   seed(idx, resets) {
     for (const [bucket, seen] of Object.entries(resets)) {
       if (!seen || seen.reset == null) continue;
-      const prev = readPair(this.windows, bucket, idx);
-      if (prev && prev.window === seen.window) continue;
-      writePair(this.windows, bucket, idx, { window: seen.window, reset: seen.reset });
+      const byWindow = windowSlot(this.windows, bucket, idx);
+      if (!byWindow.has(seen.window)) byWindow.set(seen.window, seen.reset);
     }
   }
 
@@ -123,14 +145,15 @@ export class WindowWatcher {
     // Still owed from an earlier pass: re-report it rather than re-deriving it
     // from a baseline that a re-pin may since have moved.
     if (this.owedOn(bucket, idx)) return true;
-    const prev = readPair(this.windows, bucket, idx);
-    this.seed(idx, resets);
     const now = resets[bucket] || null;
-    if (!prev || !now || now.reset == null) return false;
-    // Two resets are comparable only within one window. Across a window change
-    // this is a first sight, which seed() has just recorded.
-    if (prev.window !== now.window) return false;
-    if (now.reset - prev.reset <= ROLLOVER_MIN_JUMP_MS) return false;
+    // Two resets are comparable only within one window, so the baseline read is
+    // scoped to the window this bucket resolves to RIGHT NOW. A window it has
+    // never resolved to here has no entry, which is a first sight rather than a
+    // jump; one it resolved to before still holds its own last-seen reset.
+    const prev = now == null ? null : (readPair(this.windows, bucket, idx)?.get(now.window) ?? null);
+    this.seed(idx, resets);
+    if (!now || now.reset == null || prev == null) return false;
+    if (now.reset - prev <= ROLLOVER_MIN_JUMP_MS) return false;
     writePair(this.pending, bucket, idx, { window: now.window, reset: now.reset });
     return true;
   }
@@ -202,7 +225,10 @@ export class WindowWatcher {
       if (acceptedIdx == null) continue;
       for (const [idx, owed] of [...byAccount]) {
         if (acceptedIdx === idx) continue;
-        writePair(this.windows, bucket, idx, { window: owed.window, reset: owed.reset });
+        // Banked against the window the event was DETECTED in, which is the one
+        // whose reset moved. The bucket's other window, if it has one, keeps its
+        // own last-seen value.
+        windowSlot(this.windows, bucket, idx).set(owed.window, owed.reset);
         deletePair(this.pending, bucket, idx);
         moved += 1;
       }
