@@ -10,6 +10,21 @@ function mgr(names, opts = {}) {
   return new AccountManager(names.map((n) => oauth(n)), 0.98, opts);
 }
 
+const H = 3600_000;
+const OPUS = 'claude-opus-5';
+const FABLE = 'claude-fable-5';
+
+// Set an account's shared and Fable weekly buckets: [used, hours-to-reset].
+function weekly(am, index, shared, fable) {
+  const now = Date.now();
+  const q = am.accounts[index].quota;
+  q.unified7d = shared[0];
+  q.unified7dReset = now + shared[1] * H;
+  q.unified7dFable = fable[0];
+  q.unified7dFableReset = now + fable[1] * H;
+  am.accounts[index].probing = false;
+}
+
 test('distribution off: session id does not change quota-driven selection', () => {
   const am = mgr(['a', 'b']); // distributeSessions defaults false
   // Two different sessions both land on the current account (index 0), as before.
@@ -73,6 +88,50 @@ test('distribution on: a pinned session whose account is exhausted re-routes', (
   am.accounts[0].status = 'exhausted'; // 'a' no longer available
   const acc = am.getActiveAccount(null, null, null, 'sess-1');
   assert.equal(acc.name, 'b');
+});
+
+test('distribution on: a Fable diversion does not move the session\'s Opus pin', () => {
+  const am = mgr(['a', 'b'], { distributeSessions: true });
+  // 'a' resets soonest overall, so a new session lands there; its Fable weekly
+  // is spent, so only Fable requests have to be served elsewhere.
+  weekly(am, 0, [0.1, 50], [0.99, 50]);
+  weekly(am, 1, [0.1, 100], [0.1, 100]);
+
+  const opus = am.getActiveAccount(null, OPUS, null, 's1');
+  am.recordSession('s1', opus.index, OPUS);
+  assert.equal(opus.name, 'a');
+
+  const fable = am.getActiveAccount(null, FABLE, null, 's1');
+  am.recordSession('s1', fable.index, FABLE);
+  assert.equal(fable.name, 'b', 'Fable must divert off the spent bucket');
+
+  // 'b' was never evaluated for Opus, and its Opus cache is cold.
+  const again = am.getActiveAccount(null, OPUS, null, 's1');
+  assert.equal(again.name, 'a', 'the Opus pin followed the Fable diversion');
+});
+
+test('distribution on: an advisor request pins both families to the serving account', () => {
+  const am = mgr(['a', 'b'], { distributeSessions: true });
+  weekly(am, 0, [0.1, 50], [0.1, 50]);
+  weekly(am, 1, [0.1, 100], [0.1, 100]);
+
+  // Opus executor, Fable advisor: the advisor sub-inference runs on the same
+  // account, so that account served Fable work too.
+  const acc = am.getActiveAccount(null, OPUS, FABLE, 's1');
+  am.recordSession('s1', acc.index, OPUS, FABLE);
+  assert.equal(acc.name, 'a');
+  // Load 'a' up so plain load-balancing would send a new Fable request to 'b'.
+  am.recordSession('other-1', 0, FABLE);
+  am.recordSession('other-2', 0, FABLE);
+  assert.equal(am.getActiveAccount(null, FABLE, null, 's1').name, 'a');
+});
+
+test('distribution on: a pin is not honored when it cannot serve the advisor', () => {
+  const am = mgr(['a', 'b'], { distributeSessions: true });
+  weekly(am, 0, [0.1, 50], [0.99, 50]); // 'a' cannot serve a Fable advisor
+  weekly(am, 1, [0.1, 100], [0.1, 100]);
+  am.recordSession('s1', 0, OPUS);
+  assert.equal(am.getActiveAccount(null, OPUS, FABLE, 's1').name, 'b');
 });
 
 test('getStatus exposes session counts (known/active/perAccount) and the mode flag', () => {

@@ -315,7 +315,13 @@ export class AccountManager {
    * back to the normal quota-driven walk. Does NOT record the pin — that happens
    * on the actual route (recordSession), so retries/failover re-pin naturally. */
   _selectForSession(sessionId, exclude, model, advisorModel) {
-    const pinIdx = this.sessionTracker.pinnedAccount(sessionId);
+    // The pin is per governing bucket, and this request is bound by the
+    // EXECUTOR's: one request goes to one account, so the executor's affinity is
+    // what binds it and the advisor's model is a constraint on that choice
+    // (_isAvailable, below), not a second key. Keyed by _weeklyBucketFor rather
+    // than _windowKeyFor because the lookup happens before an account is chosen,
+    // so it cannot depend on what any particular account reports.
+    const pinIdx = this.sessionTracker.pinnedAccount(sessionId, this._weeklyBucketFor(model));
     if (pinIdx != null) {
       const pinned = this.accounts[pinIdx];
       if (pinned && this._isAvailable(pinned, model, advisorModel) && !exclude?.has(pinIdx)) {
@@ -363,9 +369,24 @@ export class AccountManager {
 
   /** Record that a session's request was served by an account (always on, even
    * when distribution is off — the readout is passive). This is what pins a
-   * session for future affinity. */
-  recordSession(sessionId, accountIndex) {
-    if (sessionId) this.sessionTracker.touch(sessionId, accountIndex);
+   * session for future affinity, for the buckets this request actually spent. */
+  recordSession(sessionId, accountIndex, model = null, advisorModel = null) {
+    if (sessionId) {
+      this.sessionTracker.touch(sessionId, accountIndex, this._requestBuckets(model, advisorModel));
+    }
+  }
+
+  /** The weekly buckets one request spends on the account that serves it: the
+   * executor's, plus the advisor's when the request carries one. An advisor
+   * sub-inference runs on the SAME account, so that family's quota is spent —
+   * and its cache warmed — there too, which is why both get pinned. */
+  _requestBuckets(model, advisorModel = null) {
+    const buckets = [this._weeklyBucketFor(model)];
+    if (advisorModel) {
+      const advisor = this._weeklyBucketFor(advisorModel);
+      if (!buckets.includes(advisor)) buckets.push(advisor);
+    }
+    return buckets;
   }
 
   /** Mark a session request as in flight / finished. Paired around the whole
