@@ -226,10 +226,19 @@ test('a throw above forwardRequest is answered rather than hanging the client', 
 // unhandled rejection rather than a handled error. The client already has its
 // answer; the guard is what keeps the recovery from becoming the failure.
 test('a throw after the response is streamed does not answer a second time', async () => {
+  // SSE, in several frames, so the response really goes through streamResponse
+  // and the headers are long gone by the time the throw below lands. A
+  // buffered application/json reply never reaches that path, which would leave
+  // the name promising coverage the body does not have.
   const upstream = http.createServer(async (req, res) => {
     for await (const c of req) void c;
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end('{}');
+    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+    res.write('event: message_start\ndata: {"type":"message_start"}\n\n');
+    await new Promise(r => setTimeout(r, 10));
+    res.write('event: content_block_delta\ndata: {"type":"content_block_delta"}\n\n');
+    await new Promise(r => setTimeout(r, 10));
+    res.write('event: message_stop\ndata: {"type":"message_stop"}\n\n');
+    res.end();
   });
   const upstreamPort = await listen(upstream);
   const am = new AccountManager([oauth('a')], 0.98);

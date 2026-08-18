@@ -193,6 +193,16 @@ export function createProxyServer(accountManager, config, hooks = {}, sx = null)
       return forward(req, res);
     } catch (err) {
       console.error('[TeamClaude] Unhandled error:', err);
+      // Answer the socket, for the same reason the proxied path does: a throw
+      // anywhere above — the auth gate, the CSRF gate, the forward-proxy relay,
+      // status/reload/switch — used to be logged and dropped, leaving the client
+      // waiting on a request nobody would answer. `getStatusExtra` is a hook the
+      // application installs, and `switch` reaches the account manager, so this
+      // window holds code that can genuinely throw.
+      if (!res.headersSent && !clientGone(res)) {
+        res.writeHead(502, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ type: 'error', error: { type: 'proxy_error', message: 'Internal proxy error' } }));
+      }
     }
   };
 
@@ -312,6 +322,37 @@ export function resolveAccountPin(accountManager, token) {
 // client's own headers — no account selection, no token injection,
 // content-encoding passed through (a transparent forward proxy). Anthropic is
 // HTTPS-only, so in practice this only ever sees third-party hosts.
+/**
+ * A connect failure's message, which is empty on the one that matters most.
+ * Node's happy-eyeballs dialer (`autoSelectFamily`, default on since Node 20)
+ * reports an all-addresses-failed connect as an AggregateError, whose `message`
+ * is `''` by construction — the per-address reasons live in `.errors`. The
+ * upstream is multi-address, so every such failure logged a blank line and a
+ * real network event produced pages of nothing.
+ *
+ * `.message` is always a string here, including on AggregateError, so no guard
+ * is needed around the fallback.
+ */
+/**
+ * Has the client gone away? `res.destroyed` answers that on the base HTTP/1
+ * listener and NOT on the MITM one: `Http2ServerResponse` has no `destroyed`
+ * property at all (verified on Node 24 — absent from the prototype, so the read
+ * is `undefined` and the guard is inert), and the MITM path is the busy one.
+ * The h2 equivalent lives on the underlying stream.
+ *
+ * Used only where this file decides whether to write a LATE response, from a
+ * catch. The other `res.destroyed` reads are equally inert on h2, but they are
+ * pre-existing and changing them is a behaviour change to paths this has no
+ * business touching.
+ */
+function clientGone(res) {
+  return !!res.destroyed || !!res.stream?.destroyed;
+}
+
+export function describeConnectError(err) {
+  return err?.errors?.map(e => e.message).join('; ') || err?.message;
+}
+
 export function relayHttpForward(req, res) {
   let target;
   try { target = new URL(req.url); } catch {
@@ -361,6 +402,10 @@ const CLIENT_CREDENTIAL_PATHS = ['/v1/code/', '/api/oauth/files/', '/api/oauth/f
 export function createProxyRequestListener({ accountManager, upstream, logDir = null, hooks = {}, sx = null, holdMs = 0, config = {}, forcedPin = null, egress = null }) {
   let counter = 0;
   return async (req, res) => {
+    // The activity entry this request opened, if it is still open. Cleared by
+    // whichever path closes it, so the outer catch can tell an entry it must
+    // still account for from one already closed.
+    let openEntry = null;
     try {
       // Claude Code's telemetry (`/api/event_logging/*`) is high-volume noise in
       // the activity log. `config.eventLogging` (read live so the TUI toggle takes
@@ -468,7 +513,14 @@ export function createProxyRequestListener({ accountManager, upstream, logDir = 
       // /v1/messages and count_tokens). Read from headers up front so it drives
       // session-aware routing (issue #109) and colors the TUI activity stream.
       const sessionId = req.headers['x-claude-code-session-id'] || null;
-      if (!hideActivity) hooks.onRequestStart?.(reqId, { method: req.method, path: req.url, sessionId, pinned: pinnedIndex != null });
+      if (!hideActivity) {
+        hooks.onRequestStart?.(reqId, { method: req.method, path: req.url, sessionId, pinned: pinnedIndex != null });
+        // An OPEN activity entry, which something must now close. Every consumer
+        // holds the row until told the request ended: the TUI keeps it in
+        // `active` (and never idles its animation while one is left), headless
+        // keeps it in `inFlight`. See the outer catch.
+        openEntry = { reqId, sessionId };
+      }
 
       // Buffer request body (needed to resend on a different account after a 429).
       // Peek the top-level `model` field incrementally as chunks arrive so the
@@ -541,10 +593,39 @@ export function createProxyRequestListener({ accountManager, upstream, logDir = 
         }
       } finally {
         accountManager.endSession(sessionId);
+        // Cleared BEFORE the hook runs: this path owns the entry from here, and
+        // a hook that throws must not leave it looking unclosed to the outer
+        // catch, which would call that same throwing hook a second time.
+        openEntry = null;
         if (!hideActivity) hooks.onRequestEnd?.(reqId, { method: req.method, path: req.url, account: ctx.account, status: ctx.status, model: ctx.model, sessionId, pinned: ctx.pinnedIndex != null });
       }
     } catch (err) {
       console.error('[TeamClaude] Unhandled error:', err);
+      // CLOSE THE ACTIVITY ENTRY. Only the inner path has a `finally`, so a
+      // throw above it opened a row nothing ever closes — and every consumer
+      // holds an open row indefinitely: the TUI's `active` map never empties so
+      // its animation never idles, and headless `inFlight` grows by one. The
+      // ordinary trigger is not exotic: `for await (const chunk of req)` rejects
+      // when a client cancels mid-body, which Ctrl+C in Claude Code does, on a
+      // daemon that runs for weeks.
+      if (openEntry) {
+        // 499 is the client-went-away case (nothing was sent and nothing will
+        // be); 502 is what the answer below is about to write.
+        const status = res.headersSent || clientGone(res) ? 499 : 502;
+        const entry = openEntry;
+        openEntry = null;
+        // Guarded, because the throw that landed here may BE this hook: an
+        // unguarded call would rethrow out of the catch, and the socket below
+        // would never be answered. A broken hook is not the request's problem.
+        try {
+          hooks.onRequestEnd?.(entry.reqId, {
+            method: req.method, path: req.url, account: null, status,
+            model: null, sessionId: entry.sessionId, pinned: false,
+          });
+        } catch (hookErr) {
+          console.error('[TeamClaude] activity hook failed while closing a request:', hookErr);
+        }
+      }
       // ANSWER THE SOCKET. Everything above the inner try — the egress hold, the
       // pin parsing, buffering the body, the activity hooks — runs outside the
       // 502 that guards forwardRequest, and a throw up there used to reach here,
@@ -552,7 +633,7 @@ export function createProxyRequestListener({ accountManager, upstream, logDir = 
       // ever answer: not an error it can act on, a hang, and Claude Code's own
       // timeout is long. A malformed percent-escape in a `/tc-acct/` pin reached
       // this from an ordinary request line.
-      if (!res.headersSent && !res.destroyed) {
+      if (!res.headersSent && !clientGone(res)) {
         res.writeHead(502, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ type: 'error', error: { type: 'proxy_error', message: 'Internal proxy error' } }));
       }
@@ -1155,7 +1236,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       res.end(buf);
     }
   } catch (err) {
-    console.error(`[TeamClaude] Upstream error (account "${account.name}"):`, err.message);
+    console.error(`[TeamClaude] Upstream error (account "${account.name}"):`, describeConnectError(err));
 
     logRequestHead();
     const l = getLog();

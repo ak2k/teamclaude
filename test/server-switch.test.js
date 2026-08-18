@@ -307,3 +307,79 @@ test('the switch endpoint establishes its account as a rollover baseline', async
     proxy.close();
   }
 });
+
+// The control-plane listener has its own outer catch, wrapping the auth gate,
+// the CSRF gate, the forward-proxy relay and status/reload/switch. It had the
+// same defect as the proxied one 350 lines below: log and drop, client hangs.
+// `getStatusExtra` is a hook the application installs, so the throw surface is
+// real rather than hypothetical — and this branch enlarged it, turning the
+// switch endpoint from a property write into a call that reaches the account
+// manager.
+test('a throwing status hook is answered, not left hanging', async () => {
+  const am = new AccountManager(ACCTS, 0.98);
+  let reached = false;
+  const proxy = createProxyServer(am, CONFIG, {
+    getStatusExtra: () => { reached = true; throw new Error('status hook blew up'); },
+  });
+  const port = await listen(proxy);
+  const realErr = console.error;
+  console.error = () => {};
+  try {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 4000);
+    let status;
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/teamclaude/status`, { signal: ac.signal });
+      await res.text();
+      status = res.status;
+    } catch (err) {
+      status = err.name === 'AbortError' ? 'HUNG' : `transport: ${err.message}`;
+    }
+    clearTimeout(timer);
+    assert.equal(status, 502, 'a throwing status hook left the client waiting forever');
+  } finally {
+    console.error = realErr;
+    proxy.close();
+  }
+  assert.ok(reached, 'the request never reached the injected throw, so this proves nothing');
+});
+
+// An open activity entry has to be closed by SOMETHING. Only the inner path has
+// a `finally`, so a throw above it used to leave the row open in every
+// consumer: the TUI holds it in `active` (and never idles while one remains),
+// headless holds it in `inFlight`. The ordinary trigger is a client cancelling
+// mid-body — Ctrl+C in Claude Code — on a daemon that runs for weeks.
+test('a request aborted mid-body closes its activity entry', async () => {
+  const am = new AccountManager(ACCTS, 0.98);
+  const started = [];
+  const ended = [];
+  const proxy = createProxyServer(am, CONFIG, {
+    onRequestStart: (id) => started.push(id),
+    onRequestEnd: (id) => ended.push(id),
+  });
+  const port = await listen(proxy);
+  const realErr = console.error;
+  console.error = () => {};
+  try {
+    // Announce a body and then hang up without sending it: the server's
+    // `for await (const chunk of req)` rejects.
+    const ac = new AbortController();
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"model":"claude-opus-5",'));
+        setTimeout(() => ac.abort(), 50);       // client goes away mid-upload
+      },
+    });
+    await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body, duplex: 'half', signal: ac.signal,
+    }).catch(() => {});
+    await new Promise(r => setTimeout(r, 200));  // let the server-side rejection land
+  } finally {
+    console.error = realErr;
+    proxy.close();
+  }
+  assert.ok(started.length > 0, 'no activity entry was opened, so this proves nothing');
+  assert.deepEqual(ended, started,
+    `an aborted request left ${started.length - ended.length} activity entry(s) open forever`);
+});
