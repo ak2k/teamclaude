@@ -306,3 +306,87 @@ test('touch does not resurrect a session that idled out', () => {
   st.touch('s1', null, null, clock.t); // a request arriving with no routing decision yet
   assert.equal(st.pinnedAccount('s1', SHARED, clock.t), null, 'an expired pin came back');
 });
+
+// endRequest is called from a `finally` that runs on every exit, including
+// paths where the matching beginRequest never ran. The count is a hold, not an
+// arithmetic total: below zero it stops meaning "quiet", so the record never
+// settles a rollover and never expires.
+test('the in-flight hold never goes below zero', () => {
+  const { clock, now } = fixedClock();
+  const st = new SessionTracker({ now });
+  st.beginRequest('s1', clock.t);
+  st.endRequest('s1', clock.t);
+  st.endRequest('s1', clock.t);           // an unpaired release
+  assert.equal(st.sessions.get('s1').inFlight, 0, 'the hold went negative');
+  clock.t += SESSION_KNOWN_TTL_MS + 1;
+  st.sweep(clock.t);
+  assert.equal(st.sessions.has('s1'), false, 'a negative hold made the record immortal');
+});
+
+// _live is the read path for pins and baselines, and it is reached far more
+// often than the sweep. A record it finds expired is dropped there, or an idle
+// session that is never asked about again lingers until the next sweep — and a
+// client sending one id per request makes that unbounded between sweeps.
+test('a read that finds an expired record drops it', () => {
+  const { clock, now } = fixedClock();
+  const st = new SessionTracker({ now });
+  st.touch('s1', 1, [SHARED], clock.t);
+  clock.t += SESSION_KNOWN_TTL_MS + 1;
+  assert.equal(st.pinnedAccount('s1', SHARED, clock.t), null);
+  assert.equal(st.sessions.has('s1'), false, 'an expired record survived the read that found it');
+});
+
+// A headless server never renders status, so the only sweep it gets is the one
+// touch schedules. The id is a client-supplied header.
+test('touch sweeps on its own schedule, without a status read', () => {
+  const { clock, now } = fixedClock();
+  const st = new SessionTracker({ now });
+  for (let i = 0; i < 50; i++) st.touch(`s${i}`, 0, [SHARED], clock.t);
+  clock.t += SESSION_KNOWN_TTL_MS + 1;
+  st.touch('later', 0, [SHARED], clock.t);
+  assert.equal(st.sessions.size, 1, `${st.sessions.size} idle records survived a sweep interval`);
+});
+
+test('the pin view excludes sessions the sweep has not reached yet', () => {
+  const { clock, now } = fixedClock();
+  const st = new SessionTracker({ now });
+  st.touch('s1', 1, [SHARED], clock.t);
+  clock.t += SESSION_KNOWN_TTL_MS + 1;
+  assert.deepEqual(st.stats(clock.t).perBucket, {},
+    'a forgotten session is still shown holding its pin');
+  assert.equal(st.stats(clock.t).known, 0);
+});
+
+// The hold is what keeps a multi-minute completion counted; the record has to
+// be recent for that, or the very next read expires it out from under the
+// request it belongs to.
+test('taking the in-flight hold refreshes the session\'s recency', () => {
+  const { clock, now } = fixedClock();
+  const st = new SessionTracker({ now });
+  st.touch('s1', 1, [SHARED], clock.t);
+  clock.t += SESSION_ACTIVE_TTL_MS + 1;
+  st.beginRequest('s1', clock.t);
+  st.endRequest('s1', clock.t);           // the request ends immediately
+  assert.equal(st.stats(clock.t).active, 1, 'a session that just made a request reads as idle');
+});
+
+test('a request with no routing decision leaves the pins it did not spend alone', () => {
+  const { clock, now } = fixedClock();
+  const st = new SessionTracker({ now });
+  st.touch('s1', 0, [SHARED], clock.t);
+  st.touch('s1', 2, [FABLE], clock.t);
+  st.touch('s1', 1, null, clock.t);       // an attempt with nothing decided yet
+  assert.equal(st.pinnedAccount('s1', SHARED, clock.t), 0);
+  assert.equal(st.pinnedAccount('s1', FABLE, clock.t), 2, 'a request that spent nothing re-pinned a bucket');
+});
+
+// The load metric decides where NEW sessions go. Counting a session that has
+// gone quiet keeps spreading traffic away from an account nothing is using.
+test('the load metric counts only sessions that are still active', () => {
+  const { clock, now } = fixedClock();
+  const st = new SessionTracker({ now });
+  st.touch('s1', 1, [SHARED], clock.t);
+  assert.equal(st.activeCountFor(1, clock.t), 1);
+  clock.t += SESSION_ACTIVE_TTL_MS + 1;
+  assert.equal(st.activeCountFor(1, clock.t), 0, 'a session idle past the active window still counts as load');
+});

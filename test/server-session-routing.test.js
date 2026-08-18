@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { AccountManager } from '../src/account-manager.js';
 import { createProxyServer } from '../src/server.js';
+import { SESSION_KNOWN_TTL_MS } from '../src/session-tracker.js';
 
 // Session-aware routing is decided across three separate calls the server makes
 // per request — select, recordSession, confirmRouted — inside the beginSession
@@ -489,4 +490,139 @@ test('a request with no session id routes without touching session state', async
   });
   assert.equal(am.sessionTracker.sessions.size, 0);
   assert.deepEqual(upstream.hits.map(h => h.account), ['a']);
+});
+
+// The hold is released on EVERY exit from the request, and three separate
+// invariants downstream of it depend on that. The test above proves the
+// release; these three name what a stuck hold breaks, because that is what a
+// failure would actually look like from outside.
+async function driveThrowingRequest(am, before = 0) {
+  const upstream = scriptedUpstream();
+  const realConsoleError = console.error;
+  console.error = () => {};                 // the 502 path logs; keep the run readable
+  try {
+    await withProxy(am, upstream, async (send) => {
+      for (let i = 0; i < before; i++) assert.equal(await send({ model: OPUS, messages: [] }), 200);
+      const realRecord = am.recordSession.bind(am);
+      am.recordSession = (...args) => { realRecord(...args); throw new Error('injected failure on the request path'); };
+      assert.equal(await send({ model: OPUS, messages: [] }), 502,
+        'the fixture never reached the unhandled-error path');
+      am.recordSession = realRecord;
+    });
+  } finally {
+    console.error = realConsoleError;
+  }
+  return upstream;
+}
+
+test('a thrown request leaves no session immortal, always-active or unevictable', async () => {
+  const am = fleet([{ name: 'a', used: 0.2, resetH: 50 }]);
+  await driveThrowingRequest(am);
+  const st = am.sessionTracker;
+  const later = Date.now() + SESSION_KNOWN_TTL_MS * 2;
+  st.sweep(later);
+  assert.equal(st.sessions.has('sess-1'), false,
+    'the record outlived the known window because inFlight never returned to zero');
+  assert.equal(st.stats(later).active, 0,
+    'the session counts as active load on its account forever');
+  assert.equal(st.activeCountFor(0, later), 0,
+    'the account it touched carries a phantom session in the load metric that spreads new ones');
+});
+
+// Settlement waits for the session to fall quiet, so a hold that is never
+// released is also a rollover that never settles.
+test('a thrown request does not strand the session\'s pending rollover', async () => {
+  const am = fleet([
+    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'b', used: 0.1, resetH: 60 },
+  ]);
+  const upstream = scriptedUpstream();
+  await withProxy(am, upstream, async (send) => {
+    assert.equal(await send({ model: OPUS, messages: [] }), 200);   // pinned to 'a'
+    am.accounts[0].quota.unified7d = 0;
+    am.accounts[0].quota.unified7dReset += 168 * H;                 // 'a' rolls over
+    const realRecord = am.recordSession.bind(am);
+    const realConsoleError = console.error;
+    console.error = () => {};
+    am.recordSession = (...args) => { realRecord(...args); throw new Error('injected failure on the request path'); };
+    assert.equal(await send({ model: OPUS, messages: [] }), 502);
+    am.recordSession = realRecord;
+    console.error = realConsoleError;
+    // The next request completes normally, so the session is quiet again and the
+    // event has to settle.
+    assert.equal(await send({ model: OPUS, messages: [] }), 200);
+  });
+  assert.equal(am.getStatus().expiryRouting.stats.rolloversOwed, 0,
+    'an earlier thrown request held the session open, so the rollover never settled');
+});
+
+// The /tc-acct/ path forces an account and never calls selection at all, so it
+// has no decision to hand on. Given one, it settles the current-account walk's
+// event without that walk having acted — leaving `current` parked on the
+// account that just gained a full week.
+test('a /tc-acct/ pinned request does not settle the current account\'s rollover', async () => {
+  const am = fleet([
+    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'b', used: 0.1, resetH: 60 },
+  ]);
+  const upstream = scriptedUpstream();
+  const upstreamPort = await listen(upstream.server);
+  const proxy = createProxyServer(am, { proxy: {}, upstream: `http://127.0.0.1:${upstreamPort}` });
+  const proxyPort = await listen(proxy);
+  const sendTo = async (path) => {
+    const res = await fetch(`http://127.0.0.1:${proxyPort}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },   // no session id: the current-account walk
+      body: JSON.stringify({ model: OPUS, messages: [] }),
+    });
+    await res.text();
+    return res.status;
+  };
+  try {
+    assert.equal(await sendTo('/v1/messages'), 200);        // baseline on 'a'
+    am.accounts[1].disabled = true;
+    am.accounts[0].quota.unified7d = 0;
+    am.accounts[0].quota.unified7dReset += 168 * H;        // 'a' rolls, nowhere to move
+    assert.equal(await sendTo('/v1/messages'), 200);
+    assert.equal(am.getStatus().expiryRouting.stats.rolloversOwed, 1,
+      'the rollover was never owed, so this proves nothing');
+    am.accounts[1].disabled = false;
+    assert.equal(await sendTo('/tc-acct/b/v1/messages'), 200);
+    assert.equal(am.getStatus().expiryRouting.stats.rolloversOwed, 1,
+      'a pinned request settled an event the current-account walk never acted on');
+    assert.equal(await sendTo('/v1/messages'), 200);
+  } finally {
+    proxy.close();
+    upstream.server.close();
+  }
+  assert.deepEqual(upstream.hits.map(h => h.account), ['a', 'a', 'b', 'b'],
+    'the walk did not move off the rolled account once it could');
+});
+
+// The 403 branch fails the account over to the next one, and its three sibling
+// retry branches are all bounded by retryCount. It has to be too: the exclusion
+// set normally runs the fleet down first, but that is selection's promise, not
+// this branch's, and a selection that hands back an account this request
+// already tried turns the failover into an unbounded loop against upstream.
+test('a 403 failover is bounded by the retry count', async () => {
+  const am = fleet([
+    { name: 'a', used: 0.2, resetH: 50 },
+    { name: 'b', used: 0.2, resetH: 60 },
+  ]);
+  am.getActiveAccount = () => am.accounts[0];
+  // Refusing only the first dozen hits means an unbounded run terminates and can
+  // be asserted on, instead of hanging the runner.
+  const upstream = scriptedUpstream(({ hit }) => ({ status: hit <= 12 ? 403 : 200 }));
+  const realConsoleError = console.error;
+  console.error = () => {};
+  try {
+    await withProxy(am, upstream, async (send) => {
+      assert.equal(await send({ model: OPUS, messages: [] }), 502,
+        'the client was shown the upstream 403 it cannot act on');
+    });
+  } finally {
+    console.error = realConsoleError;
+  }
+  assert.equal(upstream.hits.length, 3,
+    `the 403 path retried past maxRetries: ${upstream.hits.length} attempts for 2 accounts`);
 });
