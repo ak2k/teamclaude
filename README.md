@@ -79,6 +79,7 @@ Step-by-step lifecycle: [docs/routing.md](docs/routing.md#request-lifecycle).
 | [Proxy modes](docs/proxy-modes.md) | MITM forward proxy, sx.org residential egress |
 | [Compliance](docs/compliance.md) | Terms of service notes |
 | [Mutation testing](docs/mutation-testing.md) | How the routing tests are held down, and the ways a mutation harness reports success while measuring nothing |
+| [Reviewing](docs/REVIEWING.md) | Invariants for routing and session-state changes, danger zones, verification recipes — plus the [residual register](docs/RESIDUALS.md) |
 
 ## Security
 
