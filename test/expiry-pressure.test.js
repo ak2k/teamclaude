@@ -607,6 +607,55 @@ test('a pin rollover survives a retry that lands back on the rolled account', ()
   assert.equal(route(am, 's1').name, 'b');
 });
 
+// Two requests for one session overlap during a rollover. The one served off
+// the rolled account banks the move; the slower one fails over and back onto
+// it. Whichever finishes LAST says where the session ended up — settling at the
+// first confirm leaves the session riding the rolled account with nothing owed.
+test('a sibling confirm cannot settle a rollover the session then fails back onto', () => {
+  const am = manager([
+    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'b', used: 0.1, resetH: 60 },
+  ]);
+  assert.equal(route(am, 's1').name, 'a');
+  rollWeekly(am, 0);
+
+  am.beginSession('s1');                                   // R1 starts
+  const r1 = am.getActiveAccount(null, OPUS, null, 's1');
+  assert.equal(r1.name, 'b', 'the rollover did not preempt');
+  am.recordSession('s1', r1.index, OPUS);
+
+  am.beginSession('s1');                                   // R2 overlaps it
+  const r2 = am.getActiveAccount(null, OPUS, null, 's1');
+  am.recordSession('s1', r2.index, OPUS);
+  am.confirmRouted('s1', r2.index, OPUS);
+  am.endSession('s1');                                     // R2 done, R1 still out
+
+  // R1's attempt on 'b' throws; the retry excludes it and comes back to 'a'.
+  const retry = am.getActiveAccount(new Set([r1.index]), OPUS, null, 's1');
+  assert.equal(retry.name, 'a');
+  am.recordSession('s1', retry.index, OPUS);
+  am.confirmRouted('s1', retry.index, OPUS);
+  am.endSession('s1');
+
+  assert.equal(route(am, 's1').name, 'b', 'the session was left on the rolled account with nothing owed');
+});
+
+test('a rollover the session did move off is settled once, not re-fired', () => {
+  const am = manager([
+    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'b', used: 0.1, resetH: 60 },
+  ]);
+  assert.equal(route(am, 's1').name, 'a');
+  rollWeekly(am, 0);
+  assert.equal(route(am, 's1').name, 'b');
+  // Settled: 'a' is a normal candidate again, not one the session is repelled
+  // from every time it lands there.
+  am.accounts[1].disabled = true;
+  assert.equal(route(am, 's1').name, 'a');
+  am.accounts[1].disabled = false;
+  assert.equal(route(am, 's1').name, 'a');
+});
+
 // The account a rollover moved a session TO is not itself rolled over. Reading
 // the owed event as "this account rolled" whatever account is asking chains the
 // session off one healthy account after another.

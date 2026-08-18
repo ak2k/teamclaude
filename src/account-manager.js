@@ -530,7 +530,15 @@ export class AccountManager {
   }
 
   endSession(sessionId) {
-    if (sessionId) this.sessionTracker.endRequest(sessionId);
+    if (!sessionId) return;
+    const s = this.sessionTracker.endRequest(sessionId);
+    // The session is quiescent: no attempt is left that could still move it, so
+    // where each bucket was last SERVED is now final and any rollover owed on
+    // it can be resolved. Settling earlier lets a sibling request that was
+    // served off the rolled account bank the move while a slower one is still
+    // failing back onto it — the session then rides the rolled account with
+    // nothing owed, until that window comes round again a week later.
+    if (s && s.inFlight === 0) s.windows?.settleServed();
   }
 
   /** { known, active, perAccount } session counts for status/TUI. */
@@ -970,11 +978,17 @@ export class AccountManager {
    * Scoped to the buckets this request spent, since those are the only families
    * whose traffic it can have moved. A no-op unless something is pending, so
    * every request may call it.
+   *
+   * For a session this only RECORDS where the traffic went; the event settles
+   * when the session goes quiescent (see endSession). A sibling request for the
+   * same session can be served off the rolled account while a slower one is
+   * still failing back onto it, and whichever finishes last is the one that
+   * says where the session ended up.
    */
   confirmRouted(sessionId, accountIndex, model = null, advisorModel = null) {
     const buckets = this._requestBuckets(model, advisorModel);
     this._currentSeen.commitOn(accountIndex, buckets);
-    if (sessionId) this.sessionTracker.windowsFor(sessionId)?.commitOn(accountIndex, buckets);
+    if (sessionId) this.sessionTracker.windowsFor(sessionId)?.noteServed(accountIndex, buckets);
   }
 
   /** The quota bucket whose reset actually governs `model` on this account: the

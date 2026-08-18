@@ -35,6 +35,11 @@ export class WindowWatcher {
     // decides which later request can consume the event — only traffic for the
     // same bucket moving off `idx` settles it.
     this.pending = new Map();
+    // request bucket -> the account that most recently SERVED it (noteServed).
+    // A selection is not a service: an attempt can be re-routed and re-pinned
+    // several times, and only the response the client actually gets says where
+    // the traffic went.
+    this.served = new Map();
   }
 
   /** Record `resets` as the baseline for account `idx`. Seed-only per
@@ -59,7 +64,7 @@ export class WindowWatcher {
    * rolling.
    *
    * This writes — it seeds a first-sight baseline — but it never advances a
-   * window past a rollover it has found. Only commitOn does that, and only
+   * window past a rollover it has found. Only settleServed does that, and only
    * once a preemption has actually moved a request. That is the invariant that
    * lets detection run on every selection pass, including one that cannot act
    * on what it finds: looking costs the event nothing.
@@ -78,20 +83,43 @@ export class WindowWatcher {
   }
 
   /**
-   * A request spending `buckets` was served by `acceptedIdx`. For each of those
-   * buckets, a rollover pending on any OTHER account is one this request moved
-   * off, so bank its post-rollover window and drop the event; one pending on the
-   * accepted account itself was not acted on — the re-route came back — and
-   * stays owed for the next request. A bucket this request did not spend is left
-   * alone: it moved no traffic for that family, so it settles nothing.
+   * A request spending `buckets` was SERVED by `acceptedIdx` — the response the
+   * client got, not an attempt that went on to retry somewhere else.
    */
-  commitOn(acceptedIdx, buckets) {
-    for (const bucket of buckets) {
-      const owed = this.pending.get(bucket);
-      if (!owed || owed.idx === acceptedIdx) continue;
+  noteServed(acceptedIdx, buckets) {
+    for (const bucket of buckets) this.served.set(bucket, acceptedIdx);
+  }
+
+  /**
+   * Resolve every pending rollover against where its bucket was last served.
+   * A bucket served off the rolled account is one the preemption moved, so bank
+   * its post-rollover window and drop the event. A bucket whose last service
+   * came back to the rolled account — a retry that failed over and back, or a
+   * sibling request that raced ahead and was then overtaken — moved nothing
+   * that stuck, so it stays owed and the next request preempts again. A bucket
+   * nothing served settles nothing.
+   *
+   * Called when the sticky choice is next quiescent, which for a session means
+   * its last in-flight request has ended: an earlier settlement can be undone
+   * by a slower sibling that fails back, so the answer is only stable once no
+   * attempt is left to change it.
+   */
+  settleServed() {
+    for (const [bucket, owed] of [...this.pending]) {
+      const acceptedIdx = this.served.get(bucket);
+      if (acceptedIdx == null || acceptedIdx === owed.idx) continue;
       this.windows.get(owed.window)?.set(owed.idx, owed.reset);
       this.pending.delete(bucket);
     }
+    this.served.clear();
+  }
+
+  /** noteServed + settleServed, for a sticky choice with no quiescent point of
+   * its own: the global current account is shared by every request, including
+   * the ones carrying no session id, so there is nothing to wait for. */
+  commitOn(acceptedIdx, buckets) {
+    this.noteServed(acceptedIdx, buckets);
+    this.settleServed();
   }
 
   /** Renumber after the account list shifts, dropping whatever named the account
@@ -102,6 +130,11 @@ export class WindowWatcher {
       const moved = mapFn(owed.idx);
       if (moved == null) this.pending.delete(bucket);
       else owed.idx = moved;
+    }
+    for (const [bucket, idx] of [...this.served]) {
+      const moved = mapFn(idx);
+      if (moved == null) this.served.delete(bucket);
+      else this.served.set(bucket, moved);
     }
     for (const [key, byAccount] of [...this.windows]) {
       const moved = new Map();
