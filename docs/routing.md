@@ -124,7 +124,9 @@ Because a weekly window rolls roughly once per account per week, the feature spe
 }
 ```
 
-`rolloversDetected` counts the events (a governing weekly window jumping forward on a sticky choice) and `rolloversPreempted` the ones that actually moved a request to another account. Both are monotonic since the daemon started and are not reset by a reload. `rolloversOwed` is a live gauge rather than the difference between them: a detected rollover stays owed until a request is genuinely *served* somewhere else, so a value sitting above zero across several minutes is a preemption with nowhere to go — the session is still on the account that just gained a full week. The daemon says so too, at most once a minute per (account, bucket):
+`rolloversDetected` counts the events (a governing weekly window jumping forward on a sticky choice) and `rolloversPreempted` the ones that actually moved a request to another account. Both are monotonic since the daemon started and are not reset by a reload. A move is counted where it is *known* to have stuck — a re-route that failed back onto the rolled account moved nothing — so `rolloversPreempted` can never exceed `rolloversDetected`.
+
+`rolloversOwed` is a live gauge rather than the difference between them: it counts detected rollovers that nothing has moved yet. An event whose traffic has already been served elsewhere is resolved even while its session is still busy, so an ordinary request in flight never lifts the gauge. A value sitting above zero across several minutes is therefore a preemption with nowhere to go — the session is still on the account that just gained a full week. The daemon says so too, at most once a minute per (account, bucket):
 
 ```
 [TeamClaude] Account "work" rolled over its unified7d window but no eligible account can take that traffic — still routing there
