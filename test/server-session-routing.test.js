@@ -153,8 +153,10 @@ test('a rollover the client\'s response came back onto is not settled', async ()
     { name: 'b', used: 0.1, resetH: 60 },
   ]);
   // 'b' refuses the credential, so the preempted attempt fails over back to 'a'
-  // and that is the response the client gets.
-  const upstream = scriptedUpstream(({ account }) => ({ status: account === 'b' ? 403 : 200 }));
+  // and that is the response the client gets. The refusal stops after two hits
+  // so that a failover which re-offers an account it already tried terminates
+  // and can be asserted on, instead of looping.
+  const upstream = scriptedUpstream(({ account, hit }) => ({ status: account === 'b' && hit <= 2 ? 403 : 200 }));
   await withProxy(am, upstream, async (send) => {
     assert.equal(await send({ model: OPUS, messages: [] }), 200); // pinned to 'a'
     am.accounts[0].quota.unified7d = 0;
@@ -233,20 +235,215 @@ test('an overlapping sibling does not settle a rollover the session fails back o
   });
 
   await withProxy(am, upstream, async (send) => {
-    assert.equal(await send({ model: OPUS, messages: [] }), 200); // pinned to 'a'
-    am.accounts[0].quota.unified7d = 0;
-    am.accounts[0].quota.unified7dReset += 168 * H;               // 'a' rolls over
+    let slow;
+    try {
+      assert.equal(await send({ model: OPUS, messages: [] }), 200); // pinned to 'a'
+      am.accounts[0].quota.unified7d = 0;
+      am.accounts[0].quota.unified7dReset += 168 * H;               // 'a' rolls over
 
-    const slow = send({ model: OPUS, messages: [] });             // preempted to 'b', held
-    while (!slowSeen) await new Promise(r => setTimeout(r, 5));
-    assert.equal(await send({ model: OPUS, messages: [] }), 200); // sibling: served by 'b'
-    releaseSlow();
-    assert.equal(await slow, 200);                                // 403 on 'b' → served by 'a'
-
+      slow = send({ model: OPUS, messages: [] });                   // preempted to 'b', held
+      const deadline = Date.now() + 5000;
+      while (!slowSeen) {
+        assert.ok(Date.now() < deadline, `the rollover never preempted onto 'b': ${JSON.stringify(hits)}`);
+        await new Promise(r => setTimeout(r, 5));
+      }
+      assert.equal(await send({ model: OPUS, messages: [] }), 200); // sibling: served by 'b'
+    } finally {
+      // Whatever happened above, nothing may be left waiting on this latch or
+      // the run never ends.
+      releaseSlow();
+      await slow?.catch(() => {});
+    }
     assert.equal(await send({ model: OPUS, messages: [] }), 200);
   });
   assert.equal(hits.at(-1).account, 'b',
     'the session was left on the rolled account with the event already banked');
+});
+
+// The advisor's model constrains WHICH account may serve the request, not just
+// what gets pinned afterwards: the sub-inference runs on the same account, so
+// one that cannot serve it must not be chosen while one that can is available.
+test('an account that cannot serve the advisor model is not selected', async () => {
+  // The Opus band prefers 'a', but 'a' has no Fable weekly left.
+  const am = fleet([
+    { name: 'a', used: 0.2, resetH: 50, fableUsed: 0.99, fableResetH: 50 },
+    { name: 'b', used: 0.2, resetH: 400, fableUsed: 0.05, fableResetH: 400 },
+  ]);
+  const upstream = scriptedUpstream();
+  await withProxy(am, upstream, async (send) => {
+    assert.equal(await send({ model: OPUS, messages: [] }), 200);
+    assert.equal(await send(advisorRequest(OPUS, FABLE), { 'x-claude-code-session-id': 'sess-2' }), 200);
+  });
+  assert.deepEqual(upstream.hits.map(h => h.account), ['a', 'b'],
+    'the advisor request landed on the account that cannot run the advisor');
+});
+
+// The degrade path: with no jointly-eligible account the advisor call is
+// dropped upstream, so the account served the executor alone and must not be
+// left holding the advisor family's pin.
+test('a degraded advisor request does not pin the family it never served', async () => {
+  const am = fleet([
+    { name: 'a', used: 0.2, resetH: 50, fableUsed: 0.99, fableResetH: 50 },  // no Fable
+    { name: 'b', used: 0.99, resetH: 50, fableUsed: 0.05, fableResetH: 60 }, // no Opus
+  ]);
+  const upstream = scriptedUpstream();
+  await withProxy(am, upstream, async (send) => {
+    assert.equal(await send(advisorRequest(OPUS, FABLE)), 200);
+  });
+  assert.deepEqual(upstream.hits.map(h => h.account), ['a']);
+  assert.equal(am.sessionTracker.pinnedAccount('sess-1', 'unified7d'), 0);
+  assert.equal(am.sessionTracker.pinnedAccount('sess-1', 'unified7dFable'), null,
+    'the dropped advisor family was pinned to the account that never served it');
+});
+
+// The current-account walk owns its own rollover event. A request routed by it
+// settles that event; the previous test's session traffic must not.
+test('a session-less request settles the current account\'s rollover', async () => {
+  const am = fleet([
+    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'b', used: 0.1, resetH: 60 },
+  ]);
+  const upstream = scriptedUpstream();
+  await withProxy(am, upstream, async (send) => {
+    assert.equal(await send({ model: OPUS, messages: [] }, {}), 200); // baseline on 'a'
+    am.accounts[0].quota.unified7d = 0;
+    am.accounts[0].quota.unified7dReset += 168 * H;
+    assert.equal(await send({ model: OPUS, messages: [] }, {}), 200); // re-ranked to 'b'
+    am.accounts[1].disabled = true;
+    assert.equal(await send({ model: OPUS, messages: [] }, {}), 200); // back to 'a'
+    am.accounts[1].disabled = false;
+    assert.equal(await send({ model: OPUS, messages: [] }, {}), 200);
+  });
+  assert.deepEqual(upstream.hits.map(h => h.account), ['a', 'b', 'a', 'a'],
+    'the settled rollover fired again');
+});
+
+test('a session\'s request does not settle the current account\'s rollover', async () => {
+  const am = fleet([
+    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'b', used: 0.1, resetH: 60 },
+  ]);
+  // Every account is out of Opus band once 'a' rolls except 'b', so the session
+  // lands on 'b' — off the rolled account, which is exactly what would look
+  // like the current-account walk having acted if it were allowed to confirm it.
+  const upstream = scriptedUpstream();
+  await withProxy(am, upstream, async (send) => {
+    assert.equal(await send({ model: OPUS, messages: [] }, {}), 200); // baseline on 'a'
+    am.accounts[0].quota.unified7d = 0;
+    am.accounts[0].quota.unified7dReset += 168 * H;
+    assert.equal(await send({ model: OPUS, messages: [] }), 200);     // a session's request
+    assert.equal(await send({ model: OPUS, messages: [] }, {}), 200); // the walk still owes a move
+  });
+  assert.deepEqual(upstream.hits.map(h => h.account), ['a', 'b', 'b'],
+    'a session\'s request consumed the current account\'s rollover');
+});
+
+// The per-request exclusion set is what stops failover re-offering an account
+// this request has already tried and had refused.
+test('a failed-over request is not routed back onto the account it just tried', async () => {
+  const am = fleet([
+    { name: 'a', used: 0.2, resetH: 50 },
+    { name: 'b', used: 0.2, resetH: 60 },
+  ]);
+  // 'a' refuses the credential. The upstream stops refusing after a few hits so
+  // a selection that ignores the exclusion set terminates and can be asserted
+  // on, rather than looping the test runner.
+  const upstream = scriptedUpstream(({ account, hit }) => ({ status: account === 'a' && hit <= 3 ? 403 : 200 }));
+  await withProxy(am, upstream, async (send) => {
+    assert.equal(await send({ model: OPUS, messages: [] }), 200);
+  });
+  assert.deepEqual(upstream.hits.map(h => h.account), ['a', 'b'],
+    'the request was offered an account it had already tried');
+});
+
+// The pin has to name the account that served the request, which under session
+// distribution is not the fleet's current account.
+test('the pin names the account that served, not the fleet\'s current one', async () => {
+  const am = fleet([
+    { name: 'a', used: 0.9, resetH: 50 },  // currentIndex starts here
+    { name: 'b', used: 0.1, resetH: 60 },  // but the band sends the session to 'b'
+  ]);
+  const upstream = scriptedUpstream();
+  await withProxy(am, upstream, async (send) => {
+    assert.equal(await send({ model: OPUS, messages: [] }), 200);
+    assert.equal(await send({ model: OPUS, messages: [] }), 200);
+  });
+  assert.equal(am.currentIndex, 0, 'the session path must not have moved currentIndex');
+  assert.deepEqual(upstream.hits.map(h => h.account), ['b', 'b'],
+    'the session was pinned to an account that never served it');
+});
+
+// Settlement is per bucket, so the confirmation has to say which buckets the
+// request spent. Told nothing, it settles the shared weekly for a Fable request
+// and the Fable event stays owed forever.
+test('a Fable request settles the Fable bucket\'s rollover', async () => {
+  const am = fleet([
+    { name: 'a', used: 0.2, resetH: 300, fableUsed: 0.3, fableResetH: 50 },
+    { name: 'b', used: 0.2, resetH: 300, fableUsed: 0.3, fableResetH: 55 },
+  ]);
+  const upstream = scriptedUpstream();
+  await withProxy(am, upstream, async (send) => {
+    assert.equal(await send({ model: FABLE, messages: [] }), 200); // Fable pinned to 'a'
+    am.accounts[0].quota.unified7dFable = 0;
+    am.accounts[0].quota.unified7dFableReset += 168 * H;           // 'a' rolls its Fable window
+    assert.equal(await send({ model: FABLE, messages: [] }), 200); // preempted to 'b'
+    am.accounts[1].disabled = true;
+    assert.equal(await send({ model: FABLE, messages: [] }), 200); // driven back onto 'a'
+    am.accounts[1].disabled = false;
+    assert.equal(await send({ model: FABLE, messages: [] }), 200);
+  });
+  assert.deepEqual(upstream.hits.map(h => h.account), ['a', 'b', 'a', 'a'],
+    'the Fable rollover was settled against some other bucket');
+});
+
+test('an advisor request settles the advisor family\'s rollover', async () => {
+  const am = fleet([
+    { name: 'a', used: 0.2, resetH: 300, fableUsed: 0.3, fableResetH: 50 },
+    { name: 'b', used: 0.2, resetH: 300, fableUsed: 0.3, fableResetH: 55 },
+  ]);
+  const upstream = scriptedUpstream();
+  await withProxy(am, upstream, async (send) => {
+    assert.equal(await send({ model: FABLE, messages: [] }), 200); // Fable pinned to 'a'
+    am.accounts[0].quota.unified7dFable = 0;
+    am.accounts[0].quota.unified7dFableReset += 168 * H;
+    am.accounts[1].disabled = true;
+    assert.equal(await send({ model: FABLE, messages: [] }), 200); // detected, nowhere to move
+    am.accounts[1].disabled = false;
+    // An Opus request carrying a Fable advisor: it spends the Fable bucket on
+    // whatever serves it, so being served off 'a' is what settles that event.
+    assert.equal(await send(advisorRequest(OPUS, FABLE)), 200);
+    am.accounts[1].disabled = true;
+    assert.equal(await send({ model: FABLE, messages: [] }), 200); // back onto 'a'
+    am.accounts[1].disabled = false;
+    assert.equal(await send({ model: FABLE, messages: [] }), 200);
+  });
+  assert.deepEqual(upstream.hits.map(h => h.account), ['a', 'a', 'b', 'a', 'a'],
+    'the advisor request did not settle the family it spent');
+});
+
+// Confirmation belongs after every branch that retries, not at selection: an
+// attempt that is re-routed and then fails back has moved nothing.
+test('a current-account attempt that failed back does not settle its rollover', async () => {
+  const am = fleet([
+    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'b', used: 0.1, resetH: 60 },
+  ]);
+  // 'b' refuses the credential the first time it is tried, so the preempted
+  // attempt fails over back to 'a' and that is the response the client gets.
+  let refusedOnce = false;
+  const upstream = scriptedUpstream(({ account }) => {
+    if (account === 'b' && !refusedOnce) { refusedOnce = true; return { status: 403 }; }
+    return { status: 200 };
+  });
+  await withProxy(am, upstream, async (send) => {
+    assert.equal(await send({ model: OPUS, messages: [] }, {}), 200); // baseline on 'a'
+    am.accounts[0].quota.unified7d = 0;
+    am.accounts[0].quota.unified7dReset += 168 * H;
+    assert.equal(await send({ model: OPUS, messages: [] }, {}), 200); // tries 'b', served by 'a'
+    assert.equal(await send({ model: OPUS, messages: [] }, {}), 200); // still owed → moves
+  });
+  assert.deepEqual(upstream.hits.map(h => h.account), ['a', 'b', 'a', 'b'],
+    'an attempt that never reached the client settled the rollover');
 });
 
 // A request with no session header must not fall over on any of the session

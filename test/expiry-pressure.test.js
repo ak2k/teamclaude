@@ -30,7 +30,7 @@ function manager(specs, { er = { enabled: true }, distribute = true, tracker } =
 // Route a session request the way the server does: hold the session in flight
 // for the whole request, select, record the pin, and — once the attempt is the
 // one the client gets — confirm what served it and release the hold. The server
-// wiring itself is covered end-to-end in test/server-routing.test.js.
+// wiring itself is covered end-to-end in test/server-session-routing.test.js.
 function route(am, sid, model = OPUS, advisorModel = null) {
   am.beginSession(sid);
   try {
