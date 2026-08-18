@@ -115,6 +115,23 @@ With `preempt` on, a **pinned session** (and the sticky current account) is re-r
 
 With `"preempt": false` the band only refines the moments selection was already going to pick — a rotation, or placing a new session — so the "standing preference" above is really a property of `preempt: true`. Without it, the sticky current account (distribution off) or an existing session pin stays where it is across a rollover, and long-lived sessions can still ride an account whose window just reset a week out.
 
+Because a weekly window rolls roughly once per account per week, the feature spends nearly all its time doing nothing visible — and "quiet because nothing rolled over" looks exactly like "quiet because a rollover is stuck". `teamclaude status --json` tells the two apart under `expiryRouting.stats`:
+
+```json
+"expiryRouting": {
+  "enabled": true, "tolerance": 1.5, "preempt": true,
+  "stats": { "rolloversDetected": 4, "rolloversPreempted": 4, "rolloversOwed": 0 }
+}
+```
+
+`rolloversDetected` counts the events (a governing weekly window jumping forward on a sticky choice) and `rolloversPreempted` the ones that actually moved a request to another account. Both are monotonic since the daemon started and are not reset by a reload. `rolloversOwed` is a live gauge rather than the difference between them: a detected rollover stays owed until a request is genuinely *served* somewhere else, so a value sitting above zero across several minutes is a preemption with nowhere to go — the session is still on the account that just gained a full week. The daemon says so too, at most once a minute per (account, bucket):
+
+```
+[TeamClaude] Account "work" rolled over its unified7d window but no eligible account can take that traffic — still routing there
+```
+
+The `sessions` block carries the routing side of the same question. `perAccount` is active load per account; `perBucket` is where known sessions are **pinned** — `{"unified7d": {"0": 3}, "unified7dFable": {"1": 2}}`, i.e. bucket → account index → count — and is the only view in which a single session holding Opus on one account and Fable on another is visible at all. `known` against `max` is the tracked sessions against the hard cap, and `evicted` counts the records the cap has dropped since start: a rising `evicted` means the bound is binding and live sessions are re-earning pins they had. Session ids never appear in the payload — they arrive in a client-supplied header.
+
 Off by default. Changes apply to a running server via `POST /teamclaude/reload` (or any CLI command that notifies the server).
 
 ## Pin a session to one account

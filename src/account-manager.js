@@ -226,6 +226,16 @@ export class AccountManager {
     // evicted with the pin it belongs to; the global current account, which no
     // session owns, keeps its own.
     this._currentSeen = new WindowWatcher();
+    // Rollover counters, monotonic since daemon start. They live here rather
+    // than on `expiryRouting` because setExpiryRouting REPLACES that object on
+    // every config reload, and a counter an operator can zero by touching the
+    // config file cannot answer "has this fired since I started watching it".
+    this._rolloverStats = { detected: 0, preempted: 0 };
+    // Throttle for the stuck-rollover line, keyed by the event it describes —
+    // (account index, bucket) — so two genuinely different stuck events are
+    // both reported while one busy session cannot repeat either. Keyed by
+    // session id it would be unbounded: that id is a client-supplied header.
+    this._rolloverStuckLogAt = new Map();
     // Storm control: when rotation switches to a fresh account, a burst of
     // in-flight requests (e.g. dozens of agents failing over together) would all
     // hit it at once and instantly throttle it — cascading down the fleet
@@ -443,6 +453,11 @@ export class AccountManager {
         && this._currentRolledOver(current, model);
       if (allowProbe && rolled) {
         const next = this._selectNext(exclude, model, advisorModel);
+        // _selectNext re-ranks; it may well hand back the account we are trying
+        // to move off, and "nothing else was eligible" is the stuck case, not a
+        // preemption. Nothing else in the log distinguishes the two.
+        if (next && next.index !== current.index) this._rolloverStats.preempted++;
+        else this._noteStuckRollover(current, model);
         if (next) return next;
       }
       const betterExists = this._preemptedBy(current, model, advisorModel, exclude);
@@ -485,6 +500,7 @@ export class AccountManager {
             && this._pinRolledOver(sessionId, pinned, model)) {
           const next = this._pickLeastLoaded(exclude, model, advisorModel);
           if (next && next.index !== pinIdx) {
+            this._rolloverStats.preempted++;
             // A fleet-wide rollover moves every session pinned to that account at
             // once, so the destination gets the same failover burst any other
             // switch would send it — pace it (issue #84).
@@ -492,6 +508,7 @@ export class AccountManager {
             console.log(`[TeamClaude] Session pin on "${pinned.name}" released — its weekly window rolled over; re-routing to "${next.name}"`);
             return next;
           }
+          this._noteStuckRollover(pinned, model);
           return pinned;
         }
         // Mirror _select's priority preemption so an operator's priority order
@@ -1011,7 +1028,7 @@ export class AccountManager {
     // other buckets are pinned to whatever account serves them, so recording
     // this one's windows against them would overwrite a baseline belonging to a
     // different account — and lose the rollover it was there to catch.
-    return seen.rolledOver(pinned.index, bucket, window, this._windowResets(pinned, [window]));
+    return this._noteRolledOver(seen, pinned.index, bucket, window, this._windowResets(pinned, [window]));
   }
 
   /** As _pinRolledOver, for the global current account — which, unlike a
@@ -1019,9 +1036,46 @@ export class AccountManager {
    * (an Opus-only stretch must not first-sight the Fable window on the very
    * request that should have caught it rolling). */
   _currentRolledOver(current, model) {
-    return this._currentSeen.rolledOver(
+    return this._noteRolledOver(
+      this._currentSeen,
       current.index, this._weeklyBucketFor(model), this._windowKeyFor(current, model),
       this._windowResets(current));
+  }
+
+  /**
+   * Ask `seen` whether a sticky choice's window rolled over, counting a NEWLY
+   * detected event exactly once. Both sticky choices come through here, so the
+   * counter cannot disagree with the detection it reports.
+   *
+   * rolledOver re-reports an event still owed on every later pass — that is
+   * what keeps a preemption with nowhere to go firing until something moves —
+   * so counting its answer would count one weekly rollover once per request and
+   * make `rolloversDetected` a traffic meter. The event is the transition from
+   * "nothing owed on this bucket here" to "owed".
+   */
+  _noteRolledOver(seen, idx, bucket, window, resets) {
+    const alreadyOwed = seen.owedOn(bucket, idx);
+    const rolled = seen.rolledOver(idx, bucket, window, resets);
+    if (rolled && !alreadyOwed) this._rolloverStats.detected++;
+    return rolled;
+  }
+
+  /**
+   * A rollover fired and moved nothing: every eligible destination was ruled
+   * out, so the request stays on the account that just gained a full week.
+   * Without this the log reads identically whether nothing rolled over or a
+   * rollover is stuck, which is the one failure this feature can have that
+   * looks exactly like it working. Throttled like the advisor-degrade line so a
+   * busy session cannot flood the log, but per event rather than globally: two
+   * accounts stuck at once are two things an operator has to know.
+   */
+  _noteStuckRollover(account, model) {
+    const bucket = this._weeklyBucketFor(model);
+    const key = `${account.index}:${bucket}`;
+    const now = Date.now();
+    if (now < (this._rolloverStuckLogAt.get(key) || 0)) return;
+    this._rolloverStuckLogAt.set(key, now + 60_000);
+    console.log(`[TeamClaude] Account "${account.name}" rolled over its ${bucket} window but no eligible account can take that traffic — still routing there`);
   }
 
   /**
@@ -1865,11 +1919,29 @@ export class AccountManager {
    * Return a status summary of all accounts (safe to expose, no credentials).
    */
   getStatus() {
-    const sessions = this.sessionTracker.stats();
+    // The tracker's own share of the owed gauge, reported alongside the session
+    // view it is derived from but published under expiryRouting, which is the
+    // feature it says something about.
+    const { pendingRollovers, ...sessions } = this.sessionTracker.stats();
     return {
       currentAccount: this.accounts[this.currentIndex]?.name,
       switchThreshold: this.switchThreshold,
-      expiryRouting: { ...this.expiryRouting },
+      expiryRouting: {
+        ...this.expiryRouting,
+        // "Is expiry routing working?" without attaching a debugger or waiting
+        // a week — a real weekly window rolls about once per account per week,
+        // so there are only a handful of chances to see one. `detected` counts
+        // the events and `preempted` the ones that actually moved a request.
+        // `owed` is not those two subtracted: it is read off the live pending
+        // state, so an event that left with the session it belonged to stops
+        // being owed. Above zero across several minutes is the signature of the
+        // silent failure — a rollover that fired and never resolved.
+        stats: {
+          rolloversDetected: this._rolloverStats.detected,
+          rolloversPreempted: this._rolloverStats.preempted,
+          rolloversOwed: pendingRollovers + this._currentSeen.pendingCount(),
+        },
+      },
       routes: this.getRoutes(),
       sessions: { ...sessions, distribute: this.distributeSessions },
       accounts: this.accounts.map(a => ({

@@ -72,14 +72,30 @@ export class WindowWatcher {
   rolledOver(idx, bucket, window, resets) {
     // Still owed from an earlier pass: re-report it rather than re-deriving it
     // from a baseline that a re-pin may since have moved.
-    const owed = this.pending.get(bucket);
-    if (owed && owed.idx === idx) return true;
+    if (this.owedOn(bucket, idx)) return true;
     const prev = this.windows.get(window)?.get(idx) ?? null;
     this.seed(idx, resets);
     const now = resets[window] ?? null;
     if (prev == null || now == null || now - prev <= ROLLOVER_MIN_JUMP_MS) return false;
     this.pending.set(bucket, { idx, window, reset: now });
     return true;
+  }
+
+  /** Is a rollover on `bucket` already owed against account `idx`? The question
+   * rolledOver asks first, so a caller can tell a newly detected event from the
+   * re-report of one still owed — the two are indistinguishable in its boolean,
+   * and only the first is an event. */
+  owedOn(bucket, idx) {
+    const owed = this.pending.get(bucket);
+    return !!owed && owed.idx === idx;
+  }
+
+  /** How many rollovers this choice has detected and not yet resolved. A gauge
+   * read straight off the live state rather than a counter of its own: an event
+   * that goes away with the pin it belonged to has stopped being owed, and a
+   * counter would keep claiming it. */
+  pendingCount() {
+    return this.pending.size;
   }
 
   /**

@@ -58,6 +58,11 @@ export class SessionTracker {
     this.maxSessions = maxSessions ?? SESSION_MAX;
     this._now = now || (() => Date.now());
     this._lastSweep = 0;
+    // Records dropped to keep the map under the cap, since start. Deliberately
+    // NOT counting the TTL expiries around it: forgetting an idle session is
+    // the design working, while the cap firing means the bound is binding and
+    // live sessions are losing pins they will have to re-earn.
+    this.evicted = 0;
   }
 
   // Record that `sessionId` made a request served by `accountIndex`, spending
@@ -139,12 +144,14 @@ export class SessionTracker {
       if (oldest === null) oldest = id;
       if (s.inFlight === 0) {
         this.sessions.delete(id);
+        this.evicted += 1;
         return true;
       }
       if (++probed >= SESSION_EVICT_PROBE) break;
     }
     if (oldest === null) return false;
     this.sessions.delete(oldest);
+    this.evicted += 1;
     return true;
   }
 
@@ -261,19 +268,35 @@ export class SessionTracker {
     }
   }
 
-  // { known, active, perAccount: { [index]: activeCount } } — for status/TUI.
-  // Sweeps as it goes so a long-lived headless server stays bounded.
+  // { known, active, max, evicted, perAccount, perBucket, pendingRollovers } —
+  // for status/TUI. Sweeps as it goes so a long-lived headless server stays
+  // bounded. Everything here comes out of the one walk this already does: the
+  // status endpoint is read on every TUI frame, so nothing may add a second.
+  //
+  // `perAccount` is LOAD — active sessions, counted through the freshness rule
+  // that decides what spreads new ones. `perBucket` is where known sessions are
+  // PINNED, bucket -> account index -> count, which is a different question and
+  // the only view in which one session holding Opus on one account and Fable on
+  // another is visible at all. An idle-but-known pin still routes that session's
+  // next request, so it belongs in the pin view and not in the load one.
   stats(now = this._now()) {
     this._lastSweep = now;
     let known = 0;
     let active = 0;
+    let pendingRollovers = 0;
     const perAccount = {};
+    const perBucket = {};
     for (const [id, s] of this.sessions) {
       if (this._isExpired(s, now)) {
         this.sessions.delete(id);
         continue;
       }
       known += 1;
+      pendingRollovers += s.windows?.pendingCount() || 0;
+      for (const [bucket, pin] of s.pins) {
+        const byAccount = perBucket[bucket] || (perBucket[bucket] = {});
+        byAccount[pin.idx] = (byAccount[pin.idx] || 0) + 1;
+      }
       if (this._isActive(s, now)) {
         active += 1;
         // Once per account, on every account this session is currently spending.
@@ -282,6 +305,6 @@ export class SessionTracker {
         }
       }
     }
-    return { known, active, perAccount };
+    return { known, active, max: this.maxSessions, evicted: this.evicted, perAccount, perBucket, pendingRollovers };
   }
 }

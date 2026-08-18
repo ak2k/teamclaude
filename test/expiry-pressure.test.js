@@ -46,6 +46,29 @@ function route(am, sid, model = OPUS, advisorModel = null) {
   }
 }
 
+// Everything the status endpoint says about rollovers, in one object, so a test
+// asserts the whole triple rather than the one number it expected to move.
+function rolloverStats(am) {
+  return am.getStatus().expiryRouting.stats;
+}
+
+function noRollovers() {
+  return { rolloversDetected: 0, rolloversPreempted: 0, rolloversOwed: 0 };
+}
+
+// Collect what the daemon logged while `fn` ran. The stuck-rollover line is an
+// operator-facing signal like the preemption line beside it, so it is asserted
+// the same way an operator would read it: off the log.
+function captureLog(fn) {
+  const lines = [];
+  const real = console.log;
+  console.log = (...args) => lines.push(args.join(' '));
+  try { fn(); } finally { console.log = real; }
+  return lines;
+}
+
+const STUCK = 'no eligible account can take that traffic';
+
 // Roll an account's Fable weekly window, leaving the shared one alone.
 function rollFable(am, idx) {
   const q = am.accounts[idx].quota;
@@ -1105,6 +1128,228 @@ test('one clock per band: a tick between accounts cannot break an exact tie', ()
   } finally {
     Date.now = realNow;
   }
+});
+
+// ---------------------------------------------------------------------------
+// Observability. Every serious defect this feature has had was SILENT: a
+// rollover that should have fired and did not, the feature going inert, a
+// session stranded on a rolled-over account. The daemon says something when a
+// preemption happens and nothing when one is owed and stuck, so these hold the
+// numbers and the one log line that tell those two states apart.
+// ---------------------------------------------------------------------------
+
+test('a rollover that preempts a pin is counted once, on the event not the request', () => {
+  const am = manager([
+    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'b', used: 0.1, resetH: 60 },
+  ]);
+  assert.equal(route(am, 's1').name, 'a');
+  assert.deepEqual(rolloverStats(am), noRollovers(), 'a quiet daemon claims a rollover');
+  rollWeekly(am, 0);
+  assert.equal(route(am, 's1').name, 'b');
+  assert.deepEqual(rolloverStats(am),
+    { rolloversDetected: 1, rolloversPreempted: 1, rolloversOwed: 0 });
+  // Steady state on the destination. rolledOver re-reports an owed event on
+  // every pass, so a counter taken from its answer would climb per request.
+  for (let i = 0; i < 5; i++) assert.equal(route(am, 's1').name, 'b');
+  assert.deepEqual(rolloverStats(am),
+    { rolloversDetected: 1, rolloversPreempted: 1, rolloversOwed: 0 },
+    'the counters are a traffic meter, not an event count');
+});
+
+// The signature of the bug class three review rounds were spent on: the event
+// fired, nothing moved, and the daemon looked exactly as it does when nothing
+// rolled over at all.
+test('a pin rollover with nowhere to move stays owed until something moves', () => {
+  const am = manager([
+    { name: 'a', used: 0.2, resetH: 50 },
+    { name: 'b', used: 0.1, resetH: 100 },
+  ]);
+  assert.equal(route(am, 's1').name, 'a');
+  am.accounts[1].disabled = true;
+  rollWeekly(am, 0);
+  for (let i = 0; i < 3; i++) assert.equal(route(am, 's1').name, 'a');
+  assert.deepEqual(rolloverStats(am),
+    { rolloversDetected: 1, rolloversPreempted: 0, rolloversOwed: 1 },
+    'a rollover stuck across three requests reads as a quiet fleet');
+  am.accounts[1].disabled = false;
+  assert.equal(route(am, 's1').name, 'b');
+  assert.deepEqual(rolloverStats(am),
+    { rolloversDetected: 1, rolloversPreempted: 1, rolloversOwed: 0 },
+    'the gauge did not clear when the event resolved');
+});
+
+test('a stuck current-account rollover is owed until the walk moves off it', () => {
+  const am = manager([
+    { name: 'a', used: 0.2, resetH: 50 },
+    { name: 'b', used: 0.1, resetH: 100 },
+  ], { distribute: false });
+  am.currentIndex = 0;
+  assert.equal(am.getActiveAccount(null, OPUS).name, 'a');
+  am.accounts[1].disabled = true;
+  rollWeekly(am, 0);
+  assert.equal(am.getActiveAccount(null, OPUS).name, 'a');
+  assert.deepEqual(rolloverStats(am),
+    { rolloversDetected: 1, rolloversPreempted: 0, rolloversOwed: 1 },
+    'the current account\'s own owed event is not in the gauge');
+  am.accounts[1].disabled = false;
+  const decision = {};
+  assert.equal(am.getActiveAccount(null, OPUS, null, null, decision).name, 'b');
+  am.confirmRouted(null, 1, OPUS, null, decision);
+  assert.deepEqual(rolloverStats(am),
+    { rolloversDetected: 1, rolloversPreempted: 1, rolloversOwed: 0 });
+});
+
+// _selectNext re-ranks and may hand back the very account the rollover asked to
+// move off. That is the stuck case wearing the shape of a successful one.
+test('a re-rank that lands back on the rolled account is not a preemption', () => {
+  const am = manager([
+    { name: 'a', used: 0.2, resetH: 50 },
+    { name: 'b', used: 0.1, resetH: 100 },
+  ], { distribute: false });
+  am.currentIndex = 0;
+  assert.equal(am.getActiveAccount(null, OPUS).name, 'a');
+  am.accounts[1].disabled = true;
+  rollWeekly(am, 0);
+  assert.equal(am.getActiveAccount(null, OPUS).name, 'a');
+  assert.equal(rolloverStats(am).rolloversPreempted, 0,
+    'staying on the rolled account was counted as moving off it');
+});
+
+test('the stuck-rollover line fires once for the event, not once per request', () => {
+  const am = manager([
+    { name: 'a', used: 0.2, resetH: 50 },
+    { name: 'b', used: 0.1, resetH: 100 },
+  ]);
+  route(am, 's1');
+  am.accounts[1].disabled = true;
+  rollWeekly(am, 0);
+  const lines = captureLog(() => { for (let i = 0; i < 5; i++) route(am, 's1'); });
+  const stuck = lines.filter(l => l.includes(STUCK));
+  assert.equal(stuck.length, 1, `expected one throttled line across five requests, got ${stuck.length}`);
+  assert.ok(stuck[0].includes('"a"') && stuck[0].includes('unified7d'),
+    `the line names neither the account nor the bucket: ${stuck[0]}`);
+});
+
+test('a stuck current-account rollover says so too', () => {
+  const am = manager([
+    { name: 'a', used: 0.2, resetH: 50 },
+    { name: 'b', used: 0.1, resetH: 100 },
+  ], { distribute: false });
+  am.currentIndex = 0;
+  am.getActiveAccount(null, OPUS);
+  am.accounts[1].disabled = true;
+  rollWeekly(am, 0);
+  const lines = captureLog(() => {
+    for (let i = 0; i < 3; i++) assert.equal(am.getActiveAccount(null, OPUS).name, 'a');
+  });
+  assert.equal(lines.filter(l => l.includes(STUCK)).length, 1);
+});
+
+// The line exists to separate "quiet because nothing rolled" from "quiet
+// because it is stuck". A preemption that worked must not be filed as stuck.
+test('a rollover that moves reports the move, not a stuck event', () => {
+  const am = manager([
+    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'b', used: 0.1, resetH: 60 },
+  ]);
+  route(am, 's1');
+  rollWeekly(am, 0);
+  const lines = captureLog(() => { assert.equal(route(am, 's1').name, 'b'); });
+  assert.equal(lines.filter(l => l.includes(STUCK)).length, 0, 'a successful preemption logged itself stuck');
+  assert.ok(lines.some(l => l.includes('Session pin on "a" released')), lines.join('\n'));
+});
+
+test('flag off, and preempt off, count nothing and owe nothing', () => {
+  for (const er of [null, { enabled: false }, { enabled: true, preempt: false }]) {
+    const am = manager([
+      { name: 'a', used: 0.5, resetH: 50 },
+      { name: 'b', used: 0.1, resetH: 60 },
+    ], { er });
+    const label = JSON.stringify(er);
+    route(am, 's1');
+    rollWeekly(am, 0);
+    const lines = captureLog(() => { route(am, 's1'); route(am, 's1'); });
+    assert.deepEqual(rolloverStats(am), noRollovers(), `counters moved with ${label}`);
+    assert.equal(lines.filter(l => l.includes(STUCK)).length, 0, `the stuck line fired with ${label}`);
+  }
+});
+
+// The counters are monotonic SINCE DAEMON START, and setExpiryRouting replaces
+// the config object wholesale on every reload — so anything kept inside it is
+// zeroed by an operator editing an unrelated key while watching these numbers.
+test('a config reload retunes the feature without zeroing its counters', () => {
+  const am = manager([
+    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'b', used: 0.1, resetH: 60 },
+  ]);
+  route(am, 's1');
+  rollWeekly(am, 0);
+  assert.equal(route(am, 's1').name, 'b');
+  am.setExpiryRouting({ enabled: true, tolerance: 2 });
+  assert.equal(am.expiryRouting.tolerance, 2, 'the reload did not apply');
+  assert.deepEqual(rolloverStats(am),
+    { rolloversDetected: 1, rolloversPreempted: 1, rolloversOwed: 0 });
+});
+
+// perAccount is one number per account and cannot express the model this branch
+// was built around: a session holding one family on one account and another on
+// a second. perBucket is the only view in which that is visible.
+test('the per-bucket view shows one session\'s two families on two accounts', () => {
+  const am = manager([
+    { name: 'a', used: 0.2, resetH: 50, fableUsed: 0.99, fableResetH: 50 }, // no Fable left
+    { name: 'b', used: 0.99, resetH: 50, fableUsed: 0.1, fableResetH: 50 }, // no Opus left
+  ]);
+  assert.equal(route(am, 's1', OPUS).name, 'a');
+  assert.equal(route(am, 's1', FABLE).name, 'b');
+  const sessions = am.getStatus().sessions;
+  assert.deepEqual(sessions.perBucket, { unified7d: { 0: 1 }, unified7dFable: { 1: 1 } });
+  assert.deepEqual(sessions.perAccount, { 0: 1, 1: 1 },
+    'perAccount already distinguishes the two families, so perBucket proves nothing');
+});
+
+test('the per-bucket view counts sessions, and never publishes their ids', () => {
+  const am = manager([
+    { name: 'a', used: 0.1, resetH: 50 },
+    { name: 'b', used: 0.1, resetH: 55 },
+  ]);
+  // The id is a client-supplied header and this endpoint is read by the status
+  // renderer and the TUI, so it must not travel.
+  const secret = 'session-id-that-must-not-travel';
+  route(am, secret);
+  route(am, 'other');
+  const status = am.getStatus();
+  const counts = Object.values(status.sessions.perBucket.unified7d);
+  assert.equal(counts.reduce((a, b) => a + b, 0), 2);
+  assert.ok(!JSON.stringify(status).includes(secret), 'a client-supplied session id reached the status payload');
+});
+
+// The cap firing means the bound is BINDING: live sessions are losing pins they
+// have to re-earn. Forgetting an idle session is the design working, so the two
+// must not share a counter.
+test('the cap evicting is counted; forgetting an idle session is not', () => {
+  let t = Date.now();
+  const tracker = new SessionTracker({ maxSessions: 4, knownTtlMs: 50, activeTtlMs: 50, now: () => t });
+  const am = manager([{ name: 'a', used: 0.1, resetH: 50 }], { tracker });
+  for (let i = 0; i < 10; i++) route(am, `s${i}`);
+  assert.equal(am.getStatus().sessions.evicted, 6, 'the cap firing is invisible');
+  t += 1000;
+  tracker.sweep(t);
+  assert.equal(tracker.sessions.size, 0, 'nothing was forgotten, so this proves nothing');
+  assert.equal(am.getStatus().sessions.evicted, 6, 'a TTL expiry was counted as a cap eviction');
+});
+
+// The eviction that costs most is the one taken under concurrency, where the
+// bounded probe finds no idle victim and drops a session mid-request.
+test('an eviction forced past the in-flight probe is counted too', () => {
+  const tracker = new SessionTracker({ maxSessions: 4 });
+  const am = manager([{ name: 'a', used: 0.1, resetH: 50 }], { tracker });
+  for (let i = 0; i < 6; i++) am.beginSession(`live${i}`); // never ended: all in flight
+  assert.equal(tracker.sessions.size, 4, 'the cap did not hold, so this proves nothing');
+  const sessions = am.getStatus().sessions;
+  assert.equal(sessions.evicted, 2, 'a forced eviction under concurrency is invisible');
+  assert.equal(sessions.max, 4, 'the cap is not reported, so evictions cannot be read against it');
+  assert.equal(sessions.known, 4);
 });
 
 test('flag off matches an absent config step for step', () => {

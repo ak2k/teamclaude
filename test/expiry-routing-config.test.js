@@ -75,17 +75,38 @@ async function withServer(expiryRouting, fn) {
   }
 }
 
+// A quiet daemon has fired no rollovers, so the counters read zero — but they
+// have to be PRESENT and zero rather than absent, because "no key" and "key at
+// zero" are the same thing to an operator reading a fresh status and the
+// difference between a feature that is quiet and one that is not deployed.
+const NO_ROLLOVERS = { rolloversDetected: 0, rolloversPreempted: 0, rolloversOwed: 0 };
+
 test('expiryRouting in the config file reaches the running manager', async () => {
   await withServer({ enabled: true, tolerance: 3, preempt: false }, async ({ port }) => {
     const s = await status(port);
-    assert.deepEqual(s.expiryRouting, { enabled: true, tolerance: 3, preempt: false });
+    assert.deepEqual(s.expiryRouting, { enabled: true, tolerance: 3, preempt: false, stats: NO_ROLLOVERS });
   });
 });
 
 test('an absent expiryRouting key leaves the feature off with its defaults', async () => {
   await withServer(null, async ({ port }) => {
     const s = await status(port);
-    assert.deepEqual(s.expiryRouting, { enabled: false, tolerance: 1.5, preempt: true });
+    assert.deepEqual(s.expiryRouting, { enabled: false, tolerance: 1.5, preempt: true, stats: NO_ROLLOVERS });
+  });
+});
+
+// The session view the TUI and `status --json` render from, reaching the wire.
+// `perBucket` is the one place a session's per-family pins are visible at all,
+// so it has to survive the trip rather than only exist in the manager.
+test('the session view reaches the wire with its cap and pin breakdown', async () => {
+  await withServer(null, async ({ port }) => {
+    const s = await status(port);
+    assert.equal(s.sessions.known, 0);
+    assert.equal(s.sessions.active, 0);
+    assert.equal(s.sessions.evicted, 0);
+    assert.ok(s.sessions.max > 0, 'the session cap is not reported, so cap pressure cannot be read');
+    assert.deepEqual(s.sessions.perAccount, {});
+    assert.deepEqual(s.sessions.perBucket, {});
   });
 });
 
