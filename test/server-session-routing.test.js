@@ -599,19 +599,23 @@ test('a /tc-acct/ pinned request does not settle the current account\'s rollover
     'the walk did not move off the rolled account once it could');
 });
 
-// The 403 branch fails the account over to the next one, and its three sibling
-// retry branches are all bounded by retryCount. It has to be too: the exclusion
-// set normally runs the fleet down first, but that is selection's promise, not
-// this branch's, and a selection that hands back an account this request
-// already tried turns the failover into an unbounded loop against upstream.
-test('a 403 failover is bounded by the retry count', async () => {
+// The 403 branch recurses without a retryCount guard, unlike its three sibling
+// retry paths — deliberately. Those retry the SAME account after a condition a
+// retry can fix, so they need a count; this one excludes the account for the
+// rest of the request, so `ctx.tried` bounds it at one attempt per account. That
+// is the stronger bound (a fleet whose first few accounts are refused still
+// reaches the healthy ones, which a count below the account total would not),
+// and it is the bound this holds — nothing else asserts that the 403 path adds
+// to the exclusion set at all.
+//
+// The upstream stops refusing after a dozen hits so a failover that had lost its
+// bound terminates and can be asserted on, instead of hanging the runner.
+test('a fleet answering 403 is tried once per account, then reported', async () => {
   const am = fleet([
     { name: 'a', used: 0.2, resetH: 50 },
     { name: 'b', used: 0.2, resetH: 60 },
+    { name: 'c', used: 0.2, resetH: 70 },
   ]);
-  am.getActiveAccount = () => am.accounts[0];
-  // Refusing only the first dozen hits means an unbounded run terminates and can
-  // be asserted on, instead of hanging the runner.
   const upstream = scriptedUpstream(({ hit }) => ({ status: hit <= 12 ? 403 : 200 }));
   const realConsoleError = console.error;
   console.error = () => {};
@@ -623,6 +627,6 @@ test('a 403 failover is bounded by the retry count', async () => {
   } finally {
     console.error = realConsoleError;
   }
-  assert.equal(upstream.hits.length, 3,
-    `the 403 path retried past maxRetries: ${upstream.hits.length} attempts for 2 accounts`);
+  assert.deepEqual(upstream.hits.map(h => h.account), ['a', 'b', 'c'],
+    'a refused account was offered to the same request twice');
 });

@@ -1051,29 +1051,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       (ctx.credentialRejected ??= new Set()).add(account.name);
       ctx.tried.add(account.index);
       console.error(`[TeamClaude] 403 on "${account.name}" — upstream refused the account credential`);
-      if (res.destroyed) return;
-      // Bounded like every other retrying branch. The exclusion set normally
-      // runs the fleet down first, but that is selection's promise, not this
-      // branch's: this one owns its own termination, because a selection that
-      // hands back an account this request already tried turns the failover into
-      // an unbounded loop against upstream.
-      if (retryCount < maxRetries) {
-        return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, route);
-      }
-      // Out of attempts, and the client still must not see the 403: it reads one
-      // as "your session is dead" and drops its own login over an account
-      // problem it has no part in. Report the refusal as the proxy error it is —
-      // the same answer the no-account branch gives when every account was
-      // refused.
-      const names = [...ctx.credentialRejected];
-      ctx.status = 502;
-      ctx.account = `(${names.join(', ')} refused)`;
-      res.writeHead(502, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        type: 'error',
-        error: { type: 'proxy_error', message: `Upstream refused the credential for account ${names.map(n => `"${n}"`).join(', ')} (403). Check the account, then re-add it with: teamclaude login` },
-      }));
-      return;
+      return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, route);
     }
 
     if (upstreamRes.status === 401 && account.type === 'oauth' && account.refreshToken
