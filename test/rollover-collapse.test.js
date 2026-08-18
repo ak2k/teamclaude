@@ -235,3 +235,66 @@ test('the stuck-rollover throttle follows an account through a removal', () => {
   assert.equal(bLines.filter(l => l.includes(STUCK)).length, 0,
     'the throttle did not follow the account it belongs to');
 });
+
+// ── the other sticky choice ────────────────────────────────────────────────
+// The pin arm above and this one are the SAME mistake in adjacent functions
+// (_pinRolledOver / _currentRolledOver), and neither arm catches the other's:
+// a fixture that drives only one leaves the other's wrong key alive. The global
+// current account is one account for every bucket, so its collapse shows in the
+// bookkeeping rather than in where the next request lands.
+
+test('the current-account walk settles a collapsed bucket under that bucket', () => {
+  const am = collapsingManager([
+    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'b', used: 0.1, resetH: 60 },
+  ], { distribute: false });
+  assertCollapses(am);
+  am.setCurrentAccount(0);
+
+  // No session id anywhere here: this is the walk that owns `currentIndex`.
+  const walk = (model) => {
+    const decision = {};
+    const acc = am.getActiveAccount(null, model, null, null, decision);
+    am.confirmRouted(null, acc.index, model, null, decision);
+    return acc;
+  };
+  assert.equal(walk(OPUS).name, 'a');
+  assert.equal(walk(FABLE).name, 'a');
+
+  rollWeekly(am, 0);
+  assert.equal(walk(FABLE).name, 'b', 'the collapsed Fable bucket missed the roll');
+  // The event was detected against the Fable bucket and must settle against it.
+  // Filed under the window it resolves to, the settle looks for a service on
+  // `unified7d`, finds the one the Fable request recorded on `unified7dFable`,
+  // and matches nothing — so the move never lands and the gauge never clears.
+  assert.deepEqual(rolloverStats(am), { rolloversDetected: 1, rolloversPreempted: 1, rolloversOwed: 0 },
+    "the Fable bucket's event was filed under a key its own service could not settle");
+});
+
+test('a collapsed bucket settling does not swallow the shared bucket\'s roll on the current account', () => {
+  const am = collapsingManager([
+    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'b', used: 0.1, resetH: 60 },
+  ], { distribute: false });
+  am.setCurrentAccount(0);
+  const walk = (model) => {
+    const decision = {};
+    const acc = am.getActiveAccount(null, model, null, null, decision);
+    am.confirmRouted(null, acc.index, model, null, decision);
+    return acc;
+  };
+  assert.equal(walk(OPUS).name, 'a');
+  assert.equal(walk(FABLE).name, 'a');
+
+  rollWeekly(am, 0);
+  assert.equal(walk(FABLE).name, 'b');  // the Fable bucket moves and banks its own baseline
+
+  // Drive the walk back onto 'a' without asking about the shared bucket, so the
+  // only thing that could have advanced its baseline is the Fable settle.
+  am.accounts[1].disabled = true;
+  assert.equal(walk(OPUS).name, 'a');
+  am.accounts[1].disabled = false;
+  assert.equal(walk(OPUS).name, 'b',
+    "the shared bucket inherited the Fable bucket's banked baseline, so its own roll never fired");
+  assert.equal(rolloverStats(am).rolloversDetected, 2, 'one of the two buckets never reported its roll');
+});
