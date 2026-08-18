@@ -349,6 +349,69 @@ function clientGone(res) {
   return !!res.destroyed || !!res.stream?.destroyed;
 }
 
+// Failures that say nothing about the ACCOUNT, only about the socket: a retry
+// can succeed where a failover cannot, and closing fast lets Node evict a dead
+// socket so the client's retry reconnects cleanly.
+const SOCKET_TRANSIENT = new Set([
+  'ECONNRESET', 'ETIMEDOUT', 'EPIPE',
+  'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT',
+  'TEAMCLAUDE_HEADERS_TIMEOUT', 'TEAMCLAUDE_BODY_TIMEOUT',
+]);
+
+// Failures that are a property of the HOST being dialled — name resolution and
+// routing. The hostname has no per-account component, so every account gets the
+// same answer: marching the fleet is wasted work that makes a network hiccup
+// present as a fleet-wide outage. Measured before this was classified: one
+// request against an unresolvable upstream burned all four accounts and
+// answered 429, so a log full of these represents far fewer requests than lines.
+//
+// Conditional rather than absolute, because an account MAY name its own
+// `upstream` (third-party backends). Where an untried account would dial a
+// different host, this failure says nothing about that one and failing over is
+// exactly the right move.
+const HOST_TRANSIENT = new Set([
+  'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'ENETDOWN',
+  // "Nothing is listening at host:port" is a property of the host by the same
+  // argument as a name that will not resolve. A homogeneous fleet sees no
+  // change — every account dials the same host, so this stays transient — and a
+  // fleet with per-account backends gets the failover that is actually useful.
+  'ECONNREFUSED',
+]);
+
+/**
+ * Every error code this failure carries: its own, its `cause`'s (Node's global
+ * fetch wraps the real error there), and its children's — happy-eyeballs reports
+ * an all-addresses-failed connect as an AggregateError which may carry NO
+ * top-level code at all, the reason being recorded only per address.
+ */
+function errorCodes(err) {
+  const codes = [err?.code, err?.cause?.code];
+  for (const child of err?.errors || []) codes.push(child?.code);
+  for (const child of err?.cause?.errors || []) codes.push(child?.code);
+  return codes.filter(Boolean);
+}
+
+/**
+ * Should this upstream failure close the connection for the client to retry,
+ * rather than being failed over to the next account?
+ *
+ * `otherHostAvailable` says whether an untried account would dial a DIFFERENT
+ * host, which is the only thing that makes a host-scoped failure worth failing
+ * over. Exported for its own tests: the difference between these two answers is
+ * one request versus one request per account in the fleet.
+ */
+export function isTransientUpstreamError(err, { otherHostAvailable = false } = {}) {
+  if (!(err instanceof Error)) return false;
+  if (err.name === 'TimeoutError' || err.name === 'AbortError') return true;
+  // Node's global fetch reports everything as this, with the real error on
+  // `.cause`; the default path here uses https.request and does not.
+  if (typeof err.message === 'string' && err.message.includes('fetch failed')) return true;
+  const codes = errorCodes(err);
+  if (codes.some(c => SOCKET_TRANSIENT.has(c))) return true;
+  if (codes.some(c => HOST_TRANSIENT.has(c))) return !otherHostAvailable;
+  return false;
+}
+
 export function describeConnectError(err) {
   return err?.errors?.map(e => e.message).join('; ') || err?.message;
 }
@@ -1242,13 +1305,14 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
     const l = getLog();
     if (l) { l.write(`\n\n=== ERROR ===\n${err.stack || err.message}`); l.end(); }
 
-    const isTransient = err instanceof Error &&
-      (err.code === 'TEAMCLAUDE_HEADERS_TIMEOUT' || err.code === 'TEAMCLAUDE_BODY_TIMEOUT' ||
-        err.name === 'TimeoutError' || err.name === 'AbortError' ||
-        err.message.includes('fetch failed') ||
-        err.code === 'ECONNRESET' || err.code === 'ECONNREFUSED' ||
-        err.code === 'ETIMEDOUT' || err.code === 'UND_ERR_CONNECT_TIMEOUT' ||
-        err.code === 'UND_ERR_HEADERS_TIMEOUT' || err.code === 'UND_ERR_BODY_TIMEOUT');
+    // Would failing over even dial somewhere else? Only an untried account
+    // pointing at a different `upstream` makes that true, and it is the one
+    // thing that decides whether a name-resolution failure is worth retrying
+    // elsewhere.
+    const thisHost = account.upstream || upstream;
+    const otherHostAvailable = accountManager.accounts.some(a =>
+      a.index !== account.index && !ctx.tried.has(a.index) && (a.upstream || upstream) !== thisHost);
+    const isTransient = isTransientUpstreamError(err, { otherHostAvailable });
 
     // Transient network errors (including a stale-socket headers/body timeout):
     // close the connection and let the client retry. Failing over to another

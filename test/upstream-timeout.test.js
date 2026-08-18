@@ -5,7 +5,7 @@ import { once } from 'node:events';
 import { ReadableStream } from 'node:stream/web';
 import { TextEncoder, TextDecoder } from 'node:util';
 import { upstreamFetch } from '../src/upstream-fetch.js';
-import { readWithIdleTimeout } from '../src/server.js';
+import { readWithIdleTimeout, isTransientUpstreamError } from '../src/server.js';
 
 // Bring up an HTTP server on an ephemeral port and hand back {server, port}.
 async function listen(handler) {
@@ -146,4 +146,66 @@ test('body watchdog does not fire when chunks keep arriving', async () => {
   } finally {
     clearInterval(alive);
   }
+});
+
+// ── a failure of the HOST is not a failure of the ACCOUNT ─────────────────
+// The hostname has no per-account component, so a name-resolution failure gives
+// every account the same answer. Failing over is wasted work, and worse than
+// wasted: it turns a network hiccup into what reads as a fleet-wide outage, and
+// makes a log of N such lines look like N requests when it was one.
+//
+// Measured before this was classified: one client request against an
+// unresolvable upstream produced four "Upstream error" lines on a four-account
+// fleet and answered the client 429.
+
+const enotfound = () => Object.assign(new Error('getaddrinfo ENOTFOUND api.anthropic.com'), { code: 'ENOTFOUND' });
+const withCode = (code) => Object.assign(new Error(`${code} while connecting`), { code });
+// Node's happy-eyeballs dialer reports an all-addresses-failed connect like
+// this. `message` is '' by construction and there may be no top-level code.
+const aggregate = (codes) => new AggregateError(codes.map(withCode), '');
+
+test('a name-resolution failure is transient, not an account to fail over from', () => {
+  assert.equal(isTransientUpstreamError(enotfound()), true,
+    'a DNS failure marches the whole fleet before answering');
+  assert.equal(isTransientUpstreamError(withCode('EAI_AGAIN')), true,
+    'a temporary resolver failure marches the whole fleet');
+});
+
+test('a host or network that cannot be reached is transient too', () => {
+  for (const code of ['EHOSTUNREACH', 'ENETUNREACH', 'ENETDOWN']) {
+    assert.equal(isTransientUpstreamError(withCode(code)), true, `${code} failed the fleet over`);
+  }
+  // A broken pipe is the write-side sibling of ECONNRESET: a dead socket, not a
+  // dead account.
+  assert.equal(isTransientUpstreamError(withCode('EPIPE')), true);
+});
+
+// ...unless failing over would actually dial somewhere else. An account may name
+// its own `upstream`, and a name that will not resolve for one host says nothing
+// about a different one.
+test('a host failure IS worth failing over when another account dials a different host', () => {
+  assert.equal(isTransientUpstreamError(enotfound(), { otherHostAvailable: true }), false,
+    'a fleet with a third-party backend lost its failover on a DNS error');
+  // A socket-level failure stays transient either way: it is about this
+  // connection, and another host cannot fix a reset one.
+  assert.equal(isTransientUpstreamError(withCode('ECONNRESET'), { otherHostAvailable: true }), true);
+  // ECONNREFUSED is host-scoped by the same argument: nothing listening at
+  // host:port says nothing about a different host.
+  assert.equal(isTransientUpstreamError(withCode('ECONNREFUSED')), true);
+  assert.equal(isTransientUpstreamError(withCode('ECONNREFUSED'), { otherHostAvailable: true }), false);
+});
+
+// The reason the codes are read from the children as well.
+test('an all-addresses-failed connect is classified from its children', () => {
+  assert.equal(isTransientUpstreamError(aggregate(['ENOTFOUND', 'ENOTFOUND'])), true,
+    'an AggregateError carrying no top-level code failed the whole fleet over');
+  assert.equal(isTransientUpstreamError(aggregate(['ECONNREFUSED', 'ECONNREFUSED'])), true);
+  // And through `cause`, which is where Node's global fetch puts the real error.
+  assert.equal(isTransientUpstreamError(Object.assign(new TypeError('boom'), { cause: enotfound() })), true);
+});
+
+test('an error that is genuinely about the account still fails over', () => {
+  assert.equal(isTransientUpstreamError(new Error('upstream proxy refused CONNECT: HTTP/1.1 407')), false);
+  assert.equal(isTransientUpstreamError(withCode('CERT_HAS_EXPIRED')), false);
+  assert.equal(isTransientUpstreamError('not an error at all'), false);
 });

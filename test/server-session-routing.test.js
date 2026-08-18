@@ -706,3 +706,83 @@ test('the confirmation names the account that served, not the fleet\'s current o
   assert.equal(am.getStatus().expiryRouting.stats.rolloversOwed, 0,
     'the settlement was told the fleet\'s current account instead of the one that served, so it read as traffic coming back');
 });
+
+// The predicate is only worth having if the failover path consults it. Driven
+// through the real server, with the failure produced by an upstream that is
+// simply not there — a connection refused, which is the same classification
+// branch a DNS failure takes and needs no live resolver to reproduce, so this
+// stays deterministic in CI.
+//
+// Measured against a genuinely unresolvable name outside the suite: before the
+// classification, ONE request produced four "Upstream error" lines on this
+// fleet and answered 429; after, one line and a closed connection.
+test('an unreachable upstream is not marched through the whole fleet', async () => {
+  const am = fleet([
+    { name: 'a', used: 0.2, resetH: 50 },
+    { name: 'b', used: 0.2, resetH: 60 },
+    { name: 'c', used: 0.2, resetH: 70 },
+    { name: 'd', used: 0.2, resetH: 80 },
+  ]);
+  // Port 1 accepts nothing, so the dial fails the same way for every account.
+  const proxy = createProxyServer(am, { proxy: {}, upstream: 'http://127.0.0.1:1' });
+  const port = await listen(proxy);
+
+  const lines = [];
+  const realErr = console.error;
+  console.error = (...a) => lines.push(a.map(x => (x instanceof Error ? x.message : String(x))).join(' '));
+  try {
+    await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...SID },
+      body: JSON.stringify({ model: OPUS, messages: [] }),
+    }).then(r => r.text()).catch(() => {});   // the connection is closed, by design
+  } finally {
+    console.error = realErr;
+    proxy.close();
+  }
+
+  const attempts = lines.filter(l => l.includes('Upstream error'));
+  assert.ok(attempts.length > 0, 'the request never reached the upstream error path at all');
+  assert.equal(attempts.length, 1,
+    `one unreachable host burned ${attempts.length} of ${am.accounts.length} accounts; `
+    + 'a log of these then reads as many more requests than there were');
+});
+
+// The other half of the same rule: where accounts really do dial different
+// hosts, one host being unreachable says nothing about the others, and the
+// failover has to survive.
+test('an unreachable upstream still fails over to an account on a different host', async () => {
+  const am = fleet([
+    { name: 'a', used: 0.2, resetH: 50 },
+    { name: 'b', used: 0.2, resetH: 60 },
+  ]);
+  const reached = [];
+  const good = http.createServer(async (req, res) => {
+    for await (const c of req) void c;
+    reached.push((req.headers['x-api-key'] || '').replace(/^k-/, ''));
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{}');
+  });
+  const goodPort = await listen(good);
+  am.accounts[1].upstream = `http://127.0.0.1:${goodPort}`;   // 'b' has its own backend
+
+  const proxy = createProxyServer(am, { proxy: {}, upstream: 'http://127.0.0.1:1' });
+  const port = await listen(proxy);
+  const realErr = console.error;
+  console.error = () => {};
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...SID },
+      body: JSON.stringify({ model: OPUS, messages: [] }),
+    });
+    await res.text();
+    assert.equal(res.status, 200, 'the request did not reach the account whose host was up');
+  } finally {
+    console.error = realErr;
+    proxy.close();
+    good.close();
+  }
+  assert.deepEqual(reached, ['b'],
+    'a fleet with a third-party backend lost its failover when the default host was unreachable');
+});
