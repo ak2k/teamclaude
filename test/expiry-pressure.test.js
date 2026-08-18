@@ -706,6 +706,51 @@ test('a preempted session settles on its destination instead of chaining onward'
   assert.equal(second.name, first.name, 'the owed event chained the session onto a third account');
 });
 
+// One request goes to ONE account, so the executor's bucket is what binds it;
+// the advisor's model is a constraint on that choice, not a second pin to look
+// up. Keying on the advisor's bucket hands the request to whichever account the
+// session's OTHER family happens to sit on.
+test('an advisor request follows the executor\'s pin, not the advisor\'s', () => {
+  const am = manager([
+    { name: 'opus-home', used: 0.2, resetH: 50, fableUsed: 0.2, fableResetH: 50 },
+    { name: 'fable-home', used: 0.2, resetH: 300, fableUsed: 0.5, fableResetH: 300 },
+  ]);
+  am.recordSession('s1', 0, OPUS);
+  am.recordSession('s1', 1, FABLE);
+  assert.equal(am.getActiveAccount(null, OPUS, FABLE, 's1').name, 'opus-home');
+});
+
+// A route pin is the operator saying where a model goes. Session affinity is a
+// cache optimisation, and it must not quietly outrank that — including when the
+// route covers only the ADVISOR's model.
+test('a route pin on the advisor model still wins over session affinity', () => {
+  const am = manager([
+    { name: 'pin-target', used: 0.2, resetH: 300 },
+    { name: 'session-home', used: 0.2, resetH: 50 },
+  ]);
+  am.setRoutes([{ name: 'fable', match: ['*fable*'] }]);
+  assert.equal(am.setRoutePin('fable', 0).ok, true);
+  am.recordSession('s1', 1, OPUS);
+  assert.equal(am.getActiveAccount(null, OPUS, FABLE, 's1').name, 'pin-target');
+});
+
+// A preemption with nowhere to go leaves the session exactly where it was, so
+// nothing switched — arming a ramp there would pace requests onto the account
+// that is already serving them.
+test('a rollover with nowhere to move does not pace the account already serving', () => {
+  const am = manager([
+    { name: 'a', used: 0.2, resetH: 50 },
+    { name: 'b', used: 0.1, resetH: 100 },
+  ]);
+  route(am, 's1');
+  am.accounts[1].disabled = true;
+  am.accounts[0].rampStartedAt = null;
+  rollWeekly(am, 0);
+  assert.equal(route(am, 's1').name, 'a');
+  assert.equal(am.accounts[0].rampStartedAt, null,
+    'the account already serving the session was paced as if it had just been switched to');
+});
+
 test('a current-account rollover survives a retry that lands back on it', () => {
   const am = manager([
     { name: 'a', used: 0.5, resetH: 50 },
