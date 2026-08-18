@@ -40,8 +40,7 @@ test('remapAccounts drops only the bucket whose account went away', () => {
   st.touch('split', 2, [FABLE]);
   st.remapAccounts(idx => (idx === 1 ? null : idx > 1 ? idx - 1 : idx));
   assert.equal(st.pinnedAccount('split', SHARED), null);
-  assert.equal(st.pinnedAccount('split', FABLE), 1);
-  assert.equal(st.isPinned('split'), true, 'the whole session was unpinned');
+  assert.equal(st.pinnedAccount('split', FABLE), 1, 'the whole session was unpinned');
 });
 
 test('removing an account renumbers the sessions pinned above it', () => {

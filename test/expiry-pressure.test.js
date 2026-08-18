@@ -311,15 +311,17 @@ test('with no family bucket, a shared-weekly rollover still preempts a Fable pin
   assert.equal(route(am, 's1', FABLE).name, 'b');
 });
 
-test('the pin rollover map is hard-capped, not scanned, per new session', () => {
+test('a rollover baseline is bounded by the session cap, not a second one', () => {
   const am = manager([
     { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
-  ]);
+  ], { tracker: new SessionTracker({ maxSessions: 8 }) });
   for (let i = 0; i < 600; i++) route(am, `s${i}`);
-  assert.ok(am._pinWindowSeen.size <= 512, `map grew to ${am._pinWindowSeen.size}`);
-  assert.ok(am._pinWindowSeen.has('s599'), 'the newest baseline was evicted');
-  assert.ok(!am._pinWindowSeen.has('s0'), 'the oldest baseline survived the cap');
+  const withBaselines = [...am.sessionTracker.sessions.values()].filter(s => s.windows).length;
+  assert.ok(am.sessionTracker.sessions.size <= 8, `map grew to ${am.sessionTracker.sessions.size}`);
+  assert.ok(withBaselines > 0, 'no session kept a baseline at all');
+  assert.ok(am.sessionTracker.windowsFor('s599'), 'the newest baseline was evicted');
+  assert.equal(am.sessionTracker.windowsFor('s0'), null, 'the oldest baseline survived the cap');
   // Eviction is not a broken session: it re-seeds on its next request, and its
   // account's next rollover still moves it.
   const acc = route(am, 's0');
@@ -328,10 +330,25 @@ test('the pin rollover map is hard-capped, not scanned, per new session', () => 
   assert.equal(route(am, 's0').name, other.name);
 });
 
+// The baseline is only read by _selectForSession, which never runs with
+// distribution off — building one there would accumulate state nothing reads.
 test('with distribution off nothing seeds the pin rollover map', () => {
   const am = manager([{ name: 'a', used: 0.1, resetH: 50 }], { distribute: false });
   am.recordSession('s1', 0);
-  assert.equal(am._pinWindowSeen.size, 0);
+  assert.equal(am.sessionTracker.windowsFor('s1'), null);
+});
+
+// A session that keeps making requests holds the most recent slot in the one
+// map that bounds it, so churn evicts the idle sessions around it instead.
+test('a live session keeps its baseline while unrelated sessions churn past the cap', () => {
+  const am = manager([
+    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'b', used: 0.05, resetH: 60 },
+  ], { tracker: new SessionTracker({ maxSessions: 8 }) });
+  route(am, 'live');
+  for (let i = 0; i < 600; i++) { route(am, `s${i}`); route(am, 'live'); }
+  rollWeekly(am, 0);
+  assert.equal(route(am, 'live').name, 'b', 'the live session lost the baseline that detects its rollover');
 });
 
 test('a NaN utilization does not empty the band', () => {

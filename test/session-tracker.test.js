@@ -40,13 +40,27 @@ test('a pin is per bucket: re-pinning one leaves the others alone', () => {
   assert.equal(st.pinnedAccount('s1', FABLE, clock.t), 2);
 });
 
-test('a bucket with no pin reads as unpinned, and isPinned answers for the session', () => {
+test('a bucket with no pin reads as unpinned', () => {
   const { clock, now } = fixedClock();
   const st = new SessionTracker({ now });
-  assert.equal(st.isPinned('s1', clock.t), false);
+  assert.equal(st.pinnedAccount('s1', SHARED, clock.t), null);
   st.touch('s1', 0, [SHARED], clock.t);
   assert.equal(st.pinnedAccount('s1', FABLE, clock.t), null);
-  assert.equal(st.isPinned('s1', clock.t), true);
+  assert.equal(st.pinnedAccount('s1', SHARED, clock.t), 0);
+});
+
+// The baselines are session-scoped state, so they live on the session record:
+// one cap, one lifetime, one eviction policy for everything the session owns.
+test('a rollover baseline is created, kept and dropped with its session', () => {
+  const { clock, now } = fixedClock();
+  const st = new SessionTracker({ now, maxSessions: 3 });
+  assert.equal(st.windowsFor('unknown', true, clock.t), null, 'a baseline outlived any session');
+  st.touch('s1', 0, [SHARED], clock.t);
+  const seen = st.windowsFor('s1', true, clock.t);
+  assert.ok(seen);
+  assert.equal(st.windowsFor('s1', false, clock.t), seen, 'a second look built a fresh baseline');
+  clock.t += SESSION_KNOWN_TTL_MS + 1;
+  assert.equal(st.windowsFor('s1', true, clock.t), null, 'a forgotten session kept its baseline');
 });
 
 test('touch with no session id is a no-op', () => {
@@ -142,6 +156,36 @@ test('a session spending two accounts is load on both, counted once each', () =>
   assert.deepEqual(st.stats(clock.t).perAccount, { 0: 2, 1: 1 });
 });
 
+// Load is what the fleet is doing NOW. A pin outlives the active window by
+// design (it holds the cache affinity for the whole known hour), so a session
+// that took one diverted Fable request half an hour ago must not still read as
+// load on that account — the whole point of the metric is to spread new
+// sessions onto the accounts that are actually idle.
+test('a pin stops counting as load once its bucket goes quiet', () => {
+  const { clock, now } = fixedClock();
+  const st = new SessionTracker({ now });
+  st.touch('s1', 1, [FABLE], clock.t);                 // one Fable turn on account 1
+  clock.t += SESSION_ACTIVE_TTL_MS * 2;
+  st.touch('s1', 0, [SHARED], clock.t);                // Opus turns keep going on 0
+  assert.equal(st.activeCountFor(0, clock.t), 1);
+  assert.equal(st.activeCountFor(1, clock.t), 0, 'an hour-old Fable pin still reads as load');
+  assert.deepEqual(st.stats(clock.t).perAccount, { 0: 1 });
+  // Still pinned, though — the affinity is intact and a Fable turn goes back there.
+  assert.equal(st.pinnedAccount('s1', FABLE, clock.t), 1);
+});
+
+test('a long stream still counts as load on the account it is spending', () => {
+  const { clock, now } = fixedClock();
+  const st = new SessionTracker({ now });
+  st.touch('s1', 1, [FABLE], clock.t);
+  clock.t += SESSION_ACTIVE_TTL_MS * 2;
+  st.beginRequest('s1', clock.t);
+  st.touch('s1', 0, [SHARED], clock.t);
+  clock.t += SESSION_ACTIVE_TTL_MS * 3;                // a 6-minute completion
+  assert.equal(st.activeCountFor(0, clock.t), 1, 'the account serving the live request lost its load');
+  assert.equal(st.activeCountFor(1, clock.t), 0);
+});
+
 test('stats reports known, active, and per-account active distribution', () => {
   const { clock, now } = fixedClock();
   const st = new SessionTracker({ now });
@@ -177,7 +221,7 @@ test('the session map is capped, evicting least-recently-seen first', () => {
   assert.equal(st.pinnedAccount('s0', SHARED, clock.t), 0, 'a surviving session kept its pins');
 });
 
-test('the cap never evicts a session with a request in flight', () => {
+test('the cap prefers an idle victim over a session with a request in flight', () => {
   const { clock, now } = fixedClock();
   const st = new SessionTracker({ now, maxSessions: 3 });
   st.beginRequest('streaming', clock.t);          // oldest, but mid-response
@@ -187,6 +231,59 @@ test('the cap never evicts a session with a request in flight', () => {
   st.touch('new', 0, [SHARED], clock.t);
   assert.equal(st.pinnedAccount('streaming', SHARED, clock.t), 2, 'a live request lost its pin');
   assert.equal(st.sessions.has('idle-1'), false, 'the oldest evictable one was kept');
+});
+
+// The session id is a client-supplied header and a streaming completion holds
+// `inFlight` for its whole duration, so a preference for idle victims that can
+// veto the cap is not a bound at all — enough concurrent streams turn it off.
+test('the cap binds even when every probed session is in flight', () => {
+  const { clock, now } = fixedClock();
+  const max = 64;
+  const st = new SessionTracker({ now, maxSessions: max });
+  // Enough concurrent holders to fill the eviction probe several times over,
+  // parked at the least-recently-seen end where the probe looks.
+  for (let i = 0; i < 40; i++) {
+    st.beginRequest(`stream-${i}`, clock.t);
+    clock.t += 1;
+  }
+  for (let i = 0; i < 5000; i++) {
+    clock.t += 1;
+    st.touch(`churn-${i}`, 0, [SHARED], clock.t);
+  }
+  assert.ok(st.sessions.size <= max, `map grew to ${st.sessions.size} against a cap of ${max}`);
+});
+
+test('a session that keeps making requests is not the one eviction reaches for', () => {
+  const { clock, now } = fixedClock();
+  const st = new SessionTracker({ now, maxSessions: 3 });
+  st.touch('busy', 1, [SHARED], clock.t);
+  for (let i = 0; i < 10; i++) {
+    clock.t += 1;
+    st.touch(`churn-${i}`, 0, [SHARED], clock.t);
+    clock.t += 1;
+    st.touch('busy', 1, [SHARED], clock.t); // re-inserted at the back each time
+  }
+  assert.equal(st.pinnedAccount('busy', SHARED, clock.t), 1, 'an actively-used session was evicted');
+});
+
+// Map order is what eviction consumes, so it has to track last ACTIVITY. A
+// long stream is inserted when it starts; if finishing does not re-insert it,
+// it sits at the front and is evicted ahead of sessions idle far longer.
+test('a finished request re-orders its session ahead of older idle ones', () => {
+  const { clock, now } = fixedClock();
+  const st = new SessionTracker({ now, maxSessions: 3 });
+  st.beginRequest('stream', clock.t);
+  st.touch('stream', 2, [SHARED], clock.t);
+  clock.t += 1;
+  st.touch('idle-old', 0, [SHARED], clock.t);
+  clock.t += 1;
+  st.touch('idle-new', 0, [SHARED], clock.t);
+  clock.t += 1;
+  st.endRequest('stream', clock.t); // the stream is now the most recent activity
+  clock.t += 1;
+  st.touch('fresh', 0, [SHARED], clock.t);
+  assert.equal(st.pinnedAccount('stream', SHARED, clock.t), 2, 'the just-finished stream was evicted first');
+  assert.equal(st.sessions.has('idle-old'), false, 'the least-recently-active session was kept');
 });
 
 // beginRequest goes through the same _ensure as touch, so an idle-expired

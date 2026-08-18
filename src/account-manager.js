@@ -2,6 +2,7 @@ import { refreshAccessToken, isTokenExpiringSoon, isTokenExpired } from './oauth
 import { sameIdentity } from './identity.js';
 import { weeklyBucketForModel, modelGlobMatches, WEEKLY_BUCKET_KEYS } from './model.js';
 import { SessionTracker } from './session-tracker.js';
+import { WindowWatcher } from './window-watcher.js';
 
 // Re-exported for callers that import these model helpers from here.
 export { isFableModel, parseRequestModel, parseAdvisorModel } from './model.js';
@@ -11,26 +12,6 @@ export { isFableModel, parseRequestModel, parseAdvisorModel } from './model.js';
 // when the token turned over, short enough that a genuinely bad new token
 // recovers on the next request rather than staying stuck.
 const FORCED_REFRESH_FLOOR_MS = 10_000;
-
-// How far a weekly reset must move forward to count as that window rolling over
-// rather than the same window re-reported. The two writers of a reset disagree
-// on precision — a response header carries whole seconds, the usage endpoint a
-// fractional ISO timestamp — so one instant reaches the detector as two values
-// up to a second apart, and any strictly-forward test reads that as a rollover
-// and re-routes every sticky session for nothing. A real weekly roll moves the
-// window by a week, so an hour is a floor no genuine event can fall under.
-const ROLLOVER_MIN_JUMP_MS = 3600_000;
-
-// Cap on the per-session rollover baselines. Session ids come from the client,
-// so the map needs a bound that holds whatever they send and an insert that
-// does not walk it.
-const PIN_WINDOW_SEEN_MAX = 512;
-
-// How many entries an insert may inspect looking for a baseline whose session
-// the tracker has already forgotten, before it settles for the oldest. Bounded
-// so the insert stays O(1) whatever the map holds; a live entry it walks past
-// is simply reconsidered on the next insert.
-const PIN_WINDOW_EVICT_PROBE = 16;
 
 // Quota fields that survive a restart: utilization levels and their reset
 // windows, learned passively from upstream responses. Transient/derived state
@@ -211,111 +192,6 @@ function sampleModelFor(route) {
   return route.match[0].replace(/\*/g, '') || 'model';
 }
 
-/**
- * Rollover bookkeeping for one sticky choice — a session's pins, or the global
- * current account. Everything here is PER BUCKET, because a session's pins are:
- * its Opus traffic and its Fable traffic can sit on different accounts, so
- * "the account this choice was last seen on" is a question per bucket and not
- * per session. Each entry in `windows` therefore carries its own account, which
- * is the invariant that makes the numbers comparable — a reset is only ever
- * measured against one previously seen on the SAME account for the SAME bucket.
- *
- * A detected rollover is kept PENDING rather than applied. The preemption it
- * asks for only really happens once a request is served somewhere else, and a
- * request can be re-routed several times before that: it excludes an account
- * that just failed, and it re-pins its session on every attempt. Consuming the
- * event at detection time means a retry that fails back onto the rolled-over
- * account banks a move that never happened, and the session then rides that
- * account until its window rolls again a week later.
- */
-class WindowWatcher {
-  constructor() {
-    // window key -> { idx, reset }: the reset last seen for that window, and
-    // the account it was seen on.
-    this.windows = new Map();
-    // request bucket -> { idx, window, reset }: rollovers found but not acted
-    // on. Keyed by the REQUEST's bucket, not the window's, because that is what
-    // decides which later request can consume the event — only traffic for the
-    // same bucket moving off `idx` settles it.
-    this.pending = new Map();
-  }
-
-  /** Record `resets` as the baseline for account `idx`. Seed-only for windows
-   * already seen on this same account, since overwriting one here would erase a
-   * jump nothing has acted on yet; a window last seen on a DIFFERENT account is
-   * replaced outright, because comparing across accounts is never a rollover. */
-  seed(idx, resets) {
-    for (const [key, reset] of Object.entries(resets)) {
-      if (reset == null) continue;
-      const seen = this.windows.get(key);
-      if (!seen || seen.idx !== idx) this.windows.set(key, { idx, reset });
-    }
-  }
-
-  /**
-   * Has the window `window` on account `idx` rolled over since we last looked,
-   * for a request governed by `bucket`? `resets` is every governing window the
-   * account reports right now — all of them are seeded, not just the one this
-   * request is governed by, or a session that has only ever sent Opus would
-   * first-sight its Fable window on the very request that should have caught it
-   * rolling.
-   *
-   * This writes — it seeds a first-sight baseline — but it never advances a
-   * window past a rollover it has found. Only commitOn does that, and only once
-   * a preemption has actually moved a request. That is the invariant that lets
-   * detection run on every selection pass, including one that cannot act on
-   * what it finds: looking costs the event nothing.
-   */
-  rolledOver(idx, bucket, window, resets) {
-    // Still owed from an earlier pass: re-report it rather than re-deriving it
-    // from a baseline that a re-pin may since have moved.
-    const owed = this.pending.get(bucket);
-    if (owed && owed.idx === idx) return true;
-    const seen = this.windows.get(window);
-    const prev = seen && seen.idx === idx ? seen.reset : null;
-    this.seed(idx, resets);
-    const now = resets[window] ?? null;
-    if (prev == null || now == null || now - prev <= ROLLOVER_MIN_JUMP_MS) return false;
-    this.pending.set(bucket, { idx, window, reset: now });
-    return true;
-  }
-
-  /**
-   * A request spending `buckets` was served by `acceptedIdx`. For each of those
-   * buckets, a rollover pending on any OTHER account is one this request moved
-   * off, so bank its post-rollover window and drop the event; one pending on the
-   * accepted account itself was not acted on — the re-route came back — and
-   * stays owed for the next request. A bucket this request did not spend is left
-   * alone: it moved no traffic for that family, so it settles nothing.
-   */
-  commitOn(acceptedIdx, buckets) {
-    for (const bucket of buckets) {
-      const owed = this.pending.get(bucket);
-      if (!owed || owed.idx === acceptedIdx) continue;
-      const seen = this.windows.get(owed.window);
-      if (seen && seen.idx === owed.idx) seen.reset = owed.reset;
-      this.pending.delete(bucket);
-    }
-  }
-
-  /** Renumber after the account list shifts, dropping whatever named the account
-   * that went away. Returns false once nothing is left, so the caller can drop
-   * the watcher whole. */
-  remap(mapFn) {
-    for (const [bucket, owed] of [...this.pending]) {
-      const moved = mapFn(owed.idx);
-      if (moved == null) this.pending.delete(bucket);
-      else owed.idx = moved;
-    }
-    for (const [key, seen] of [...this.windows]) {
-      const moved = mapFn(seen.idx);
-      if (moved == null) this.windows.delete(key);
-      else seen.idx = moved;
-    }
-    return this.windows.size > 0 || this.pending.size > 0;
-  }
-}
-
 export class AccountManager {
   constructor(accounts, switchThreshold = 0.98, { refreshFn = refreshAccessToken, throttleProbeFloorMs, forcedRefreshFloorMs = FORCED_REFRESH_FLOOR_MS, routes, ramp, distributeSessions = false, sessionTracker, expiryRouting } = {}) {
     // How long a just-minted token is trusted against a forced refresh.
@@ -343,11 +219,12 @@ export class AccountManager {
     // quota is ample AND expires soon, so the quota closest to being lost is
     // spent first. See _topPressureBand for the ranking and the reasoning.
     this.setExpiryRouting(expiryRouting);
-    // Rollover-event bookkeeping for pin/current preemption: one WindowWatcher
-    // per pinned session, plus one for the global current account. A jump
-    // forward in a governing weekly reset means that window rolled over — the
-    // one event that re-opens an otherwise-sticky choice.
-    this._pinWindowSeen = new Map();  // sessionId -> WindowWatcher
+    // Rollover-event bookkeeping for pin/current preemption. A jump forward in
+    // a governing weekly reset means that window rolled over — the one event
+    // that re-opens an otherwise-sticky choice. A pinned session's watcher
+    // lives on its SessionTracker record, so it is created, renumbered and
+    // evicted with the pin it belongs to; the global current account, which no
+    // session owns, keeps its own.
     this._currentSeen = new WindowWatcher();
     // Storm control: when rotation switches to a fresh account, a burst of
     // in-flight requests (e.g. dozens of agents failing over together) would all
@@ -1062,14 +939,15 @@ export class AccountManager {
    * question of their own WindowWatcher, which is where the answer is derived.
    */
   _pinRolledOver(sessionId, pinned, model) {
+    const seen = this.sessionTracker.windowsFor(sessionId, true);
+    if (!seen) return false;
     const bucket = this._weeklyBucketFor(model);
     const window = this._windowForBucket(pinned, bucket);
     // Only THIS bucket's window is seeded from the pinned account. The session's
     // other buckets are pinned to whatever account serves them, so recording
     // this one's windows against them would overwrite a baseline belonging to a
     // different account — and lose the rollover it was there to catch.
-    return this._pinSeen(sessionId)
-      .rolledOver(pinned.index, bucket, window, this._windowResets(pinned, [window]));
+    return seen.rolledOver(pinned.index, bucket, window, this._windowResets(pinned, [window]));
   }
 
   /** As _pinRolledOver, for the global current account — which, unlike a
@@ -1096,7 +974,7 @@ export class AccountManager {
   confirmRouted(sessionId, accountIndex, model = null, advisorModel = null) {
     const buckets = this._requestBuckets(model, advisorModel);
     this._currentSeen.commitOn(accountIndex, buckets);
-    if (sessionId) this._pinWindowSeen.get(sessionId)?.commitOn(accountIndex, buckets);
+    if (sessionId) this.sessionTracker.windowsFor(sessionId)?.commitOn(accountIndex, buckets);
   }
 
   /** The quota bucket whose reset actually governs `model` on this account: the
@@ -1137,42 +1015,6 @@ export class AccountManager {
     return out;
   }
 
-  _pinSeen(sessionId) {
-    const existing = this._pinWindowSeen.get(sessionId);
-    if (existing) {
-      // Re-insert so the map's order is least-recently-SERVED rather than
-      // oldest-first: a session that keeps making requests is never the one
-      // eviction reaches for.
-      this._pinWindowSeen.delete(sessionId);
-      this._pinWindowSeen.set(sessionId, existing);
-      return existing;
-    }
-    while (this._pinWindowSeen.size >= PIN_WINDOW_SEEN_MAX) this._evictPinWindow();
-    const seen = new WindowWatcher();
-    this._pinWindowSeen.set(sessionId, seen);
-    return seen;
-  }
-
-  /**
-   * Drop one baseline to make room. Prefers a session the tracker no longer
-   * pins: losing a LIVE session's baseline is not a one-off miss, because the
-   * session re-seeds from the window it now sees and every later rollover reads
-   * as first sight — under sustained churn that suppresses detection for that
-   * session indefinitely. Falls back to the oldest entry so the insert always
-   * makes progress.
-   */
-  _evictPinWindow() {
-    let probed = 0;
-    for (const sessionId of this._pinWindowSeen.keys()) {
-      if (!this.sessionTracker.isPinned(sessionId)) {
-        this._pinWindowSeen.delete(sessionId);
-        return;
-      }
-      if (++probed >= PIN_WINDOW_EVICT_PROBE) break;
-    }
-    this._pinWindowSeen.delete(this._pinWindowSeen.keys().next().value);
-  }
-
   /**
    * Seed the rollover detector when a pin is recorded, so a session's very
    * first request already establishes which windows its account had. Without
@@ -1190,7 +1032,7 @@ export class AccountManager {
     const account = this.accounts[accountIndex];
     if (!account) return;
     const windows = buckets.map(b => this._windowForBucket(account, b));
-    this._pinSeen(sessionId).seed(accountIndex, this._windowResets(account, windows));
+    this.sessionTracker.windowsFor(sessionId, true)?.seed(accountIndex, this._windowResets(account, windows));
   }
 
   /** The first configured route whose globs match `model`, or null. */
@@ -1890,16 +1732,15 @@ export class AccountManager {
     // this, every session pinned above the removed account is served by its
     // neighbour, and the removed account's own sessions land on whatever slid
     // into its slot. Unpinned sessions simply re-route on their next request.
+    // Each session's rollover baselines ride the same record and are renumbered
+    // with them (see remapAccounts).
     this.sessionTracker.remapAccounts(remap);
-    // The rollover detectors store an account index alongside the windows they
-    // saw on it, so they shift with the list too: left alone that index names a
-    // DIFFERENT account, whose window would read as a jump and preempt for
-    // nothing. Renumber rather than reset — every session on an untouched
-    // account keeps a baseline it would otherwise not rebuild until after its
-    // own account's next rollover had already passed unnoticed.
-    for (const [sessionId, seen] of [...this._pinWindowSeen]) {
-      if (!seen.remap(remap)) this._pinWindowSeen.delete(sessionId);
-    }
+    // The current account's detector stores an account index alongside the
+    // windows it saw on it, so it shifts with the list too: left alone that
+    // index names a DIFFERENT account, whose window would read as a jump and
+    // preempt for nothing. Renumber rather than reset — a baseline on an
+    // untouched account would otherwise not be rebuilt until after that
+    // account's next rollover had already passed unnoticed.
     if (!this._currentSeen.remap(remap)) this._currentSeen = new WindowWatcher();
   }
 
