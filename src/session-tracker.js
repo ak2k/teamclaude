@@ -35,8 +35,10 @@ const SWEEP_INTERVAL_MS = 60 * 1000; // bound growth without an external timer
 
 // Hard cap on remembered sessions. The id arrives in a client-supplied header,
 // so the idle window alone bounds nothing against a client that sends a fresh
-// one per request — and each record now holds a pin per bucket.
-const SESSION_MAX = 2048;
+// one per request — and each record now holds a pin per bucket. Exported so a
+// test can assert the reported cap IS this number: "some positive cap" is
+// satisfied by any constant, including one that stopped tracking this one.
+export const SESSION_MAX = 2048;
 
 // How many least-recently-seen entries an insert may inspect looking for one
 // with no request in flight, before evicting the least-recently-seen entry

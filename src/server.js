@@ -138,7 +138,7 @@ export function createProxyServer(accountManager, config, hooks = {}, sx = null)
 
       // Switch endpoint — make one account the preferred one, the headless
       // equivalent of picking it with 's' in the TUI. Both do the same single
-      // thing: move currentIndex. That is a preference, and a weak one: _select
+      // thing: setCurrentAccount. That is a preference, and a weak one: _select
       // abandons it as soon as the account is unavailable, and also whenever any
       // available account carries a strictly lower priority value. So the answer
       // reports whether the choice will actually take effect rather than only
@@ -170,7 +170,7 @@ export function createProxyServer(accountManager, config, hooks = {}, sx = null)
           res.end(JSON.stringify({ ok: false, error: `no such account "${target}"`, accounts: names() }));
           return;
         }
-        accountManager.currentIndex = index;
+        accountManager.setCurrentAccount(index);
         const name = accountManager.accounts[index].name;
         // Recording the choice and the choice taking effect are two different
         // things: selection skips an account it cannot use on the very next

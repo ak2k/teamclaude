@@ -535,7 +535,7 @@ test('a family reset with no family utilization is governed by the shared weekly
   const now = Date.now();
   assert.equal(am._expiryPressure(am.accounts[0], FABLE, now),
     am._expiryPressure(am.accounts[0], OPUS, now));
-  assert.equal(am._windowKeyFor(am.accounts[0], FABLE), 'unified7d');
+  assert.equal(am._governingBucket(am.accounts[0], FABLE), 'unified7d');
 });
 
 test('non-finite quota headers are ignored rather than stored', () => {
@@ -977,8 +977,8 @@ test('the rollover baseline seeds every bucket a route can make governing', () =
   am.getActiveAccount(null, OPUS);
   const seeded = am._currentSeen.windows;
   for (const model of [OPUS, FABLE, 'claude-sonnet-4-6', 'my-custom-1']) {
-    const key = am._windowKeyFor(am.accounts[0], model);
-    assert.ok(seeded.has(key), `${model} is governed by unseeded bucket ${key}`);
+    const bucket = am._weeklyBucketFor(model);
+    assert.ok(seeded.get(bucket)?.has(0), `${model} is governed by unseeded bucket ${bucket}`);
   }
 });
 
@@ -1077,7 +1077,7 @@ test('two buckets sharing a window key keep a baseline per account', () => {
   am.confirmRouted('s1', 0, OPUS);
   am.recordSession('s1', 1, SONNET); // Sonnet on 'b' — same window key, other account
   am.confirmRouted('s1', 1, SONNET);
-  assert.equal(am._windowKeyFor(am.accounts[0], OPUS), am._windowKeyFor(am.accounts[1], SONNET),
+  assert.equal(am._governingBucket(am.accounts[0], OPUS), am._governingBucket(am.accounts[1], SONNET),
     'the two buckets no longer collide, so this scenario proves nothing');
   for (let i = 0; i < 3; i++) {       // alternate, as a real session does
     assert.equal(route(am, 's1', OPUS).name, 'a');

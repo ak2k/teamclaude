@@ -278,10 +278,30 @@ export class AccountManager {
    * without one rides its freshly-rolled window until the following week.
    * Sessions route without ever consulting currentIndex, so a stretch of
    * session traffic is exactly the gap in which that roll goes unseen.
+   *
+   * The only assignments to currentIndex outside this method are removeAccount's
+   * renumbering, which follows the same account through an index shift rather
+   * than establishing a different one — and where it does land on a different
+   * one, it comes back through here.
    */
   _setCurrent(account) {
     this.currentIndex = account.index;
-    this._currentSeen.seed(account.index, this._windowResets(account));
+    this._currentSeen.seed(account.index, this._bucketWindows(account));
+  }
+
+  /**
+   * Make the account at `index` current on an operator's say-so — the TUI's 's'
+   * and the /teamclaude/switch endpoint, which are the same act by two routes.
+   * A manual choice establishes an account exactly as rotation's does, so it
+   * takes the same baseline with it: parked on an account with none, the fleet
+   * reads that account's next weekly roll as a first sight and never preempts
+   * off it. Returns false for an index that names no account.
+   */
+  setCurrentAccount(index) {
+    const account = this.accounts[index];
+    if (!account) return false;
+    this._setCurrent(account);
+    return true;
   }
 
   /** Max concurrent upstream requests allowed to `account` right now. Infinity
@@ -411,6 +431,12 @@ export class AccountManager {
    * advisor-constrained pass can fail soft (degrade to executor-only) instead of
    * burning the throttled probe slot on the stricter constraint. */
   _select(exclude, model, advisorModel, allowProbe, decision = null) {
+    // getActiveAccount can run this walk twice — an advisor-constrained pass and
+    // then, if that comes up empty, a plain one — against the same decision
+    // object. Each pass answers for itself: left latched from a pass that found
+    // nothing, `viaCurrent` says a manual pin's account came from the current
+    // walk, and confirming it swallows an event that walk never acted on.
+    if (decision) decision.viaCurrent = false;
     // A manual per-route pin biases selection for that route's models (independent
     // of the global currentIndex). Honored only while eligible — otherwise we fall
     // through to normal best-available selection so requests keep flowing.
@@ -455,9 +481,10 @@ export class AccountManager {
         const next = this._selectNext(exclude, model, advisorModel);
         // _selectNext re-ranks; it may well hand back the account we are trying
         // to move off, and "nothing else was eligible" is the stuck case, not a
-        // preemption. Nothing else in the log distinguishes the two.
-        if (next && next.index !== current.index) this._rolloverStats.preempted++;
-        else this._noteStuckRollover(current, model);
+        // preemption. Nothing else in the log distinguishes the two. The move
+        // itself is counted where it lands (settleServed), not here: selection
+        // only ASKS, and an attempt re-routed here can still fail back.
+        if (!next || next.index === current.index) this._noteStuckRollover(current, model);
         if (next) return next;
       }
       const betterExists = this._preemptedBy(current, model, advisorModel, exclude);
@@ -500,7 +527,6 @@ export class AccountManager {
             && this._pinRolledOver(sessionId, pinned, model)) {
           const next = this._pickLeastLoaded(exclude, model, advisorModel);
           if (next && next.index !== pinIdx) {
-            this._rolloverStats.preempted++;
             // A fleet-wide rollover moves every session pinned to that account at
             // once, so the destination gets the same failover burst any other
             // switch would send it — pace it (issue #84).
@@ -601,7 +627,12 @@ export class AccountManager {
     // served off the rolled account bank the move while a slower one is still
     // failing back onto it — the session then rides the rolled account with
     // nothing owed, until that window comes round again a week later.
-    if (s && s.inFlight === 0) s.windows?.settleServed();
+    //
+    // This is also the one moment a preemption is known to have HAPPENED, which
+    // is what the counter names. Counted at selection instead it counts the
+    // re-routes selection asked for, including the ones that failed back — so it
+    // can report more moves than there were rollovers to move.
+    if (s && s.inFlight === 0) this._rolloverStats.preempted += s.windows?.settleServed() || 0;
   }
 
   /** { known, active, perAccount } session counts for status/TUI. */
@@ -1023,23 +1054,21 @@ export class AccountManager {
     const seen = this.sessionTracker.windowsFor(sessionId, true);
     if (!seen) return false;
     const bucket = this._weeklyBucketFor(model);
-    const window = this._windowForBucket(pinned, bucket);
-    // Only THIS bucket's window is seeded from the pinned account. The session's
-    // other buckets are pinned to whatever account serves them, so recording
-    // this one's windows against them would overwrite a baseline belonging to a
+    // Only THIS bucket is seeded from the pinned account. The session's other
+    // buckets are pinned to whatever account serves them, so recording this
+    // account's windows under them would overwrite a baseline belonging to a
     // different account — and lose the rollover it was there to catch.
-    return this._noteRolledOver(seen, pinned.index, bucket, window, this._windowResets(pinned, [window]));
+    return this._noteRolledOver(seen, pinned.index, bucket, this._bucketWindows(pinned, [bucket]));
   }
 
   /** As _pinRolledOver, for the global current account — which, unlike a
    * session's pins, is one account for every bucket, so all of them are seeded
-   * (an Opus-only stretch must not first-sight the Fable window on the very
+   * (an Opus-only stretch must not first-sight the Fable bucket on the very
    * request that should have caught it rolling). */
   _currentRolledOver(current, model) {
     return this._noteRolledOver(
       this._currentSeen,
-      current.index, this._weeklyBucketFor(model), this._windowKeyFor(current, model),
-      this._windowResets(current));
+      current.index, this._weeklyBucketFor(model), this._bucketWindows(current));
   }
 
   /**
@@ -1053,9 +1082,9 @@ export class AccountManager {
    * make `rolloversDetected` a traffic meter. The event is the transition from
    * "nothing owed on this bucket here" to "owed".
    */
-  _noteRolledOver(seen, idx, bucket, window, resets) {
+  _noteRolledOver(seen, idx, bucket, resets) {
     const alreadyOwed = seen.owedOn(bucket, idx);
-    const rolled = seen.rolledOver(idx, bucket, window, resets);
+    const rolled = seen.rolledOver(idx, bucket, resets);
     if (rolled && !alreadyOwed) this._rolloverStats.detected++;
     return rolled;
   }
@@ -1104,14 +1133,10 @@ export class AccountManager {
    */
   confirmRouted(sessionId, accountIndex, model = null, advisorModel = null, decision = null) {
     const buckets = this._requestBuckets(model, advisorModel, decision);
-    if (decision?.viaCurrent) this._currentSeen.commitOn(accountIndex, buckets);
+    if (decision?.viaCurrent) {
+      this._rolloverStats.preempted += this._currentSeen.commitOn(accountIndex, buckets);
+    }
     if (sessionId) this.sessionTracker.windowsFor(sessionId)?.noteServed(accountIndex, buckets);
-  }
-
-  /** As _governingBucket, from the bucket rather than the model — the form the
-   * pin path needs, since a pin is already keyed by bucket. */
-  _windowKeyFor(account, model) {
-    return this._windowForBucket(account, this._weeklyBucketFor(model));
   }
 
   _windowForBucket(account, bucket) {
@@ -1129,15 +1154,25 @@ export class AccountManager {
     return keys;
   }
 
-  /** The reset of every governing bucket this account currently reports, as
-   * { bucketKey: resetMs } — the whole baseline a rollover is measured against,
-   * so a session that has only used one model still notices another bucket
-   * turning over. */
-  _windowResets(account, keys = this._windowKeys()) {
+  /**
+   * The baseline a rollover is measured against, as
+   * { requestBucket: { window, reset } } — one entry per bucket this account
+   * currently resolves a reset for. Every bucket is named, including two that
+   * resolve to the same window: the bucket is what a pin, an event and a
+   * preemption are each about, and merging two of them under their shared window
+   * loses one of the two rollovers.
+   *
+   * The window rides along because it is what makes the reset meaningful: two
+   * resets are comparable only when they are the same window's, and the window a
+   * bucket resolves to changes the first time its account reports that family's
+   * own utilization.
+   */
+  _bucketWindows(account, buckets = this._windowKeys()) {
     const out = {};
-    for (const key of keys) {
-      const reset = account.quota[`${key}Reset`];
-      if (reset != null) out[key] = reset;
+    for (const bucket of buckets) {
+      const window = this._windowForBucket(account, bucket);
+      const reset = account.quota[`${window}Reset`];
+      if (reset != null) out[bucket] = { window, reset };
     }
     return out;
   }
@@ -1158,8 +1193,7 @@ export class AccountManager {
     if (!this.distributeSessions || !this.expiryRouting.enabled || !this.expiryRouting.preempt) return;
     const account = this.accounts[accountIndex];
     if (!account) return;
-    const windows = buckets.map(b => this._windowForBucket(account, b));
-    this.sessionTracker.windowsFor(sessionId, true)?.seed(accountIndex, this._windowResets(account, windows));
+    this.sessionTracker.windowsFor(sessionId, true)?.seed(accountIndex, this._bucketWindows(account, buckets));
   }
 
   /** The first configured route whose globs match `model`, or null. */
@@ -1829,8 +1863,22 @@ export class AccountManager {
    */
   removeAccount(index) {
     if (index < 0 || index >= this.accounts.length) return;
-    this.accounts.splice(index, 1);
+    const [removed] = this.accounts.splice(index, 1);
+    // The record itself outlives the list: a request already past selection
+    // holds it and goes on calling release/updateQuota with `account.index`,
+    // which every survivor's has just been rewritten to mean someone else's
+    // slot. Point it at nothing instead, so those late calls no-op rather than
+    // decrementing another account's concurrency or writing this one's quota
+    // onto it. (The same shape as the mid-refresh crossing ensureTokenFresh
+    // avoids by re-resolving the position from the account.)
+    removed.index = -1;
     this.accounts.forEach((a, i) => a.index = i);
+    // Removing the CURRENT account leaves a different one in that slot, which is
+    // establishing a current account rather than renumbering one — so it goes
+    // back through the single writer below, once the watcher it seeds into has
+    // itself been renumbered. The other two branches follow the same account
+    // through the shift and need no baseline.
+    const establishesNewCurrent = this.currentIndex === index;
     if (this.currentIndex >= this.accounts.length) {
       this.currentIndex = Math.max(0, this.accounts.length - 1);
     } else if (this.currentIndex > index) {
@@ -1842,9 +1890,11 @@ export class AccountManager {
       if (idx === index) this.routePins.delete(name);
       else if (idx > index) this.routePins.set(name, idx - 1);
     }
-    // The index shift every runtime structure keyed by account index has to
-    // follow: the removed slot is gone and everything above it moves down one.
-    // A null result means this entry's account is the one that went away.
+    // The index shift a stored account index has to follow: the removed slot is
+    // gone and everything above it moves down one. A null result means this
+    // entry's account is the one that went away. Every structure below holds
+    // one; a structure added later that does too belongs in this block, because
+    // an un-shifted index does not fail — it quietly names its neighbour.
     const remap = idx => (idx === index ? null : idx > index ? idx - 1 : idx);
     // A route may name its accounts by INDEX ("accounts": ["2"]) rather than by
     // name, and that index means the same list. Left alone it names a different
@@ -1869,6 +1919,23 @@ export class AccountManager {
     // untouched account would otherwise not be rebuilt until after that
     // account's next rollover had already passed unnoticed.
     if (!this._currentSeen.remap(remap)) this._currentSeen = new WindowWatcher();
+    // The stuck-rollover throttle is keyed by (account index, bucket) too. Left
+    // alone, the account that slid into the removed slot inherits its
+    // neighbour's silence and its own stuck rollover — the one failure of this
+    // feature that looks exactly like it working — goes unreported for up to a
+    // minute. Rebuilt rather than edited in place: two keys can map onto each
+    // other, and an in-place pass would drop the survivor it had just written.
+    const throttled = new Map();
+    for (const [key, at] of this._rolloverStuckLogAt) {
+      const sep = key.indexOf(':');
+      const moved = remap(Number(key.slice(0, sep)));
+      if (moved != null) throttled.set(`${moved}${key.slice(sep)}`, at);
+    }
+    this._rolloverStuckLogAt = throttled;
+    // Last, because it seeds into the watcher the line above may have replaced.
+    if (establishesNewCurrent && this.accounts[this.currentIndex]) {
+      this._setCurrent(this.accounts[this.currentIndex]);
+    }
   }
 
   /**
@@ -1931,11 +1998,15 @@ export class AccountManager {
         // "Is expiry routing working?" without attaching a debugger or waiting
         // a week — a real weekly window rolls about once per account per week,
         // so there are only a handful of chances to see one. `detected` counts
-        // the events and `preempted` the ones that actually moved a request.
-        // `owed` is not those two subtracted: it is read off the live pending
-        // state, so an event that left with the session it belonged to stops
-        // being owed. Above zero across several minutes is the signature of the
-        // silent failure — a rollover that fired and never resolved.
+        // the events, once each at the moment one becomes owed; `preempted`
+        // counts the ones a request actually moved, once each at the moment the
+        // move is known to have stuck, so it can never exceed `detected`.
+        // `owed` is not those two subtracted: it is a gauge read off the live
+        // pending state, counting only events nothing has moved yet, so an event
+        // that left with the session it belonged to stops being owed and one
+        // merely waiting for its session to fall quiet was never owed. Above
+        // zero across several minutes is the signature of the silent failure —
+        // a rollover that fired and never resolved.
         stats: {
           rolloversDetected: this._rolloverStats.detected,
           rolloversPreempted: this._rolloverStats.preempted,
