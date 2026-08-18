@@ -392,6 +392,64 @@ test('a negative utilization in restored state is not applied', () => {
   assert.equal(am.accounts[0].quota.unified7dReset, reset);
 });
 
+// A reset is what retires a spent bucket. One that is not a number makes
+// `now >= reset` never true, so nothing ever retires it: the account sits at or
+// over threshold, is never selected, and never gets the response that would
+// correct it — out of rotation until someone deletes the state file by hand.
+test('restored quota fields outside their domain are dropped, valid ones kept', () => {
+  const am = manager([{ name: 'a' }]);
+  const good = Date.now() + 50 * H;
+  am.restoreQuotaState([{ name: 'a', quota: {
+    unified7d: 0.5, unified7dReset: good,
+    unified5h: 0.4, unified5hReset: 'whenever',
+    unified7dFable: 0.3, unified7dFableReset: Infinity,
+    tokensLimit: 'lots', tokensRemaining: 5,
+    requestsLimit: 10, requestsRemaining: -1,
+    resetsAt: 'not-a-date', unifiedStatus: 'allowed',
+  } }]);
+  const q = am.accounts[0].quota;
+  assert.equal(q.unified7d, 0.5);
+  assert.equal(q.unified7dReset, good);
+  assert.equal(q.unifiedStatus, 'allowed');
+  assert.equal(q.unified5hReset, null, 'a non-numeric reset was restored');
+  assert.equal(q.unified7dFableReset, null, 'a non-finite reset was restored');
+  assert.equal(q.tokensLimit, null);
+  assert.equal(q.requestsRemaining, null);
+  assert.equal(q.resetsAt, null);
+});
+
+test('a restored bucket whose window did not survive is unknown, not spent forever', () => {
+  const am = manager([{ name: 'a' }, { name: 'b', used: 0.1, resetH: 60 }]);
+  am.restoreQuotaState([{ name: 'a', quota: { unified5h: 0.99, unified5hReset: 'whenever' } }]);
+  am.refreshExpiredQuotas();
+  assert.equal(am.accounts[0].quota.unified5h, null,
+    'a spent utilization was restored with no window that can ever retire it');
+  assert.ok(am._isAvailable(am.accounts[0]), 'the account is out of rotation with nothing that can bring it back');
+});
+
+// The usage endpoint is the third writer of these fields and reaches them over
+// the network like the other two, so it is validated like the other two.
+test('the usage endpoint cannot write a value outside its field\'s domain', () => {
+  const am = manager([{ name: 'a' }]);
+  const good = Date.now() + 50 * H;
+  am.applyUsageData(0, {
+    fiveHour: { utilization: -5, resetAt: good },
+    sevenDay: { utilization: 0.4, resetAt: 'whenever' },
+    sevenDayFable: { utilization: 0.2, resetAt: good },
+  });
+  const q = am.accounts[0].quota;
+  assert.equal(q.unified5h, null, 'a negative utilization was stored');
+  assert.equal(q.unified5hReset, good);
+  assert.equal(q.unified7d, 0.4);
+  assert.equal(q.unified7dReset, null, 'a non-numeric reset was stored');
+  assert.equal(q.unified7dFable, 0.2);
+  assert.equal(q.unified7dFableReset, good);
+});
+
+// One rule for what governs a request: the family bucket as soon as the account
+// reports a utilization for it. Its window being unreported makes the PRESSURE
+// unknown — it must not be scored on the shared weekly's horizon, which would
+// rank this account on headroom its Fable bucket does not have.
 test('a family utilization with no family reset is scored from one bucket', () => {
   const am = manager([{ name: 'a', used: 0.5, resetH: 100 }]);
   const q = am.accounts[0].quota;

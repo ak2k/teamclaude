@@ -98,6 +98,57 @@ test('ensureTokenFresh applies refreshed tokens on success', async () => {
   assert.equal(am.accounts[0].status, 'active');
 });
 
+// ── the refreshed account is named by identity, not by a captured index ─────
+
+// A removal renumbers `accounts` (and the config list the callback writes
+// through) while a refresh is awaiting the network. An index captured before
+// the await then names a DIFFERENT account, and that account's config entry
+// receives someone else's access AND refresh tokens — while the real owner
+// keeps a refresh token the provider has already rotated away.
+// The callback writes into a config list the TUI keeps index-aligned with the
+// manager's, splicing both on a removal — so an index handed to it after the
+// list moved is the whole bug, reproduced here exactly as index.js consumes it.
+function gatedManager(names) {
+  let release;
+  const gate = new Promise(r => { release = r; });
+  const am = new AccountManager(names.map(n => expiring(n)), 0.98, {
+    refreshFn: async () => { await gate; return { accessToken: 'FRESH', refreshToken: 'FRESH-R', expiresAt: Date.now() + 3600_000 }; },
+  });
+  const configAccounts = names.map(n => ({ name: n, accessToken: 't', refreshToken: 'r' }));
+  am.onTokenRefresh((idx, tokens) => {
+    const entry = configAccounts[idx];
+    if (!entry) return;
+    entry.accessToken = tokens.accessToken;
+    entry.refreshToken = tokens.refreshToken;
+  });
+  return { am, configAccounts, release };
+}
+
+test('a removal mid-refresh does not land the tokens on another account', async () => {
+  const { am, configAccounts, release } = gatedManager(['doomed', 'victim', 'other']);
+  const inFlight = am.ensureTokenFresh(1, true); // 'victim'
+  am.removeAccount(0);                           // 'victim' slides down to index 0
+  configAccounts.splice(0, 1);                   // ...and the TUI splices the config list too
+  release();
+  await inFlight;
+
+  const holder = configAccounts.find(c => c.accessToken === 'FRESH');
+  assert.equal(holder?.name, 'victim', 'the refreshed tokens were persisted onto another account');
+  assert.equal(configAccounts.find(c => c.name === 'other').refreshToken, 'r');
+});
+
+test('an account removed mid-refresh persists nothing', async () => {
+  const { am, configAccounts, release } = gatedManager(['victim', 'other']);
+  const inFlight = am.ensureTokenFresh(0, true);
+  am.removeAccount(0);         // the refreshing account itself goes away
+  configAccounts.splice(0, 1);
+  release();
+  await inFlight;
+
+  assert.equal(configAccounts.find(c => c.accessToken === 'FRESH'), undefined,
+    "a removed account's tokens were written onto the account that took its slot");
+});
+
 // ── refreshAccessToken surfaces the HTTP status ─────────────────────────────
 
 test('refreshAccessToken attaches the HTTP status to a rejection error', async () => {

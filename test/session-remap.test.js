@@ -74,6 +74,29 @@ test('removing an account unpins it across every bucket of a split session', () 
   assert.equal(am.sessionTracker.pinnedAccount('split', FABLE), 1, "'c' slid down to 1");
 });
 
+// A route may name its accounts by index. That index means the same list the
+// removal renumbers, so left alone the route starts serving — and excluding —
+// different accounts than the operator wrote down.
+test('a route that names an account by index follows a removal', () => {
+  const am = new AccountManager([oauth('a'), oauth('b'), oauth('c')], 0.98,
+    { routes: [{ name: 'fable', match: ['*fable*'], accounts: ['2'] }] });
+  const c = am.accounts[2];
+  assert.equal(am._routeAllows(c, FABLE_MODEL), true);
+  am.removeAccount(0); // 'c' slides down to index 1
+  assert.equal(am._routeAllows(c, FABLE_MODEL), true, 'the route no longer allows the account it named');
+  assert.equal(am._routeAllows(am.accounts[0], FABLE_MODEL), false, 'the route now allows an account it never named');
+  assert.equal(am.getActiveAccount(null, FABLE_MODEL).name, 'c');
+});
+
+test('a route that names the removed account by index drops it, not its neighbour', () => {
+  const am = new AccountManager([oauth('a'), oauth('b'), oauth('c')], 0.98,
+    { routes: [{ name: 'fable', match: ['*fable*'], accounts: ['1', '2'] }] });
+  am.removeAccount(1); // 'b' goes away, 'c' slides down to 1
+  assert.deepEqual(am.routes[0].accounts, ['1']);
+  assert.equal(am._routeAllows(am.accounts[1], FABLE_MODEL), true);
+  assert.equal(am._routeAllows(am.accounts[0], FABLE_MODEL), false);
+});
+
 test('a surviving pin keeps the rollover baseline the removal renumbered', () => {
   const H = 3600_000;
   const am = new AccountManager([oauth('a'), oauth('doomed'), oauth('c')], 0.98,

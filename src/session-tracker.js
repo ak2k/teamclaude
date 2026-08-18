@@ -87,13 +87,18 @@ export class SessionTracker {
 
   _ensure(sessionId, now) {
     const existing = this.sessions.get(sessionId);
-    if (existing) {
+    if (existing && !this._isExpired(existing, now)) {
       // Re-insert so the map iterates least-recently-seen first, which is the
       // order eviction consumes it in.
       this.sessions.delete(sessionId);
       this.sessions.set(sessionId, existing);
       return existing;
     }
+    // Idled past the known window: this id is a NEW session that happens to
+    // reuse the string. Refreshing the old record instead would resurrect pins
+    // the session is no longer entitled to — pointing it at an account nothing
+    // re-evaluated, with an hour-cold cache.
+    if (existing) this.sessions.delete(sessionId);
     while (this.sessions.size >= this.maxSessions) {
       if (!this._evictOne()) break;
     }

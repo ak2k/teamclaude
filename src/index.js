@@ -201,14 +201,17 @@ async function serverCommand() {
 
   // Persist refreshed tokens back to config (re-read from disk to avoid clobbering
   // accounts added externally, e.g. by `teamclaude import` while server is running)
-  accountManager.onTokenRefresh((idx, newTokens) => {
-    const account = accountManager.accounts[idx];
+  accountManager.onTokenRefresh((idx, newTokens, account) => {
     if (!account) return;
-    // Keep config.accounts in sync so TUI saveConfig doesn't clobber fresh tokens
-    if (config.accounts[idx]) {
-      config.accounts[idx].accessToken = newTokens.accessToken;
-      config.accounts[idx].refreshToken = newTokens.refreshToken;
-      config.accounts[idx].expiresAt = newTokens.expiresAt;
+    // Keep config.accounts in sync so TUI saveConfig doesn't clobber fresh
+    // tokens. Located by identity: this list is kept index-aligned with the
+    // manager's, and a removal is precisely the moment it briefly is not —
+    // writing through a stale slot hands one account's tokens to another.
+    const cfgAcct = config.accounts.find(a => sameIdentity(a, account)) || config.accounts[idx];
+    if (cfgAcct) {
+      cfgAcct.accessToken = newTokens.accessToken;
+      cfgAcct.refreshToken = newTokens.refreshToken;
+      cfgAcct.expiresAt = newTokens.expiresAt;
     }
     atomicConfigUpdate(diskConfig => {
       // Pick up any new accounts from disk so index matching stays correct

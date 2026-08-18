@@ -41,21 +41,73 @@ const PERSISTED_QUOTA_FIELDS = [
   'tokensLimit', 'tokensRemaining', 'requestsLimit', 'requestsRemaining', 'resetsAt',
 ];
 
-// The quota fields that carry a utilization, i.e. the fraction of a window that
-// has been spent. Checked wherever one enters the manager (see isUtilization).
-const UTILIZATION_FIELDS = new Set([
-  'unified5h', 'unified7d', 'unified7dSonnet', 'unified7dFable',
-]);
+// The quota fields carrying a utilization; each has a `<field>Reset` naming the
+// window it is a fraction of.
+const UTILIZATION_FIELDS = ['unified5h', 'unified7d', 'unified7dSonnet', 'unified7dFable'];
 
 // Is `v` a utilization? Only a finite, non-negative number is. Above 1 is real
 // (an account in overage), so only the lower bound is enforced — but below 0 is
 // not a smaller number, it is more headroom than the window has: `1 - used`
 // grows without limit, and one negative value out-scores every healthy account
 // by hundreds of orders of magnitude while never reaching the switch threshold
-// that would rotate off it. Both entry points (response headers, restored state)
-// apply this so no such value is ever stored in the first place.
+// that would rotate off it.
 function isUtilization(v) {
   return Number.isFinite(v) && v >= 0;
+}
+
+// Is `v` a window reset? A wall-clock instant, so finite and after the epoch.
+// A non-numeric one is worse than a wrong one: `now >= reset` can never hold,
+// so _clearExpiredQuotas can never retire that bucket, and an account sitting
+// at or over threshold is out of rotation until someone deletes the state file
+// by hand — nothing else can repopulate a window that never expires.
+function isResetMs(v) {
+  return Number.isFinite(v) && v > 0;
+}
+
+// Is `v` a counter (a token/request limit or remainder)? Finite and not
+// negative; the ratios built from these gate selection.
+function isCount(v) {
+  return Number.isFinite(v) && v >= 0;
+}
+
+// Is `v` a reset timestamp for the standard (API-key) quotas? Stored as the
+// upstream string, but read through Date, so it has to survive that.
+function isResetStamp(v) {
+  return typeof v === 'string' && Number.isFinite(new Date(v).getTime());
+}
+
+// The domain of every quota field, by name. EVERY write of a quota value goes
+// through setQuotaField, which consults this: a response header, the usage
+// endpoint and the restored state file are all equally untrusted inputs, and
+// nothing between writing a state file and reading it back guarantees a value
+// still means what it did. A field absent from this table is not a quota value.
+const QUOTA_DOMAINS = {
+  unified5h: isUtilization,
+  unified7d: isUtilization,
+  unified7dSonnet: isUtilization,
+  unified7dFable: isUtilization,
+  unified5hReset: isResetMs,
+  unified7dReset: isResetMs,
+  unified7dSonnetReset: isResetMs,
+  unified7dFableReset: isResetMs,
+  unifiedStatus: v => typeof v === 'string' && v.length > 0,
+  tokensLimit: isCount,
+  tokensRemaining: isCount,
+  requestsLimit: isCount,
+  requestsRemaining: isCount,
+  resetsAt: isResetStamp,
+};
+
+/** Store `value` in `account.quota[field]` if it is a value that field can
+ * hold, and report whether it was stored. The single writer: response headers,
+ * the usage-endpoint probe and restored state all come through here, so no
+ * out-of-domain value is ever stored in the first place and there is one place
+ * to read to know what is accepted. */
+function setQuotaField(account, field, value) {
+  const inDomain = QUOTA_DOMAINS[field];
+  if (!inDomain || !inDomain(value)) return false;
+  account.quota[field] = value;
+  return true;
 }
 
 function emptyQuota() {
@@ -91,7 +143,13 @@ function makeAccount(acct, index) {
     accountUuid: acct.accountUuid || null,
     orgUuid: acct.orgUuid || null,
     orgName: acct.orgName || null,
-    priority: acct.priority || 0,
+    // One finite numeric form, fixed here so every selector can compare it
+    // strictly. `priority` reaches us straight from hand-edited JSON, where a
+    // quoted "0" and a bare 0 look the same and are not: strict equality reads
+    // them as different tiers, which silently disables the load and reset
+    // tiebreaks (every tier holds one account, so the first one always wins)
+    // and empties the pressure band's top tier.
+    priority: Number(acct.priority) || 0,
     disabled: acct.disabled || false,
     upstream: acct.upstream || null,
     modelMap: acct.modelMap || null,
@@ -134,6 +192,15 @@ function makeAccount(acct, index) {
 // predicate can't drift.
 function modelMatches(declared, model) {
   return declared === model || declared.replace(/\[\d+m\]$/, '') === model;
+}
+
+// Follow a by-index account reference through the removal of `removed`: the
+// slot is gone, everything above it moves down one. Null when the reference
+// named the account that went away.
+function remapIndexRef(ref, removed) {
+  const idx = Number(ref);
+  if (idx === removed) return null;
+  return idx > removed ? String(idx - 1) : ref;
 }
 
 // A representative model for a route's own globs, used to report what that route
@@ -1539,30 +1606,24 @@ export class AccountManager {
     const account = this.accounts[accountIndex];
     if (!account) return;
 
-    // Unified rate limits (Claude Max)
-    // Finite, not merely non-NaN: parseFloat yields ±Infinity for a "-1e400"
-    // header, and a non-finite utilization or reset poisons every comparison
-    // downstream — every threshold and band test silently reads false. A NaN
-    // reset is the worst of them: `now >= reset` never holds, so
-    // _clearExpiredQuotas can never retire that bucket again.
-    const u5h = parseFloat(headers['anthropic-ratelimit-unified-5h-utilization']);
-    const u7d = parseFloat(headers['anthropic-ratelimit-unified-7d-utilization']);
-    if (isUtilization(u5h)) account.quota.unified5h = u5h;
-    if (isUtilization(u7d)) account.quota.unified7d = u7d;
+    // Unified rate limits (Claude Max). Every value goes through
+    // setQuotaField, which rejects anything outside the field's domain —
+    // parseFloat yields ±Infinity for a "-1e400" header, and a non-finite
+    // utilization or reset poisons every comparison downstream. A NaN reset is
+    // the worst of them: `now >= reset` never holds, so _clearExpiredQuotas can
+    // never retire that bucket again.
+    setQuotaField(account, 'unified5h', parseFloat(headers['anthropic-ratelimit-unified-5h-utilization']));
+    setQuotaField(account, 'unified7d', parseFloat(headers['anthropic-ratelimit-unified-7d-utilization']));
 
-    const r5h = parseInt(headers['anthropic-ratelimit-unified-5h-reset'], 10);
-    const r7d = parseInt(headers['anthropic-ratelimit-unified-7d-reset'], 10);
-    if (Number.isFinite(r5h)) account.quota.unified5hReset = r5h * 1000;
-    if (Number.isFinite(r7d)) account.quota.unified7dReset = r7d * 1000;
+    setQuotaField(account, 'unified5hReset', parseInt(headers['anthropic-ratelimit-unified-5h-reset'], 10) * 1000);
+    setQuotaField(account, 'unified7dReset', parseInt(headers['anthropic-ratelimit-unified-7d-reset'], 10) * 1000);
 
     // Model-scoped weekly bucket — surfaced in headers as `7d_oi` ("7-day,
     // overage included"). On current subscription plans this is the Fable weekly
     // limit (it correlates with the usage endpoint's Fable-scoped weekly bucket).
     // Utilization here is already a 0-1 fraction (can exceed 1 when in overage).
-    const u7dOi = parseFloat(headers['anthropic-ratelimit-unified-7d_oi-utilization']);
-    if (isUtilization(u7dOi)) account.quota.unified7dFable = u7dOi;
-    const r7dOi = parseInt(headers['anthropic-ratelimit-unified-7d_oi-reset'], 10);
-    if (Number.isFinite(r7dOi)) account.quota.unified7dFableReset = r7dOi * 1000;
+    setQuotaField(account, 'unified7dFable', parseFloat(headers['anthropic-ratelimit-unified-7d_oi-utilization']));
+    setQuotaField(account, 'unified7dFableReset', parseInt(headers['anthropic-ratelimit-unified-7d_oi-reset'], 10) * 1000);
 
     // We switched to this account to discover its weekly quota; now that we
     // know it, flag for re-evaluation so selection can pick the best account.
@@ -1572,24 +1633,17 @@ export class AccountManager {
       console.log(`[TeamClaude] Learned weekly quota for "${account.name}", re-evaluating selection`);
     }
 
-    const uStatus = headers['anthropic-ratelimit-unified-status'];
-    if (uStatus) account.quota.unifiedStatus = uStatus;
+    setQuotaField(account, 'unifiedStatus', headers['anthropic-ratelimit-unified-status']);
 
     // Standard rate limits (API key accounts)
-    const tokensLimit = parseInt(headers['anthropic-ratelimit-tokens-limit'], 10);
-    const tokensRemaining = parseInt(headers['anthropic-ratelimit-tokens-remaining'], 10);
-    const tokensReset = headers['anthropic-ratelimit-tokens-reset'];
-    const requestsLimit = parseInt(headers['anthropic-ratelimit-requests-limit'], 10);
-    const requestsRemaining = parseInt(headers['anthropic-ratelimit-requests-remaining'], 10);
-    const requestsReset = headers['anthropic-ratelimit-requests-reset'];
+    setQuotaField(account, 'tokensLimit', parseInt(headers['anthropic-ratelimit-tokens-limit'], 10));
+    setQuotaField(account, 'tokensRemaining', parseInt(headers['anthropic-ratelimit-tokens-remaining'], 10));
+    setQuotaField(account, 'requestsLimit', parseInt(headers['anthropic-ratelimit-requests-limit'], 10));
+    setQuotaField(account, 'requestsRemaining', parseInt(headers['anthropic-ratelimit-requests-remaining'], 10));
 
-    if (!isNaN(tokensLimit)) account.quota.tokensLimit = tokensLimit;
-    if (!isNaN(tokensRemaining)) account.quota.tokensRemaining = tokensRemaining;
-    if (!isNaN(requestsLimit)) account.quota.requestsLimit = requestsLimit;
-    if (!isNaN(requestsRemaining)) account.quota.requestsRemaining = requestsRemaining;
-
-    if (tokensReset) account.quota.resetsAt = tokensReset;
-    else if (requestsReset) account.quota.resetsAt = requestsReset;
+    if (!setQuotaField(account, 'resetsAt', headers['anthropic-ratelimit-tokens-reset'])) {
+      setQuotaField(account, 'resetsAt', headers['anthropic-ratelimit-requests-reset']);
+    }
 
     account.usage.totalRequests++;
     account.usage.lastUsed = new Date().toISOString();
@@ -1641,21 +1695,21 @@ export class AccountManager {
     if (!account || !usage) return;
     const q = account.quota;
 
-    if (usage.fiveHour) {
-      if (usage.fiveHour.utilization != null) q.unified5h = usage.fiveHour.utilization;
-      if (usage.fiveHour.resetAt != null) q.unified5hReset = usage.fiveHour.resetAt;
-    }
-    if (usage.sevenDay) {
-      if (usage.sevenDay.utilization != null) q.unified7d = usage.sevenDay.utilization;
-      if (usage.sevenDay.resetAt != null) q.unified7dReset = usage.sevenDay.resetAt;
-    }
-    if (usage.sevenDaySonnet) {
-      if (usage.sevenDaySonnet.utilization != null) q.unified7dSonnet = usage.sevenDaySonnet.utilization;
-      if (usage.sevenDaySonnet.resetAt != null) q.unified7dSonnetReset = usage.sevenDaySonnet.resetAt;
-    }
-    if (usage.sevenDayFable) {
-      if (usage.sevenDayFable.utilization != null) q.unified7dFable = usage.sevenDayFable.utilization;
-      if (usage.sevenDayFable.resetAt != null) q.unified7dFableReset = usage.sevenDayFable.resetAt;
+    // The usage endpoint is a network input like any other, so it writes
+    // through the same validating setter as response headers and restored
+    // state: a bucket named here with a non-numeric window would otherwise be
+    // one _clearExpiredQuotas can never retire.
+    const buckets = [
+      ['fiveHour', 'unified5h'],
+      ['sevenDay', 'unified7d'],
+      ['sevenDaySonnet', 'unified7dSonnet'],
+      ['sevenDayFable', 'unified7dFable'],
+    ];
+    for (const [source, field] of buckets) {
+      const reported = usage[source];
+      if (!reported) continue;
+      setQuotaField(account, field, reported.utilization);
+      setQuotaField(account, `${field}Reset`, reported.resetAt);
     }
 
     // If we just learned this account's weekly window while probing, re-evaluate
@@ -1733,7 +1787,15 @@ export class AccountManager {
         account.expiresAt = newTokens.expiresAt;
         account._lastRefreshAt = Date.now();
         console.log(`[TeamClaude] Token refreshed for account "${account.name}"`);
-        this._onTokenRefresh?.(accountIndex, newTokens);
+        // Re-resolve the position from the ACCOUNT, never from the index this
+        // call started with. A removal splices `accounts` (and the config list
+        // the callback writes through, which the TUI keeps aligned with it)
+        // while this await is outstanding, so the captured index now names a
+        // different account — which would receive both of these tokens, while
+        // the real owner keeps a refresh token the provider has rotated away.
+        // Gone from the list means gone: persist nothing.
+        const idx = this.accounts.indexOf(account);
+        if (idx >= 0) this._onTokenRefresh?.(idx, newTokens, account);
       } catch (err) {
         console.error(`[TeamClaude] Token refresh failed for "${account.name}": ${err.message}`);
         // Reserve 'error' (which drops the account from rotation until re-login)
@@ -1756,7 +1818,10 @@ export class AccountManager {
   }
 
   /**
-   * Set a callback to persist refreshed tokens to config.
+   * Set a callback to persist refreshed tokens to config. Invoked as
+   * (index, tokens, account): the index is re-resolved at the moment of the
+   * call, and `account` is the record itself so a consumer can match its own
+   * list by identity rather than trusting the two to stay aligned.
    */
   onTokenRefresh(callback) {
     this._onTokenRefresh = callback;
@@ -1778,7 +1843,7 @@ export class AccountManager {
       accessToken,
       refreshToken: account.refreshToken,
       expiresAt: account.expiresAt,
-    });
+    }, account);
   }
 
   /**
@@ -1812,6 +1877,15 @@ export class AccountManager {
     // follow: the removed slot is gone and everything above it moves down one.
     // A null result means this entry's account is the one that went away.
     const remap = idx => (idx === index ? null : idx > index ? idx - 1 : idx);
+    // A route may name its accounts by INDEX ("accounts": ["2"]) rather than by
+    // name, and that index means the same list. Left alone it names a different
+    // account after the shift, so the route silently starts serving — and
+    // excluding — the wrong ones. Names are unaffected.
+    for (const route of this.routes) {
+      route.accounts = route.accounts
+        .map(a => (/^\d+$/.test(a) ? remapIndexRef(a, index) : a))
+        .filter(a => a != null);
+    }
     // Session pins are indices into the same list and shift with it: without
     // this, every session pinned above the removed account is served by its
     // neighbour, and the removed account's own sessions land on whatever slid
@@ -1851,14 +1925,22 @@ export class AccountManager {
     for (const account of this.accounts) {
       const match = saved.find(s => sameIdentity(s, account));
       if (!match || !match.quota) continue;
-      for (const f of PERSISTED_QUOTA_FIELDS) {
-        const v = match.quota[f];
-        if (v == null) continue;
-        // The state file is as much an input as a response header, and nothing
-        // between writing and reading it guarantees a value still means what it
-        // did — so a utilization gets the same domain check on the way back in.
-        if (UTILIZATION_FIELDS.has(f) && !isUtilization(v)) continue;
-        account.quota[f] = v;
+      // The state file is as much an input as a response header, and nothing
+      // between writing and reading it guarantees a value still means what it
+      // did — so every field gets the same domain check on the way back in.
+      for (const f of PERSISTED_QUOTA_FIELDS) setQuotaField(account, f, match.quota[f]);
+      // A utilization is a fraction OF a window. Where the file names a window
+      // and the value it gives is not one, neither half of that pair is
+      // trustworthy: a spent bucket whose reset was rejected is one nothing can
+      // ever retire — `now >= reset` is never true of a value that is not a
+      // time — so the account sits at or over threshold, is never selected, and
+      // never gets the response that would correct it. A file carrying no reset
+      // at all is a different thing (that window was simply never learned) and
+      // its utilization is restored as usual.
+      for (const f of UTILIZATION_FIELDS) {
+        if (match.quota[`${f}Reset`] != null && account.quota[`${f}Reset`] == null) {
+          account.quota[f] = null;
+        }
       }
       // We already know this account's weekly window, so it isn't "probing".
       if (account.quota.unified7dReset != null) account.probing = false;

@@ -188,3 +188,24 @@ test('the cap never evicts a session with a request in flight', () => {
   assert.equal(st.pinnedAccount('streaming', SHARED, clock.t), 2, 'a live request lost its pin');
   assert.equal(st.sessions.has('idle-1'), false, 'the oldest evictable one was kept');
 });
+
+// beginRequest goes through the same _ensure as touch, so an idle-expired
+// record must be discarded there too — refreshing it instead resurrects a pin
+// the session is no longer entitled to.
+test('beginRequest does not resurrect a session that idled out', () => {
+  const { clock, now } = fixedClock();
+  const st = new SessionTracker({ now });
+  st.touch('s1', 1, [SHARED], clock.t);
+  clock.t += SESSION_KNOWN_TTL_MS + 1;
+  st.beginRequest('s1', clock.t);
+  assert.equal(st.pinnedAccount('s1', SHARED, clock.t), null, 'an expired pin came back');
+});
+
+test('touch does not resurrect a session that idled out', () => {
+  const { clock, now } = fixedClock();
+  const st = new SessionTracker({ now });
+  st.touch('s1', 1, [SHARED], clock.t);
+  clock.t += SESSION_KNOWN_TTL_MS + 1;
+  st.touch('s1', null, null, clock.t); // a request arriving with no routing decision yet
+  assert.equal(st.pinnedAccount('s1', SHARED, clock.t), null, 'an expired pin came back');
+});
