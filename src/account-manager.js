@@ -358,10 +358,13 @@ export class AccountManager {
    *     pin, a /tc-acct/ pin and the keep-warm scheduler never consult
    *     `currentIndex`, so confirming one of those would swallow an event
    *     nothing acted on.
-   * Hand the same object to confirmRouted. Deriving the answer at that call
-   * site instead would be re-deriving it from state that has moved on; absent,
-   * it reads as "cannot tell", which is the safe direction — an event stays
-   * owed rather than being consumed wrongly.
+   *   - `advisorServed`: false when selection degraded to executor-only, so the
+   *     advisor sub-inference is dropped upstream and its family is NOT spent
+   *     on the account that serves this request.
+   * Hand the same object to recordSession and confirmRouted. Deriving either
+   * answer at those call sites instead would be re-deriving it from state that
+   * has moved on; absent, both read as "cannot tell", which is the safe
+   * direction — an event stays owed rather than being consumed wrongly.
    */
   getActiveAccount(exclude = null, model = null, advisorModel = null, sessionId = null, decision = null) {
     // Clear expired quotas across all accounts and switch proactively if a
@@ -375,16 +378,20 @@ export class AccountManager {
     // if nothing session-eligible is found (e.g. the whole tier is exhausted).
     if (this.distributeSessions && sessionId && !this._pinnedAccountForModel(model, advisorModel)) {
       const acc = this._selectForSession(sessionId, exclude, model, advisorModel);
-      if (acc) return acc;
+      // Every account this path can return was filtered through _isAvailable
+      // with the advisor's model, so it can serve both.
+      if (acc) { if (decision && advisorModel) decision.advisorServed = true; return acc; }
     }
     if (advisorModel) {
       const account = this._select(exclude, model, advisorModel, false, decision);
-      if (account) return account;
+      if (account) { if (decision) decision.advisorServed = true; return account; }
       // Throttled so a busy advisor session doesn't flood the activity log.
       if (Date.now() >= (this._advisorDegradeLogAt || 0)) {
         this._advisorDegradeLogAt = Date.now() + 60_000;
         console.log(`[TeamClaude] No account eligible for advisor model "${advisorModel}" — routing by request model only`);
       }
+      // Degraded: whatever serves this request serves the executor alone.
+      if (decision) decision.advisorServed = false;
     }
     return this._select(exclude, model, null, true, decision);
   }
@@ -531,21 +538,30 @@ export class AccountManager {
   /** Record that a session's request was served by an account (always on, even
    * when distribution is off — the readout is passive). This is what pins a
    * session for future affinity, for the buckets this request actually spent. */
-  recordSession(sessionId, accountIndex, model = null, advisorModel = null) {
+  recordSession(sessionId, accountIndex, model = null, advisorModel = null, decision = null) {
     if (sessionId) {
-      const buckets = this._requestBuckets(model, advisorModel);
+      const buckets = this._requestBuckets(model, advisorModel, decision);
       this.sessionTracker.touch(sessionId, accountIndex, buckets);
       this._seedPinWindows(sessionId, accountIndex, buckets);
     }
   }
 
   /** The weekly buckets one request spends on the account that serves it: the
-   * executor's, plus the advisor's when the request carries one. An advisor
-   * sub-inference runs on the SAME account, so that family's quota is spent —
-   * and its cache warmed — there too, which is why both get pinned. */
-  _requestBuckets(model, advisorModel = null) {
+   * executor's, plus the advisor's when the request carries one AND that
+   * sub-inference will actually run here. An advisor sub-inference runs on the
+   * SAME account, so that family's quota is spent — and its cache warmed —
+   * there too, which is why both get pinned. But when no account was eligible
+   * for both models, selection degraded to executor-only and upstream drops the
+   * advisor call: that account served the executor alone, and claiming its
+   * family here would pin (and settle) a bucket on an account that never served
+   * it — quite possibly one that cannot. Only selection knows which happened,
+   * so only an explicit `decision.advisorServed` claims that family: no
+   * decision means no evidence, and the safe reading of no evidence is that the
+   * session re-routes its advisor traffic next request rather than that this
+   * account owns it. */
+  _requestBuckets(model, advisorModel = null, decision = null) {
     const buckets = [this._weeklyBucketFor(model)];
-    if (advisorModel) {
+    if (advisorModel && decision?.advisorServed) {
       const advisor = this._weeklyBucketFor(advisorModel);
       if (!buckets.includes(advisor)) buckets.push(advisor);
     }
@@ -1033,7 +1049,7 @@ export class AccountManager {
    * gained a full week until the next roll.
    */
   confirmRouted(sessionId, accountIndex, model = null, advisorModel = null, decision = null) {
-    const buckets = this._requestBuckets(model, advisorModel);
+    const buckets = this._requestBuckets(model, advisorModel, decision);
     if (decision?.viaCurrent) this._currentSeen.commitOn(accountIndex, buckets);
     if (sessionId) this.sessionTracker.windowsFor(sessionId)?.noteServed(accountIndex, buckets);
   }

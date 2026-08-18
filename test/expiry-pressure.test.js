@@ -37,7 +37,7 @@ function route(am, sid, model = OPUS, advisorModel = null) {
     const decision = {};
     const acc = am.getActiveAccount(null, model, advisorModel, sid, decision);
     if (acc) {
-      am.recordSession(sid, acc.index, model, advisorModel);
+      am.recordSession(sid, acc.index, model, advisorModel, decision);
       am.confirmRouted(sid, acc.index, model, advisorModel, decision);
     }
     return acc;
@@ -719,6 +719,65 @@ test('an advisor request follows the executor\'s pin, not the advisor\'s', () =>
   am.recordSession('s1', 0, OPUS);
   am.recordSession('s1', 1, FABLE);
   assert.equal(am.getActiveAccount(null, OPUS, FABLE, 's1').name, 'opus-home');
+});
+
+// An advisor request pins both families because the account serves both. When
+// no account is eligible for both, selection degrades to executor-only and the
+// advisor sub-inference is dropped upstream — so that account served the
+// executor alone, and pinning the advisor's family there points it at an
+// account that never served it and may not be able to.
+test('a degraded advisor request pins the executor\'s family only', () => {
+  const am = manager([
+    { name: 'a', used: 0.2, resetH: 50, fableUsed: 0.99, fableResetH: 50 },  // no Fable left
+    { name: 'b', used: 0.99, resetH: 50, fableUsed: 0.05, fableResetH: 60 }, // no Opus left
+  ]);
+  am.recordSession('s1', 1, FABLE); // the session's Fable traffic lives on 'b'
+  const decision = {};
+  const acc = am.getActiveAccount(null, OPUS, FABLE, 's1', decision);
+  assert.equal(acc.name, 'a', 'expected the degrade path');
+  assert.equal(decision.advisorServed, false);
+  am.recordSession('s1', acc.index, OPUS, FABLE, decision);
+  assert.equal(am.sessionTracker.pinnedAccount('s1', 'unified7d'), 0);
+  assert.equal(am.sessionTracker.pinnedAccount('s1', 'unified7dFable'), 1,
+    'the dropped advisor family was pinned to the account that never served it');
+});
+
+test('a degraded advisor request does not settle the advisor family\'s rollover', () => {
+  // Only 'a' can serve Opus, and it cannot serve Fable — so an Opus request
+  // carrying a Fable advisor has no jointly-eligible account and degrades.
+  const am = manager([
+    { name: 'a', used: 0.2, resetH: 50, fableUsed: 0.99, fableResetH: 50 },
+    { name: 'b', used: 0.99, resetH: 50, fableUsed: 0.3, fableResetH: 50 },
+    { name: 'c', used: 0.99, resetH: 50, fableUsed: 0.05, fableResetH: 60 },
+  ]);
+  assert.equal(route(am, 's1', FABLE).name, 'b'); // Fable pinned to 'b'
+  am.accounts[2].disabled = true;                 // nowhere for Fable to move yet
+  rollFable(am, 1);
+  assert.equal(route(am, 's1', FABLE).name, 'b'); // detected, owed on the Fable bucket
+  am.accounts[2].disabled = false;
+
+  // An Opus+Fable-advisor request degrades onto 'a' (Fable-exhausted). It moved
+  // no Fable traffic anywhere, so it must not bank the Fable rollover.
+  const decision = {};
+  const acc = am.getActiveAccount(null, OPUS, FABLE, 's1', decision);
+  assert.equal(acc.name, 'a');
+  am.recordSession('s1', acc.index, OPUS, FABLE, decision);
+  am.confirmRouted('s1', acc.index, OPUS, FABLE, decision);
+
+  assert.equal(route(am, 's1', FABLE).name, 'c', 'the degraded request settled a rollover it never moved');
+});
+
+test('an advisor request that was not degraded still pins both families', () => {
+  const am = manager([
+    { name: 'a', used: 0.2, resetH: 50, fableUsed: 0.2, fableResetH: 50 },
+    { name: 'b', used: 0.2, resetH: 400, fableUsed: 0.2, fableResetH: 400 },
+  ]);
+  const decision = {};
+  const acc = am.getActiveAccount(null, OPUS, FABLE, 's1', decision);
+  assert.equal(decision.advisorServed, true);
+  am.recordSession('s1', acc.index, OPUS, FABLE, decision);
+  assert.equal(am.sessionTracker.pinnedAccount('s1', 'unified7d'), acc.index);
+  assert.equal(am.sessionTracker.pinnedAccount('s1', 'unified7dFable'), acc.index);
 });
 
 // A route pin is the operator saying where a model goes. Session affinity is a

@@ -116,9 +116,11 @@ test('distribution on: an advisor request pins both families to the serving acco
   weekly(am, 1, [0.1, 100], [0.1, 100]);
 
   // Opus executor, Fable advisor: the advisor sub-inference runs on the same
-  // account, so that account served Fable work too.
-  const acc = am.getActiveAccount(null, OPUS, FABLE, 's1');
-  am.recordSession('s1', acc.index, OPUS, FABLE);
+  // account, so that account served Fable work too — which selection reports
+  // through the decision, since only it knows the advisor was not degraded away.
+  const decision = {};
+  const acc = am.getActiveAccount(null, OPUS, FABLE, 's1', decision);
+  am.recordSession('s1', acc.index, OPUS, FABLE, decision);
   assert.equal(acc.name, 'a');
   // Load 'a' up so plain load-balancing would send a new Fable request to 'b'.
   am.recordSession('other-1', 0, FABLE);
