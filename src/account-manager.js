@@ -926,11 +926,7 @@ export class AccountManager {
     // nears its reset, so scoring accounts at different instants would break an
     // exact tie on the microseconds between two Date.now() reads.
     const now = Date.now();
-    // `priority` reaches selection straight from config and may be a string. The
-    // tier test is strict, so compare it as a number — a quoted "0" would
-    // otherwise match nothing, leave the tier empty and pass every account
-    // through unbanded.
-    const prio = a => Number(a.priority) || 0;
+    const prio = a => a.priority || 0;
     // Band only the best (lowest-value) priority tier. Priority is the
     // operator's explicit order and must keep winning: a high-pressure
     // low-priority fallback (e.g. an API-key account at priority 100) must not
