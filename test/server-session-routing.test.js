@@ -61,6 +61,13 @@ function scriptedUpstream(reply = () => ({ status: 200 })) {
 
 // Two accounts with expiry routing and session distribution on, quota set by
 // hand (the upstream sends no rate-limit headers, so nothing overwrites it).
+//
+// The `{ a: 0.5/50h, b: 0.1/60h }` pair below recurs throughout this file and
+// expiry-pressure.test.js, and it puts 'a' EXACTLY on the pressure band's
+// tolerance floor — (1-0.5)/50h is precisely ((1-0.1)/60h) / 1.5. It stays in
+// the band because a fixture is always built before it is scored, so the
+// elapsed time between is non-negative. Stable, but on the line: changing the
+// tolerance default or the pressure formula moves these tests as a group.
 function fleet(specs, { expiryRouting = { enabled: true } } = {}) {
   const am = new AccountManager(specs.map(s => apikey(s.name)), 0.98,
     { distributeSessions: true, expiryRouting });

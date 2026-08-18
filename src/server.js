@@ -506,6 +506,25 @@ export function createProxyRequestListener({ accountManager, upstream, logDir = 
         return;
       }
 
+      // `tried`, `reauthed` and `pinnedIndex` hold ACCOUNT INDICES for the life
+      // of this request, and an index is a position in a list a reload can
+      // splice. removeAccount renumbers everything it owns, but it cannot reach
+      // in here: a removal while this request is in flight leaves `tried` and
+      // `reauthed` excluding whichever account slid into the removed slot, and
+      // `pinnedIndex` forcing that account instead of the one the caller named.
+      // AccountManager closes the other half of this — a removed account's own
+      // `index` becomes -1, so a late release or quota update from an in-flight
+      // request no-ops rather than landing on its neighbour — but that does
+      // nothing for indices held out here.
+      //
+      // Left as is: the window is one reload against requests already past
+      // selection, and the cost is one misrouted or mis-excluded request rather
+      // than anything durable. Closing it properly means either re-resolving by
+      // NAME on every attempt (names outlive indices, which is why the MITM pin
+      // above already does exactly that) or stamping the account list with a
+      // generation counter and discarding a ctx whose generation is stale.
+      // Both change how requests address accounts, which is a wider change than
+      // any defect here justifies.
       const ctx = { account: null, status: null, tried: new Set(), reauthed: new Set(), model, advisorModel, pinnedIndex, holdBudgetMs: holdMs, sessionId };
       // Hold the session "in flight" across the WHOLE request (incl. retries and
       // a multi-minute streaming completion) so it stays counted as active and

@@ -20,6 +20,17 @@ function oauth(name, extra = {}) {
 // two constructors either side of a millisecond boundary produce windows 1ms
 // apart, and any exact comparison of a clock-derived quantity across the pair
 // then fails on a stalled box — a flake that lands on whatever else was running.
+//
+// One thing to know before changing a `used`/`resetH` pair, or the tolerance
+// default, or how pressure is computed. The recurring
+// `{ a: 0.5/50h, b: 0.1/60h }` fixture — used here and in
+// server-session-routing.test.js — puts 'a' EXACTLY on the band's tolerance
+// floor: (1-0.5)/50h is precisely ((1-0.1)/60h) / 1.5. It stays in the band only
+// because a fixture is always built before it is scored, so the elapsed time
+// between the two is non-negative and 'a' drifts inside rather than outside.
+// That is stable, not lucky — but it means roughly ten tests here are sitting on
+// the boundary rather than comfortably inside it, and anything that moves the
+// floor moves all of them at once.
 function manager(specs, { er = { enabled: true }, distribute = true, tracker, now = Date.now() } = {}) {
   const am = new AccountManager(specs.map(s => oauth(s.name, s.extra)), 0.98,
     { distributeSessions: distribute, sessionTracker: tracker, ...(er ? { expiryRouting: er } : {}) });

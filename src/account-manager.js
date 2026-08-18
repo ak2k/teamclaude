@@ -1144,6 +1144,13 @@ export class AccountManager {
     const key = `${account.index}:${bucket}`;
     const now = Date.now();
     if (now < (this._rolloverStuckLogAt.get(key) || 0)) return;
+    // The one minute is untested, and deliberately so: this reads the wall clock
+    // directly where the rest of the tracker takes an injectable `now`, so
+    // nothing can advance time past the throttle to watch the line fire again.
+    // Widening it would break no test. Adding a clock parameter for one log
+    // throttle would be source that exists only to be tested, which buys less
+    // than it costs — the line's CONTENT and its per-(account, bucket) key are
+    // both held, and those are what carry the meaning.
     this._rolloverStuckLogAt.set(key, now + 60_000);
     console.log(`[TeamClaude] Account "${account.name}" rolled over its ${bucket} window but no eligible account can take that traffic — still routing there`);
   }
