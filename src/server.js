@@ -1059,6 +1059,13 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, route);
     }
 
+    // Past every branch that retries: this response is the one the client gets,
+    // so the account that produced it is the account this request was served by.
+    // Routing needs that confirmation, not merely the selection — a rollover
+    // preemption that re-routed and then failed back onto the original account
+    // must stay pending rather than bank a move that never happened.
+    accountManager.confirmRouted(ctx.sessionId, account.index, ctx.model, ctx.advisorModel);
+
     // Log the request head (once) followed by the response headers, streaming
     // to disk from here on.
     logRequestHead();

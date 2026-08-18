@@ -99,6 +99,24 @@ Default rotation is purely quota-driven, so many parallel sessions all pile onto
 
 When on, TeamClaude routes each **new** session to the least-loaded eligible account (fewest active sessions, then fewest in-flight) and **pins** it there, so a session keeps hitting the same account and preserves its prompt cache — while different sessions spread across accounts instead of funnelling onto one. Account **priority still wins** (a higher-priority account is never skipped to balance load), and a session whose account becomes exhausted re-routes automatically. Off by default; single-session use is unaffected either way.
 
+## Expiry-pressure routing
+
+The soonest-reset preference in [Choosing an account](#choosing-an-account) only applies at the moments selection *has* to pick — daemon start and threshold rotation. On a fleet whose weekly utilization never reaches the threshold, those moments never come: routing can sit on the account whose window just reset a full week out while another account's ample weekly quota quietly expires unspent. Enable `expiryRouting` to make the horizon a standing preference instead:
+
+```json
+"expiryRouting": { "enabled": true, "tolerance": 1.5, "preempt": true }
+```
+
+Each account gets a **pressure** score for the request's model: headroom in the governing weekly bucket divided by the seconds until that bucket resets. High pressure means ample quota about to be forfeited — spend it first. Because headroom is the numerator, a nearly-drained account is *not* preferred merely because its window rolls soon (reset time alone would steer into it). Fable/Sonnet requests are scored on their own weekly bucket, so the same account can rank differently per model. The 5h bucket is not scored — it stays an availability gate, since its much shorter horizon would otherwise numerically drown the weekly comparison this feature exists to make. `teamclaude status --json` reports each account's computed `pressure` (against the shared weekly), so you can see the ordering the router is working from.
+
+Selection then draws from the **top pressure band**: accounts within `tolerance` (a ratio, ≥ 1) of the best pressure in the top priority tier. Inside the band the usual rules apply unchanged — `distributeSessions` still spreads new sessions by load, priority still wins, and the storm ramp still paces failover. `tolerance` is the dial between load spreading and expiry pressure: large values approach pure load-balancing, `1.0` is strict highest-pressure-first (and effectively disables session spreading).
+
+With `preempt` on, a **pinned session** (and the sticky current account) is re-routed when its account's governing weekly window **rolls over** — the account just became both the freshest and the furthest-dated choice, so staying would burn the window that gained a full week while sooner-expiring quota goes unspent. That rollover is the *only* event that moves a pin: draining the pinned account never does (the drain is the policy working, and preempting on it would thrash the prompt cache for nothing). Cost: at most one cache-miss turn per pinned session per rollover of its account, roughly once per account per week.
+
+With `"preempt": false` the band only refines the moments selection was already going to pick — a rotation, or placing a new session — so the "standing preference" above is really a property of `preempt: true`. Without it, the sticky current account (distribution off) or an existing session pin stays where it is across a rollover, and long-lived sessions can still ride an account whose window just reset a week out.
+
+Off by default. Changes apply to a running server via `POST /teamclaude/reload` (or any CLI command that notifies the server).
+
 ## Pin a session to one account
 
 `TC_ACCT` forces every request onto **one** account, bypassing rotation (and never failing over to another). It works in **both** modes — MITM (the default) and `--no-mitm`:
