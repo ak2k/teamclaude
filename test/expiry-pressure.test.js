@@ -27,15 +27,22 @@ function manager(specs, { er = { enabled: true }, distribute = true, tracker } =
   return am;
 }
 
-// Route a session request the way the server does: select, record the pin, and
-// — once the attempt is the one the client gets — confirm what served it.
+// Route a session request the way the server does: hold the session in flight
+// for the whole request, select, record the pin, and — once the attempt is the
+// one the client gets — confirm what served it and release the hold. The server
+// wiring itself is covered end-to-end in test/server-routing.test.js.
 function route(am, sid, model = OPUS, advisorModel = null) {
-  const acc = am.getActiveAccount(null, model, advisorModel, sid);
-  if (acc) {
-    am.recordSession(sid, acc.index, model, advisorModel);
-    am.confirmRouted(sid, acc.index, model, advisorModel);
+  am.beginSession(sid);
+  try {
+    const acc = am.getActiveAccount(null, model, advisorModel, sid);
+    if (acc) {
+      am.recordSession(sid, acc.index, model, advisorModel);
+      am.confirmRouted(sid, acc.index, model, advisorModel);
+    }
+    return acc;
+  } finally {
+    am.endSession(sid);
   }
-  return acc;
 }
 
 // Roll an account's Fable weekly window, leaving the shared one alone.
@@ -600,6 +607,27 @@ test('a pin rollover survives a retry that lands back on the rolled account', ()
   assert.equal(route(am, 's1').name, 'b');
 });
 
+// The account a rollover moved a session TO is not itself rolled over. Reading
+// the owed event as "this account rolled" whatever account is asking chains the
+// session off one healthy account after another.
+test('a preempted session settles on its destination instead of chaining onward', () => {
+  const am = manager([
+    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'b', used: 0.05, resetH: 60 },
+    { name: 'c', used: 0.05, resetH: 70 },
+  ]);
+  am.recordSession('s1', 0, OPUS);
+  am.confirmRouted('s1', 0, OPUS);
+  rollWeekly(am, 0);
+  // The preemption moves the session, but this request never completes, so the
+  // event is still owed when the next one arrives.
+  const first = am.getActiveAccount(null, OPUS, null, 's1');
+  assert.notEqual(first.name, 'a');
+  am.recordSession('s1', first.index, OPUS);
+  const second = am.getActiveAccount(null, OPUS, null, 's1');
+  assert.equal(second.name, first.name, 'the owed event chained the session onto a third account');
+});
+
 test('a current-account rollover survives a retry that lands back on it', () => {
   const am = manager([
     { name: 'a', used: 0.5, resetH: 50 },
@@ -756,6 +784,35 @@ test('a shared-weekly rollover moves the Opus pin and leaves the Fable pin alone
   rollWeekly(am, 0); // only the shared weekly rolls; the Fable bucket is untouched
   assert.equal(route(am, 's1', OPUS).name, 'b');
   assert.equal(route(am, 's1', FABLE).name, 'a');
+});
+
+// The window KEY collapses to the shared weekly for any bucket the account does
+// not meter, and the live fleet meters no Sonnet bucket at all — so an ordinary
+// Opus+Sonnet session has two buckets resolving to one key. A baseline keyed by
+// the key alone merges them, each request overwrites the other's, and no
+// rollover is detectable for that session on either family.
+test('two buckets sharing a window key keep a baseline per account', () => {
+  const SONNET = 'claude-sonnet-4-6';
+  const am = manager([
+    // Neither account reports a Sonnet bucket, so both models resolve to the
+    // 'unified7d' window key while the pins sit on different accounts.
+    { name: 'a', used: 0.3, resetH: 50 },
+    { name: 'b', used: 0.3, resetH: 60 },
+    { name: 'c', used: 0.1, resetH: 70 },
+  ]);
+  am.recordSession('s1', 0, OPUS);   // Opus on 'a'
+  am.confirmRouted('s1', 0, OPUS);
+  am.recordSession('s1', 1, SONNET); // Sonnet on 'b' — same window key, other account
+  am.confirmRouted('s1', 1, SONNET);
+  assert.equal(am._windowKeyFor(am.accounts[0], OPUS), am._windowKeyFor(am.accounts[1], SONNET),
+    'the two buckets no longer collide, so this scenario proves nothing');
+  for (let i = 0; i < 3; i++) {       // alternate, as a real session does
+    assert.equal(route(am, 's1', OPUS).name, 'a');
+    assert.equal(route(am, 's1', SONNET).name, 'b');
+  }
+  rollWeekly(am, 0);
+  assert.notEqual(route(am, 's1', OPUS).name, 'a', "the Opus baseline was lost to the Sonnet pin's");
+  assert.equal(route(am, 's1', SONNET).name, 'b', 'the Sonnet pin moved for an Opus rollover');
 });
 
 test('a session pinned per bucket keeps a rollover baseline for each account', () => {

@@ -1,6 +1,21 @@
-// Rollover bookkeeping for a sticky routing choice, in its own module so both
-// the AccountManager (for the global current account) and a SessionTracker
-// record (for a pinned session) can hold one without importing each other.
+// Rollover bookkeeping for one sticky routing choice — a session's pins, or the
+// global current account.
+//
+// A window is identified by (accountIndex, windowKey), never by the key alone.
+// The key collapses to `unified7d` for any bucket whose family reset the
+// account does not report, so two buckets of one session can resolve to the
+// same key while sitting on DIFFERENT accounts; a map keyed by the window alone
+// merges them, and each overwrites the other's baseline until no rollover is
+// detectable for either. A reset is only ever compared with one previously seen
+// on the SAME account for the SAME window.
+//
+// A detected rollover is kept PENDING rather than applied. The preemption it
+// asks for only really happens once a request is served somewhere else, and a
+// request can be re-routed several times before that: it excludes an account
+// that just failed, and it re-pins its session on every attempt. Consuming the
+// event at detection time means a retry that fails back onto the rolled-over
+// account banks a move that never happened, and the session then rides that
+// account until its window rolls again a week later.
 
 // How far a weekly reset must move forward to count as that window rolling over
 // rather than the same window re-reported. The two writers of a reset disagree
@@ -11,27 +26,9 @@
 // window by a week, so an hour is a floor no genuine event can fall under.
 export const ROLLOVER_MIN_JUMP_MS = 3600_000;
 
-/**
- * Rollover bookkeeping for one sticky choice — a session's pins, or the global
- * current account. Everything here is PER BUCKET, because a session's pins are:
- * its Opus traffic and its Fable traffic can sit on different accounts, so
- * "the account this choice was last seen on" is a question per bucket and not
- * per session. Each entry in `windows` therefore carries its own account, which
- * is the invariant that makes the numbers comparable — a reset is only ever
- * measured against one previously seen on the SAME account for the SAME bucket.
- *
- * A detected rollover is kept PENDING rather than applied. The preemption it
- * asks for only really happens once a request is served somewhere else, and a
- * request can be re-routed several times before that: it excludes an account
- * that just failed, and it re-pins its session on every attempt. Consuming the
- * event at detection time means a retry that fails back onto the rolled-over
- * account banks a move that never happened, and the session then rides that
- * account until its window rolls again a week later.
- */
 export class WindowWatcher {
   constructor() {
-    // window key -> { idx, reset }: the reset last seen for that window, and
-    // the account it was seen on.
+    // window key -> account index -> the reset last seen for that window there.
     this.windows = new Map();
     // request bucket -> { idx, window, reset }: rollovers found but not acted
     // on. Keyed by the REQUEST's bucket, not the window's, because that is what
@@ -40,15 +37,16 @@ export class WindowWatcher {
     this.pending = new Map();
   }
 
-  /** Record `resets` as the baseline for account `idx`. Seed-only for windows
-   * already seen on this same account, since overwriting one here would erase a
-   * jump nothing has acted on yet; a window last seen on a DIFFERENT account is
-   * replaced outright, because comparing across accounts is never a rollover. */
+  /** Record `resets` as the baseline for account `idx`. Seed-only per
+   * (window, account): overwriting one here would erase a jump nothing has
+   * acted on yet. A window last seen on a different account is a separate
+   * entry, so there is nothing to replace. */
   seed(idx, resets) {
     for (const [key, reset] of Object.entries(resets)) {
       if (reset == null) continue;
-      const seen = this.windows.get(key);
-      if (!seen || seen.idx !== idx) this.windows.set(key, { idx, reset });
+      let byAccount = this.windows.get(key);
+      if (!byAccount) this.windows.set(key, byAccount = new Map());
+      if (!byAccount.has(idx)) byAccount.set(idx, reset);
     }
   }
 
@@ -61,18 +59,17 @@ export class WindowWatcher {
    * rolling.
    *
    * This writes — it seeds a first-sight baseline — but it never advances a
-   * window past a rollover it has found. Only commitOn does that, and only once
-   * a preemption has actually moved a request. That is the invariant that lets
-   * detection run on every selection pass, including one that cannot act on
-   * what it finds: looking costs the event nothing.
+   * window past a rollover it has found. Only commitOn does that, and only
+   * once a preemption has actually moved a request. That is the invariant that
+   * lets detection run on every selection pass, including one that cannot act
+   * on what it finds: looking costs the event nothing.
    */
   rolledOver(idx, bucket, window, resets) {
     // Still owed from an earlier pass: re-report it rather than re-deriving it
     // from a baseline that a re-pin may since have moved.
     const owed = this.pending.get(bucket);
     if (owed && owed.idx === idx) return true;
-    const seen = this.windows.get(window);
-    const prev = seen && seen.idx === idx ? seen.reset : null;
+    const prev = this.windows.get(window)?.get(idx) ?? null;
     this.seed(idx, resets);
     const now = resets[window] ?? null;
     if (prev == null || now == null || now - prev <= ROLLOVER_MIN_JUMP_MS) return false;
@@ -92,8 +89,7 @@ export class WindowWatcher {
     for (const bucket of buckets) {
       const owed = this.pending.get(bucket);
       if (!owed || owed.idx === acceptedIdx) continue;
-      const seen = this.windows.get(owed.window);
-      if (seen && seen.idx === owed.idx) seen.reset = owed.reset;
+      this.windows.get(owed.window)?.set(owed.idx, owed.reset);
       this.pending.delete(bucket);
     }
   }
@@ -107,10 +103,14 @@ export class WindowWatcher {
       if (moved == null) this.pending.delete(bucket);
       else owed.idx = moved;
     }
-    for (const [key, seen] of [...this.windows]) {
-      const moved = mapFn(seen.idx);
-      if (moved == null) this.windows.delete(key);
-      else seen.idx = moved;
+    for (const [key, byAccount] of [...this.windows]) {
+      const moved = new Map();
+      for (const [idx, reset] of byAccount) {
+        const to = mapFn(idx);
+        if (to != null) moved.set(to, reset);
+      }
+      if (moved.size) this.windows.set(key, moved);
+      else this.windows.delete(key);
     }
     return this.windows.size > 0 || this.pending.size > 0;
   }
