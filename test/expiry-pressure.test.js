@@ -1308,6 +1308,38 @@ test('the per-bucket view shows one session\'s two families on two accounts', ()
     'perAccount already distinguishes the two families, so perBucket proves nothing');
 });
 
+// The pin view is built from the pins, so it inherits their rule: a degraded
+// advisor request's family was never served here and is never pinned here, and
+// so must not appear in the view either. Reporting it would put a family on an
+// account that cannot serve it — on the one status surface an operator would
+// consult to find out where that family is being served.
+test('a family a degraded advisor request never served is absent from the view', () => {
+  const am = manager([
+    { name: 'a', used: 0.2, resetH: 50, fableUsed: 0.99, fableResetH: 50 },  // no Fable left
+    { name: 'b', used: 0.99, resetH: 50, fableUsed: 0.05, fableResetH: 60 }, // no Opus left
+  ]);
+  const decision = {};
+  const acc = am.getActiveAccount(null, OPUS, FABLE, 's1', decision);
+  assert.equal(acc.name, 'a', 'expected the degrade path');
+  assert.equal(decision.advisorServed, false);
+  am.recordSession('s1', acc.index, OPUS, FABLE, decision);
+  assert.deepEqual(am.getStatus().sessions.perBucket, { unified7d: { 0: 1 } },
+    'the dropped advisor family is reported as pinned to an account that never served it');
+});
+
+test('an advisor request that was served shows both families on that account', () => {
+  const am = manager([
+    { name: 'a', used: 0.2, resetH: 50, fableUsed: 0.2, fableResetH: 50 },
+    { name: 'b', used: 0.2, resetH: 400, fableUsed: 0.2, fableResetH: 400 },
+  ]);
+  const decision = {};
+  const acc = am.getActiveAccount(null, OPUS, FABLE, 's1', decision);
+  assert.equal(decision.advisorServed, true);
+  am.recordSession('s1', acc.index, OPUS, FABLE, decision);
+  assert.deepEqual(am.getStatus().sessions.perBucket,
+    { unified7d: { [acc.index]: 1 }, unified7dFable: { [acc.index]: 1 } });
+});
+
 test('the per-bucket view counts sessions, and never publishes their ids', () => {
   const am = manager([
     { name: 'a', used: 0.1, resetH: 50 },
