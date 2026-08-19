@@ -155,6 +155,36 @@ any severity.
     mutate the fix and watch the named test fail; reporting only that it
     passes against the fix proves the test runs, not that it detects.
 
+12. **A predicate deciding whether an alternative is WORTH taking must be
+    computed over the same candidate set as the predicate deciding whether
+    it is AVAILABLE.** `otherHostAvailable` scans the raw `accounts` array;
+    selection reaches accounts only through `_isAvailable`. So an account
+    that is disabled, rate-limited, errored or model-ineligible is counted
+    as a reason to fail over and is then never chosen — and because it is
+    never chosen it never enters `ctx.tried`, so its vote never expires.
+    The general form: when one predicate justifies an action and another
+    performs it, a candidate visible to the first but not the second is a
+    permanent false vote. Ask what filters the actor applies that the
+    adviser does not.
+    *Precedent: round 6. A disabled account carrying its own `upstream`
+    made a four-account fleet march every account on one refused
+    connection and answer `rate_limit_error` for a network failure.
+    Recorded as TC-007; the remaining instances are TC-008 to TC-012.*
+
+13. **Moving a code out of an unconditional arm into a conditional one
+    converts every bug in the condition into a REGRESSION.** The same gap
+    leaves a case merely unfixed in the arm that had no prior behaviour,
+    and breaks a case that previously worked in the arm that did. So the
+    differential to run is over the OLD arm's cases, not the new arm's:
+    what used to take this path, and does it still?
+    *Precedent: round 6. `ENOTFOUND` and `ECONNREFUSED` were given the same
+    conditional treatment on the same argument — both mean "this host is
+    not answering" — and the argument was sound for one and a regression
+    for the other, purely because `ECONNREFUSED` was already unconditional.
+    The reasoning was checked and approved on its merits; what nobody ran
+    was the old arm's cases. The failure was in the approval, not in the
+    implementation, which is why this is a review invariant.*
+
 ## Danger zones (escalate scrutiny; small diffs, big blast radius)
 
 | Path | Why |
@@ -162,7 +192,7 @@ any severity.
 | `src/window-watcher.js` | The keying of invariants 1-2. Bounded at two entries per (bucket, account) only because `_windowForBucket` resolves to itself or `unified7d`; a third answer makes it a growth surface |
 | `src/account-manager.js:1190` `_windowForBucket`, `:763` `_governingBucket` | The non-injective resolver every keying bug came through |
 | `src/account-manager.js:1912` `removeAccount` | Invariant 5. Renumbering is index arithmetic on live state; two keys can map onto each other, so an in-place pass drops the survivor it just wrote |
-| `src/server.js:194` and `:546` | The two outer catches (invariant 7). They are 350 lines apart and only one is fixed |
+| `src/server.js:194` and `:546` | The two outer catches (invariant 7). Both answer the socket and close the activity entry now; they are 350 lines apart, so a change to one is a prompt to check the other |
 | `src/account-manager.js:652`, `:1129`, `:1185` | Counter increments (invariant 4) |
 | `getStatus()` `:2036`, `getRoutes()` `:1294`, `eligibility()` `:918`, `prober.getStatus()`, `warmer.getStatus()` | Published payloads. A sweep froze 39 fields to constants and **20 survived** the suite — a field asserted in one arm of a boolean, or only at its default, is not asserted |
 | `_setCurrent` `:287` / `setCurrentAccount` `:300` | Invariant 3 |

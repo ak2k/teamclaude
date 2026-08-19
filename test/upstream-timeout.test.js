@@ -189,10 +189,15 @@ test('a host failure IS worth failing over when another account dials a differen
   // A socket-level failure stays transient either way: it is about this
   // connection, and another host cannot fix a reset one.
   assert.equal(isTransientUpstreamError(withCode('ECONNRESET'), { otherHostAvailable: true }), true);
-  // ECONNREFUSED is host-scoped by the same argument: nothing listening at
-  // host:port says nothing about a different host.
+  // ECONNREFUSED stays UNCONDITIONAL, even though "nothing listening at
+  // host:port" is arguably a property of the host. It was unconditionally
+  // transient before this classification existed, so routing it through the
+  // condition turns every gap in `otherHostAvailable` into a regression rather
+  // than an unfixed case — measured, a disabled account with its own upstream
+  // made a four-account fleet march. See docs/RESIDUALS.md.
   assert.equal(isTransientUpstreamError(withCode('ECONNREFUSED')), true);
-  assert.equal(isTransientUpstreamError(withCode('ECONNREFUSED'), { otherHostAvailable: true }), false);
+  assert.equal(isTransientUpstreamError(withCode('ECONNREFUSED'), { otherHostAvailable: true }), true,
+    'a refused connection became conditional again, which regresses every gap in the condition');
 });
 
 // The reason the codes are read from the children as well.

@@ -353,7 +353,15 @@ function clientGone(res) {
 // can succeed where a failover cannot, and closing fast lets Node evict a dead
 // socket so the client's retry reconnects cleanly.
 const SOCKET_TRANSIENT = new Set([
-  'ECONNRESET', 'ETIMEDOUT', 'EPIPE',
+  // ECONNREFUSED belongs here rather than with the host-scoped codes below,
+  // despite arguably being a property of the host: it was ALREADY
+  // unconditionally transient, so routing it through `otherHostAvailable` turns
+  // every gap in that condition into a live regression rather than an unfixed
+  // case. Measured: a disabled account carrying its own `upstream` is never
+  // selected, so it never enters `ctx.tried`, so it votes "another host is
+  // available" forever — and a four-account fleet marched three of them and
+  // answered `rate_limit_error` for a refused connection. See docs/RESIDUALS.md.
+  'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE',
   'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT',
   'TEAMCLAUDE_HEADERS_TIMEOUT', 'TEAMCLAUDE_BODY_TIMEOUT',
 ]);
@@ -369,14 +377,7 @@ const SOCKET_TRANSIENT = new Set([
 // `upstream` (third-party backends). Where an untried account would dial a
 // different host, this failure says nothing about that one and failing over is
 // exactly the right move.
-const HOST_TRANSIENT = new Set([
-  'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'ENETDOWN',
-  // "Nothing is listening at host:port" is a property of the host by the same
-  // argument as a name that will not resolve. A homogeneous fleet sees no
-  // change — every account dials the same host, so this stays transient — and a
-  // fleet with per-account backends gets the failover that is actually useful.
-  'ECONNREFUSED',
-]);
+const HOST_TRANSIENT = new Set(['ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'ENETDOWN']);
 
 /**
  * Every error code this failure carries: its own, its `cause`'s (Node's global

@@ -4,6 +4,7 @@ import http from 'node:http';
 import { AccountManager } from '../src/account-manager.js';
 import { createProxyServer } from '../src/server.js';
 import { SESSION_KNOWN_TTL_MS } from '../src/session-tracker.js';
+import { setUpstreamProxy, resolveUpstreamProxy, resetUpstreamProxy } from '../src/upstream-proxy.js';
 
 // Session-aware routing is decided across three separate calls the server makes
 // per request — select, recordSession, confirmRouted — inside the beginSession
@@ -707,15 +708,18 @@ test('the confirmation names the account that served, not the fleet\'s current o
     'the settlement was told the fleet\'s current account instead of the one that served, so it read as traffic coming back');
 });
 
-// The predicate is only worth having if the failover path consults it. Driven
-// through the real server, with the failure produced by an upstream that is
-// simply not there — a connection refused, which is the same classification
-// branch a DNS failure takes and needs no live resolver to reproduce, so this
-// stays deterministic in CI.
+// The predicate is only worth having if the failover path consults it, and the
+// input has to be one that REACHES the host-scoped arm. An earlier version of
+// this test used a refused port, which was already unconditionally transient
+// before the classification existed — so it passed on the pre-fix tree and
+// certified nothing at all.
 //
-// Measured against a genuinely unresolvable name outside the suite: before the
-// classification, ONE request produced four "Upstream error" lines on this
-// fleet and answered 429; after, one line and a closed connection.
+// Two things keep an unresolvable name deterministic here. The ambient proxy is
+// disabled, because behind one a DNS failure never reaches the classifier: it
+// arrives as a code-less "upstream proxy refused CONNECT" (see
+// docs/RESIDUALS.md). And the observed failure is asserted to be a resolution
+// failure, so an environment whose resolver hijacks unknown names fails loudly
+// rather than passing for a reason unrelated to what is being tested.
 test('an unreachable upstream is not marched through the whole fleet', async () => {
   const am = fleet([
     { name: 'a', used: 0.2, resetH: 50 },
@@ -723,8 +727,10 @@ test('an unreachable upstream is not marched through the whole fleet', async () 
     { name: 'c', used: 0.2, resetH: 70 },
     { name: 'd', used: 0.2, resetH: 80 },
   ]);
-  // Port 1 accepts nothing, so the dial fails the same way for every account.
-  const proxy = createProxyServer(am, { proxy: {}, upstream: 'http://127.0.0.1:1' });
+  setUpstreamProxy(resolveUpstreamProxy({ upstreamProxy: false }, {}));
+  const proxy = createProxyServer(am, {
+    proxy: {}, upstream: `http://nx-${Date.now()}-teamclaude.invalid`,
+  });
   const port = await listen(proxy);
 
   const lines = [];
@@ -738,19 +744,23 @@ test('an unreachable upstream is not marched through the whole fleet', async () 
     }).then(r => r.text()).catch(() => {});   // the connection is closed, by design
   } finally {
     console.error = realErr;
+    resetUpstreamProxy();
     proxy.close();
   }
 
   const attempts = lines.filter(l => l.includes('Upstream error'));
-  assert.ok(attempts.length > 0, 'the request never reached the upstream error path at all');
+  assert.ok(attempts.some(l => /ENOTFOUND|EAI_AGAIN/.test(l)),
+    `this environment did not produce a resolution failure, so the test reached nothing: ${attempts.join(' | ') || '(no attempts logged)'}`);
   assert.equal(attempts.length, 1,
-    `one unreachable host burned ${attempts.length} of ${am.accounts.length} accounts; `
+    `one unresolvable host burned ${attempts.length} of ${am.accounts.length} accounts; `
     + 'a log of these then reads as many more requests than there were');
 });
 
 // The other half of the same rule: where accounts really do dial different
-// hosts, one host being unreachable says nothing about the others, and the
-// failover has to survive.
+// hosts, one host being unresolvable says nothing about the others, and the
+// failover has to survive. Same real input and same guards as above — a refused
+// port cannot reach this branch, since that is transient whatever else is in
+// the fleet.
 test('an unreachable upstream still fails over to an account on a different host', async () => {
   const am = fleet([
     { name: 'a', used: 0.2, resetH: 50 },
@@ -766,10 +776,15 @@ test('an unreachable upstream still fails over to an account on a different host
   const goodPort = await listen(good);
   am.accounts[1].upstream = `http://127.0.0.1:${goodPort}`;   // 'b' has its own backend
 
-  const proxy = createProxyServer(am, { proxy: {}, upstream: 'http://127.0.0.1:1' });
+  setUpstreamProxy(resolveUpstreamProxy({ upstreamProxy: false }, {}));
+  const proxy = createProxyServer(am, {
+    proxy: {}, upstream: `http://nx-${Date.now()}-teamclaude.invalid`,
+  });
   const port = await listen(proxy);
+  const lines = [];
   const realErr = console.error;
-  console.error = () => {};
+  console.error = (...a) => lines.push(a.map(x => (x instanceof Error ? x.message : String(x))).join(' '));
+  let status;
   try {
     const res = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
       method: 'POST',
@@ -777,12 +792,66 @@ test('an unreachable upstream still fails over to an account on a different host
       body: JSON.stringify({ model: OPUS, messages: [] }),
     });
     await res.text();
-    assert.equal(res.status, 200, 'the request did not reach the account whose host was up');
+    status = res.status;
+  } finally {
+    console.error = realErr;
+    resetUpstreamProxy();
+    proxy.close();
+    good.close();
+  }
+  assert.ok(lines.some(l => /ENOTFOUND|EAI_AGAIN/.test(l)),
+    `this environment did not produce a resolution failure, so the test reached nothing: ${lines.join(' | ') || '(nothing logged)'}`);
+  assert.equal(status, 200, 'the request did not reach the account whose host was up');
+  assert.deepEqual(reached, ['b'],
+    'a fleet with a third-party backend lost its failover when the default host was unresolvable');
+});
+
+// The shape that made ECONNREFUSED unsafe to route through the condition, and
+// the reason it stays unconditional. `otherHostAvailable` scans the raw account
+// list, but selection goes through `_isAvailable` — so an account selection can
+// NEVER choose still votes "another host is available", forever. A disabled
+// account carrying its own `upstream` is the cheapest instance.
+//
+// Deliberately a refused port rather than an unresolvable name: this is about a
+// code that must NOT be conditional, so the test has to use one.
+test('a refused connection is not marched through the fleet by an unselectable account', async () => {
+  const am = fleet([
+    { name: 'a', used: 0.2, resetH: 50 },
+    { name: 'b', used: 0.2, resetH: 60 },
+    { name: 'c', used: 0.2, resetH: 70 },
+    { name: 'd', used: 0.2, resetH: 80 },
+  ]);
+  // 'd' has its own backend AND is out of rotation, so it never enters
+  // `ctx.tried` and its vote never expires.
+  const good = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{}'); });
+  const goodPort = await listen(good);
+  am.accounts[3].upstream = `http://127.0.0.1:${goodPort}`;
+  am.accounts[3].disabled = true;
+
+  const proxy = createProxyServer(am, { proxy: {}, upstream: 'http://127.0.0.1:1' });
+  const port = await listen(proxy);
+  const lines = [];
+  const realErr = console.error;
+  console.error = (...a) => lines.push(a.map(x => (x instanceof Error ? x.message : String(x))).join(' '));
+  let status;
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...SID },
+      body: JSON.stringify({ model: OPUS, messages: [] }),
+    });
+    status = `${res.status} ${await res.text()}`;
+  } catch {
+    status = 'connection closed';
   } finally {
     console.error = realErr;
     proxy.close();
     good.close();
   }
-  assert.deepEqual(reached, ['b'],
-    'a fleet with a third-party backend lost its failover when the default host was unreachable');
+
+  const attempts = lines.filter(l => l.includes('Upstream error'));
+  assert.equal(attempts.length, 1,
+    `one refused connection burned ${attempts.length} accounts because an unselectable account voted for a failover that could never be taken`);
+  assert.ok(!/rate_limit_error/.test(status),
+    `a network failure was reported to the client as exhausted quota: ${status}`);
 });
