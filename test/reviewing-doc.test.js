@@ -22,24 +22,64 @@ const doc = readFileSync(join(here, '..', 'docs', 'REVIEWING.md'), 'utf8');
 const residuals = readFileSync(join(here, '..', 'docs', 'RESIDUALS.md'), 'utf8');
 const server = readFileSync(join(here, '..', 'src', 'server.js'), 'utf8');
 
-// The claim that rotted. Both catches answer and both close the ledger, so the
-// doc must not still be describing one of them as log-only or prescribing work
-// that is already done.
+// Each invariant may carry an italic `*Precedent: …*` note recording the defect
+// that earned it, and those notes QUOTE the wrong claims by construction — the
+// whole point of invariant 15 is that a stale sentence is worth preserving as
+// evidence. So a check for "the doc asserts X" has to read the prose that
+// prescribes, not the history that quotes; grepping the whole file cannot tell
+// "says X" from "records that X was once wrongly said", and failed on exactly
+// that the first time invariant 15 was written.
+const PRECEDENT = /^\s*\*Precedent:[\s\S]*?\*$/gm;
+const claims = doc.replace(PRECEDENT, '');
+
+// Stripping is only safe if it strips the history and nothing else. A greedy or
+// mis-anchored pattern would swallow the live prose and turn every check below
+// into a green no-op, which is invariant 9 on the instrument itself.
+test('the precedent-stripper leaves the doc it is meant to check', () => {
+  assert.match(claims, /Every error path answers the socket/,
+    'stripping precedent notes ate live invariant text; every claim check below is now vacuous');
+  assert.ok(claims.length > doc.length * 0.6,
+    `stripping removed ${Math.round((1 - claims.length / doc.length) * 100)}% of the doc, which is more than its history`);
+  assert.ok(claims.length < doc.length,
+    'no precedent note was stripped — has the italic `*Precedent:` form changed?');
+});
+
+// The claim that rotted. Both catches answer, so the doc must not still be
+// describing one of them as log-only or prescribing work that is already done.
 test('REVIEWING.md does not describe an outer catch that is already fixed', () => {
-  assert.ok(!/still log-only/.test(doc),
+  assert.ok(!/still log-only/.test(claims),
     'the doc says an outer catch is still log-only; both answer the socket');
-  assert.ok(!/A `finally` that closes activity state belongs with it/.test(doc),
+  assert.ok(!/A `finally` that closes activity state belongs with it/.test(claims),
     'the doc prescribes a finally that has shipped');
+  // The correction to that claim was itself wrong, which is precedent 15: only
+  // `createProxyRequestListener` opens an activity entry, so only it can close
+  // one. `createProxyServer`'s handler has no ledger to close.
+  assert.ok(!/[Bb]oth outer catches[^.]*close the activity entry/.test(claims),
+    'the doc says both outer catches close an activity entry; the control-plane one never opens one');
 });
 
 // The claims themselves, checked against the code rather than against prose.
 // Two catches, each with both answer arms and each closing the ledger.
 test('both outer catches answer on each half and close the activity entry', () => {
-  const answers = server.match(/if \(!res\.headersSent && !clientGone\(res\)\) \{/g) || [];
-  assert.equal(answers.length, 2, `expected both outer catches to answer; found ${answers.length}`);
-  const secondArms = server.match(/\} else if \(!res\.writableEnded\) \{/g) || [];
-  assert.ok(secondArms.length >= 2,
-    `a catch answers only the before-headers half: found ${secondArms.length} headers-sent arms`);
+  // Anchored on the two outer catches themselves — their 502 body is unique to
+  // them — rather than on a COUNT of sites using the shared predicate, which
+  // changes whenever another site adopts it and would fail for a reason that
+  // has nothing to do with the claim. (It did, immediately.)
+  // The OUTER catches specifically: the inner one around forwardRequest shares
+  // the same 502 body, and is a different claim — it has always had both arms.
+  // The two outer ones are the sites that gate on the shared predicate.
+  const catches = [...server.matchAll(/'Internal proxy error' \} \}\)\);/g)]
+    .filter(m => /if \(!res\.headersSent && !clientGone\(res\)\) \{/
+      .test(server.slice(Math.max(0, m.index - 400), m.index)));
+  assert.equal(catches.length, 2, `expected two outer catches; found ${catches.length}`);
+  for (const m of catches) {
+    const before = server.slice(Math.max(0, m.index - 400), m.index);
+    const after = server.slice(m.index, m.index + 900);   // past the arm's comment
+    assert.match(before, /if \(!res\.headersSent && !clientGone\(res\)\) \{/,
+      'an outer catch does not gate its answer on the shared client-gone predicate');
+    assert.match(after, /\} else if \(!res\.writableEnded\) \{[\s\S]*?res\.destroy\(\);/,
+      'an outer catch answers only the before-headers half, so a throw after writeHead hangs the client');
+  }
   // The ledger's ordering, which is the thing two rounds got backwards.
   const startIdx = server.indexOf('openEntry = { reqId, sessionId };');
   const hookIdx = server.indexOf('hooks.onRequestStart?.(');
@@ -61,11 +101,19 @@ test('REVIEWING.md names symbols that still exist', () => {
 
 // Every residual the doc tells reviewers not to report must still be a live
 // entry — an overturned one has to stop being cited as a reason for silence.
+//
+// Scanned over the WHOLE doc, precedent notes included: a precedent that points
+// at a residual is still a live pointer, and "recorded as TC-007" going stale
+// misdirects a reviewer exactly as much as a stale suppression. What the doc may
+// do is name an overturned entry AS overturned, which is how invariant 15 cites
+// its own precedent — so the check is that the label travels with the citation,
+// not that the ID is absent.
 test('the residuals REVIEWING.md suppresses are still accepted', () => {
-  for (const id of doc.match(/TC-\d{3}/g) || []) {
-    const overturned = new RegExp(`~~${id}~~`).test(residuals);
-    assert.ok(!overturned,
-      `REVIEWING.md still cites ${id}, which RESIDUALS.md records as overturned`);
+  for (const m of doc.matchAll(/TC-\d{3}/g)) {
+    if (!new RegExp(`~~${m[0]}~~`).test(residuals)) continue;      // still live
+    const site = doc.slice(m.index, m.index + 120);
+    assert.match(site, /overturned/i,
+      `REVIEWING.md cites ${m[0]} as if it were live; RESIDUALS.md records it as overturned`);
   }
 });
 

@@ -687,8 +687,10 @@ test('the confirmation names the session whose rollover it settles', async () =>
 });
 
 // `currentIndex` parked ON the rolled account, so substituting it for the
-// serving account reads as "the traffic came back" and settles nothing. Only
-// losing the served account's identity can fail this.
+// serving account reads as "the traffic came back" and settles nothing. Both
+// substitutions fail this one; the discrimination lives entirely in the test
+// above, which only the session-id substitution can fail. This one is the
+// positive half of the pair — it says what the right answer looks like.
 test('the confirmation names the account that served, not the fleet\'s current one', async () => {
   const am = fleet([
     { name: 'a', used: 0.5, resetH: 50 },

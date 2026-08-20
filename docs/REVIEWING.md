@@ -102,8 +102,9 @@ any severity.
    upstream refuses.*
 
 7. **Every error path answers the socket, and closes what it opened.**
-   Both outer catches (`createProxyServer`'s own handler and
-   `createProxyRequestListener`'s) answer 502 and close the activity entry.
+   Both outer catches answer 502. Only `createProxyRequestListener`'s closes an
+   activity entry, because only it opens one — `openEntry` is scoped to that
+   function, and `createProxyServer`'s handler has no ledger of its own.
    Each guard is load-bearing for a reason worth knowing before touching
    it: `!res.headersSent` because the inner `finally` runs `onRequestEnd`
    *after* the response has streamed, so a second `writeHead` throws
@@ -202,6 +203,20 @@ any severity.
     hook that THREW. Asking "and what if this throws one line later?" is the
     whole check.*
 
+15. **A residual entry and the invariant that cites it must be re-read whenever
+    either side's code moves.** They are two records of one decision, kept in
+    different files, and nothing links them — so a change updates whichever the
+    author was looking at and silently leaves the other asserting the opposite.
+    *Precedent: round 6, twice in one file. `TC-006` (since overturned) was
+    stale in the very commit that introduced it — the outer-catch clause it
+    described had been fixed two commits earlier, and its "four retry guards"
+    undercounted six. And correcting invariant 7's "still log-only" introduced a
+    fresh error in the same sentence: "both catches close the activity entry",
+    false for the control-plane one, which never opens one. Fixing a stale claim
+    is where the next stale claim gets written, so the fix is not re-reading
+    harder — it is `test/reviewing-doc.test.js`, which fails on both of those
+    sentences and on a citation of an overturned entry that does not say so.*
+
 ## Danger zones (escalate scrutiny; small diffs, big blast radius)
 
 | Path | Why |
@@ -209,7 +224,7 @@ any severity.
 | `src/window-watcher.js` | The keying of invariants 1-2. Bounded at two entries per (bucket, account) only because `_windowForBucket` resolves to itself or `unified7d`; a third answer makes it a growth surface |
 | `src/account-manager.js:1190` `_windowForBucket`, `:763` `_governingBucket` | The non-injective resolver every keying bug came through |
 | `src/account-manager.js:1912` `removeAccount` | Invariant 5. Renumbering is index arithmetic on live state; two keys can map onto each other, so an in-place pass drops the survivor it just wrote |
-| `src/server.js:194` and `:546` | The two outer catches (invariant 7). Both answer the socket and close the activity entry now; they are 350 lines apart, so a change to one is a prompt to check the other |
+| The two outer catches — `createProxyServer`'s `requestHandler` and `createProxyRequestListener`'s returned listener | Invariant 7. Both answer; only the second closes an activity entry. They are ~500 lines apart, so a change to one is a prompt to check the other — three separate hangs came from fixing one and not the other, or one half of one. Named rather than numbered: these line references have drifted twice already |
 | `src/account-manager.js:652`, `:1129`, `:1185` | Counter increments (invariant 4) |
 | `getStatus()` `:2036`, `getRoutes()` `:1294`, `eligibility()` `:918`, `prober.getStatus()`, `warmer.getStatus()` | Published payloads. A sweep froze 39 fields to constants and **20 survived** the suite — a field asserted in one arm of a boolean, or only at its default, is not asserted |
 | `_setCurrent` `:287` / `setCurrentAccount` `:300` | Invariant 3 |
