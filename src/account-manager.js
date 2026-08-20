@@ -146,6 +146,16 @@ function makeAccount(acct, index) {
     usage: {
       totalInputTokens: 0,
       totalOutputTokens: 0,
+      // The two cache fields upstream reports alongside `input_tokens` and that
+      // nothing read until now. `totalInputTokens` counts uncached input only,
+      // so on its own it understates what a request actually cost this account
+      // by whatever the cache served.
+      totalCacheReadTokens: 0,
+      totalCacheCreationTokens: 0,
+      // The same totals split by weekly bucket. Fable meters into its own
+      // weekly, so what a point there costs in 5h capacity is its own
+      // question, and a sum across families cannot be taken apart later.
+      byBucket: {},
       totalRequests: 0,
       lastUsed: null,
     },
@@ -1718,6 +1728,40 @@ export class AccountManager {
     if (!account) return;
     if (inputTokens) account.usage.totalInputTokens += inputTokens;
     if (outputTokens) account.usage.totalOutputTokens += outputTokens;
+  }
+
+  /**
+   * Record one upstream usage report against the account that served it and the
+   * session that asked for it.
+   *
+   * Separate from `updateUsage` rather than folded into it: that one is on the
+   * path every existing caller and test already drives, and this adds a second
+   * scope (the session) whose lifecycle is not the account's. Keeping them apart
+   * means nothing that reads the account totals changes behaviour here.
+   *
+   * Nothing steers on any of this yet. It is the measurement that load-weighted
+   * distribution and cache-aware decisions would need, recorded first so those
+   * can be argued against numbers.
+   */
+  recordTokenUsage(accountIndex, sessionId, model, usage) {
+    if (!usage) return;
+    // The same resolver routing uses, so a token total and a pin agree about
+    // which family a request belonged to. Resolved here rather than at the call
+    // sites: they parse a wire format and have no business knowing about
+    // buckets.
+    const bucket = this._weeklyBucketFor(model);
+    const account = this.accounts[accountIndex];
+    if (account) {
+      const read = Number.isFinite(usage.cache_read_input_tokens) ? usage.cache_read_input_tokens : 0;
+      const creation = Number.isFinite(usage.cache_creation_input_tokens) ? usage.cache_creation_input_tokens : 0;
+      account.usage.totalCacheReadTokens += read;
+      account.usage.totalCacheCreationTokens += creation;
+      const per = account.usage.byBucket[bucket]
+        || (account.usage.byBucket[bucket] = { cacheReadTokens: 0, cacheCreationTokens: 0 });
+      per.cacheReadTokens += read;
+      per.cacheCreationTokens += creation;
+    }
+    this.sessionTracker.recordTokens(sessionId, bucket, usage);
   }
 
   /**

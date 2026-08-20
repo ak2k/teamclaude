@@ -239,3 +239,53 @@ test('the probe view reports each account\'s own outcome and failure', async () 
   assert.equal(view[2].error, null);
   assert.equal(prober.getStatus().running, false);
 });
+
+// The session view is what a load or cache decision would be argued from, and
+// every field below reads a different source: the two cache totals come off the
+// account, the session totals off the tracker's records, and the live footprint
+// off the ACTIVE subset of them. Each is set away from its default here, so a
+// field that stopped reading its source fails rather than agreeing with zero.
+test('the session view reports the token totals and the live cached footprint', () => {
+  const am = new AccountManager([apikey('a'), apikey('b')], 0.98);
+  am.sessionTracker.touch('s1', 0);
+  am.sessionTracker.touch('s2', 1);
+  // Distinct values per field and per session, so a total that reads the wrong
+  // one is a different number rather than a coincidence.
+  am.recordTokenUsage(0, 's1', 'claude-opus-5', {
+    input_tokens: 11, cache_read_input_tokens: 4000,
+    cache_creation_input_tokens: 300, output_tokens: 7,
+  });
+  // A different family on purpose: the two must not be pooled on the way out.
+  am.recordTokenUsage(1, 's2', 'claude-fable-5', {
+    input_tokens: 22, cache_read_input_tokens: 1000,
+    cache_creation_input_tokens: 50, output_tokens: 9,
+  });
+
+  const s = am.getStatus();
+  assert.equal(s.sessions.tokens.cacheRead, 5000, 'the cache-read total is not reported');
+  assert.equal(s.sessions.tokens.cacheCreation, 350, 'the cache-creation total is not reported');
+  assert.equal(s.sessions.tokens.input, 33, 'the per-session input total is not reported');
+  assert.equal(s.sessions.tokens.output, 16, 'the per-session output total is not reported');
+  assert.equal(s.sessions.tokens.reports, 2,
+    'the report count is not published, so no tokens and no observations read alike');
+  assert.equal(s.sessions.tokens.activeContext, 4311 + 1072,
+    'the live cached footprint is not reported');
+
+  assert.equal(s.accounts[0].usage.totalCacheReadTokens, 4000,
+    "the account's cache-read total is not reported");
+  assert.equal(s.accounts[0].usage.totalCacheCreationTokens, 300,
+    "the account's cache-creation total is not reported");
+  assert.equal(s.accounts[1].usage.totalCacheReadTokens, 1000,
+    'both accounts report the same cache total');
+  assert.equal(s.accounts[1].usage.totalCacheCreationTokens, 50);
+
+  assert.equal(s.sessions.tokens.byBucket.unified7d.cacheRead, 4000,
+    'the Opus weekly bucket is not reported on its own');
+  assert.equal(s.sessions.tokens.byBucket.unified7dFable.cacheRead, 1000,
+    'the Fable weekly bucket is not reported on its own, so the families are pooled');
+  assert.equal(s.sessions.tokens.byBucket.unified7d.activeContext, 4311);
+  assert.equal(s.sessions.tokens.byBucket.unified7dFable.activeContext, 1072);
+  assert.equal(s.accounts[0].usage.byBucket.unified7d.cacheReadTokens, 4000,
+    "the account's per-family split is not reported");
+  assert.equal(s.accounts[1].usage.byBucket.unified7dFable.cacheReadTokens, 1000);
+});

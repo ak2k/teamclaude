@@ -91,6 +91,13 @@ const CONFIRM = 'accountManager.confirmRouted(ctx.sessionId, account.index, ctx.
 // has to land inside the try rather than merely somewhere in the handler.
 const END_IN_FINALLY = '        accountManager.endSession(sessionId);\n';
 const FORWARD_AWAIT = '        await forwardRequest(req, res, body, accountManager, upstream, 0, hooks, reqId, ctx, logDir, sx);\n';
+const REC_STREAM = '      accountManager.recordTokenUsage(accountIndex, sessionId, model, merged);';
+const REC_BODY = '      accountManager.recordTokenUsage(accountIndex, sessionId, model, json.usage);';
+const MERGE_START = '      Object.assign(merged, data.message.usage);';
+const MERGE_DELTA = '      Object.assign(merged, data.usage);';
+const GUARDED_WRITE = '    if (Object.keys(merged).length) {\n'
+  + '      accountManager.recordTokenUsage(accountIndex, sessionId, model, merged);\n'
+  + '    }\n';
 
 // [label, find, replace]
 const M = [
@@ -143,6 +150,44 @@ const M = [
   // the move that breaks exactly that: out of the finally, into the try, where
   // the happy path still releases and the error path never does.
   ['endSession        moved out of the finally into the try', END_IN_FINALLY, ''], // paired with the insert below
+
+  // Per-session token accounting. Two call sites, because the streaming path
+  // merges its two usage reports and writes once at the end of the stream
+  // while the buffered path has one report to begin with. The two
+  // `Object.assign` rows are the field routing into that merge: they are not
+  // accountManager calls, but they are the mechanism the call site depends on,
+  // and a merge that drops an event records confident wrong numbers.
+  ['recordTokenUsage  stream call deleted', REC_STREAM, ''],
+  ['recordTokenUsage  stream arg accountIndex', REC_STREAM,
+    '      accountManager.recordTokenUsage(accountManager.currentIndex, sessionId, model, merged);'],
+  ['recordTokenUsage  stream arg sessionId', REC_STREAM,
+    '      accountManager.recordTokenUsage(accountIndex, null, model, merged);'],
+  ['recordTokenUsage  stream arg model', REC_STREAM,
+    '      accountManager.recordTokenUsage(accountIndex, sessionId, null, merged);'],
+  ['recordTokenUsage  stream arg usage', REC_STREAM,
+    '      accountManager.recordTokenUsage(accountIndex, sessionId, model, {});'],
+
+  ['recordTokenUsage  body call deleted', REC_BODY, ''],
+  ['recordTokenUsage  body arg accountIndex', REC_BODY,
+    '      accountManager.recordTokenUsage(accountManager.currentIndex, sessionId, model, json.usage);'],
+  ['recordTokenUsage  body arg sessionId', REC_BODY,
+    '      accountManager.recordTokenUsage(accountIndex, null, model, json.usage);'],
+  ['recordTokenUsage  body arg model', REC_BODY,
+    '      accountManager.recordTokenUsage(accountIndex, sessionId, null, json.usage);'],
+  ['recordTokenUsage  body arg usage', REC_BODY,
+    '      accountManager.recordTokenUsage(accountIndex, sessionId, model, {});'],
+
+  ['recordTokenUsage  merge drops message_start', MERGE_START, ''],
+  ['recordTokenUsage  merge drops message_delta', MERGE_DELTA, ''],
+  // Which report wins. The delta's figures are cumulative for the message, so
+  // filling only the fields message_start did not set keeps the placeholder
+  // output and, on a multi-inference turn, the first inference's input.
+  ['recordTokenUsage  merge start supersedes delta', MERGE_DELTA,
+    '      for (const [k, v] of Object.entries(data.usage)) if (!(k in merged)) merged[k] = v;'],
+  // Writing an empty merge records an all-zero report, whose `reports: 1` says
+  // an observation arrived for a stream that never carried one.
+  ['recordTokenUsage  empty-merge guard removed', GUARDED_WRITE,
+    `    ${REC_STREAM.trim()}\n`],
 ];
 
 const wanted = args.filter(a => !a.startsWith('--') );
