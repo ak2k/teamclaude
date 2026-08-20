@@ -22,7 +22,7 @@ So the rule for anything at that seam: a test that does not FAIL when the call
 is deleted, or when each of its arguments is dropped, is not covering it. Verify
 that by performing the mutation, not by reading the test.
 
-## The five ways the harness reported success while measuring nothing
+## The six ways the harness reported success while measuring nothing
 
 **1. The test exercised a helper, not the code.** As above. A test can be
 detailed, readable and entirely about a reimplementation of the thing it names.
@@ -53,7 +53,36 @@ for failures — reported the mutation as SURVIVED. A false clean bill on the
 exact gate built to prevent false clean bills. Treat `ENOBUFS` as a runaway, and
 raise `maxBuffer` well past a normal run's output.
 
-A sixth, adjacent: a duplicated row in the mutation table over-reported 23
+**6. The result is absence-shaped.** Entries 2 to 5 are one class in different
+clothes, and naming it is what lets you recognise the next door before it costs
+a run. A verifier has three outcomes and two values. Only *fail* carries
+positive evidence: a captured failure signal, a named test, a non-zero exit.
+*Pass* and *did-not-measure* are both the absence of that signal, the same
+value. Instrument faults are therefore not spread evenly between red and green.
+They are systematically green, and green is the state nobody investigates.
+
+Two more doors, beyond the missing anchor and the missing file already listed:
+
+*The mutant does not parse.* Replacing an opening token can orphan the block it
+opened: `try {` swapped for `if (true) {` leaves a bare `} catch (…) {` and the
+file is a SyntaxError. Every test file then fails to load, and the harness reads
+that wall of failures as a caught mutation. One row had reported a kill on every
+run since it was written. Run `node --check` on each mutant and grade a
+non-parsing one as broken.
+
+*The run stalls.* A missing summary line is not a pass and is not a kill. Grade
+a stalled mutant INDETERMINATE, re-run it, and never score it. Only a deadline
+kill measured against a known baseline is evidence of a runaway, and a loaded
+box will forge that evidence, so reproduce it before believing it. A stall also
+leaves the mutation applied; see "A clean tree is not your tree" below for what
+that costs the next run.
+
+Two habits make the whole class rarer: replace whole balanced blocks instead of
+opening tokens, and attribute every kill to the named tests that failed, so an
+instrument fault reads as a list of file names instead of the one or two
+behaviour names a real kill produces.
+
+A seventh, adjacent: a duplicated row in the mutation table over-reported 23
 mutations as 22 for several runs. Count what you ran, not what you listed.
 
 ## The table can lie even when every mechanism works
