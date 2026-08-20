@@ -353,10 +353,16 @@ export function resolveAccountPin(accountManager, token) {
  * is `undefined` and the guard is inert), and the MITM path is the busy one.
  * The h2 equivalent lives on the underlying stream.
  *
- * Used only where this file decides whether to write a LATE response, from a
- * catch. The other `res.destroyed` reads are equally inert on h2, but they are
- * pre-existing and changing them is a behaviour change to paths this has no
- * business touching.
+ * Every site deciding whether to write a LATE response asks this one question
+ * through this one helper — all three catches, the 429 answer, and every rung
+ * of the retry ladder, where the inert read meant an abandoned MITM request
+ * spent an upstream call and its quota on each remaining account. Three
+ * predicates for one decision is the drift a shared helper exists to stop.
+ *
+ * Deliberately NOT applied where the cost is neither quota nor an unanswered
+ * client: the opt-in egress wait, and `streamResponse`'s breaks, which on h2
+ * read out a body whose quota is already spent. Recorded in docs/RESIDUALS.md
+ * rather than changed here.
  */
 function clientGone(res) {
   return !!res.destroyed || !!res.stream?.destroyed;
@@ -1231,7 +1237,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       // The pause above keeps other requests off this account meanwhile.
       console.log(`[TeamClaude] Rate-limit 429 on "${account.name}" — retry-after ${retryAfter}s over inline cap; returning 429 to client (no switch)`);
       ctx.status = 429;
-      if (!res.headersSent && !res.destroyed) {
+      if (!res.headersSent && !clientGone(res)) {
         res.writeHead(429, { 'Content-Type': 'application/json', 'retry-after': String(retryAfter) });
         res.end(JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: `Rate limited; retry in ${retryAfter}s.` } }));
       }
@@ -1367,11 +1373,11 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
     }
     ctx.status = 502;
 
-    if (!res.headersSent) {
+    if (!res.headersSent && !clientGone(res)) {
       res.writeHead(502, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         type: 'error',
-        error: { type: 'proxy_error', message: `Upstream error: ${err.message}` },
+        error: { type: 'proxy_error', message: `Upstream error: ${describeConnectError(err)}` },
       }));
     } else if (!res.writableEnded) {
       // Error after headers were already sent (mid-stream) and it wasn't

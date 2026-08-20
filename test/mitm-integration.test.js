@@ -378,3 +378,58 @@ test('MITM h2: a cancelled request stops the retry ladder instead of spending ev
     `a cancelled h2 request spent ${hits.length} of ${am.accounts.length} accounts; `
     + 'every rung past the first is quota burned for a client that is gone');
 });
+
+// The guard around the outer catch's OWN hook call, held where it matters.
+//
+// On the base listener a throw escaping `createProxyRequestListener` is caught
+// by `createProxyServer`'s handler, which awaits it — the two catches nest. The
+// MITM path has no such backstop: `srv.on('request', createProxyRequestListener(…))`
+// wires the async listener directly, so a throw escaping it is an
+// unhandledRejection, and src/crash-log.js turns that into exit(1). A bad
+// activity hook would take the daemon down.
+//
+// Reaching the guarded call needs BOTH hooks to throw: the start hook, so the
+// entry is still open when the catch runs, and the end hook, so the call the
+// catch makes to close it throws too.
+test('MITM: a throwing activity hook cannot escape as an unhandled rejection', T, async () => {
+  const { caCertPem, leafCertPem, leafKeyPem } = generateCertChain('localhost');
+  const upstream = makeUpstream(() => ({ status: 200, body: '{}' }));
+  const upPort = await listen(upstream);
+  const am = new AccountManager([oauthAccount('a', 't-a')], 0.98);
+
+  let ends = 0;
+  const proxy = makeProxy(am, upPort, { leafCertPem, leafKeyPem }, {
+    hooks: {
+      onRequestStart: () => { throw new Error('render() rethrew on open'); },
+      onRequestEnd: () => { ends += 1; throw new Error('render() rethrew on close'); },
+    },
+  });
+  const proxyPort = await listen(proxy);
+
+  const escaped = [];
+  const onRejection = (e) => escaped.push(`unhandledRejection: ${e?.message || e}`);
+  const onUncaught = (e) => escaped.push(`uncaughtException: ${e?.message || e}`);
+  process.on('unhandledRejection', onRejection);
+  process.on('uncaughtException', onUncaught);
+  const realLog = console.log; const realErr = console.error;
+  console.log = () => {}; console.error = () => {};
+  let client;
+  try {
+    const sock = await connectThroughProxy(proxyPort, `127.0.0.1:${upPort}`, caCertPem, ['h2']);
+    client = http2.connect(`https://localhost:${upPort}`, { createConnection: () => sock });
+    const stream = client.request({ ':method': 'POST', ':path': '/v1/messages', 'content-type': 'application/json' });
+    stream.on('error', () => { /* the hook failure may break the stream; not the point */ });
+    stream.end(JSON.stringify({ model: 'claude-opus-5', messages: [] }));
+    await new Promise(r => setTimeout(r, 800));   // let any rejection surface
+  } finally {
+    console.log = realLog; console.error = realErr;
+    process.off('unhandledRejection', onRejection);
+    process.off('uncaughtException', onUncaught);
+    try { client?.destroy(); } catch { /* already gone */ }
+    closeHard(proxy); closeHard(upstream);
+  }
+
+  assert.ok(ends > 0, 'the catch never tried to close the entry, so this proves nothing');
+  assert.deepEqual(escaped, [],
+    'a throwing activity hook escaped the MITM listener, where crash-log turns it into exit(1)');
+});

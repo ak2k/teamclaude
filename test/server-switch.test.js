@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import http from 'node:http';
 import { Readable } from 'node:stream';
 import { AccountManager } from '../src/account-manager.js';
 import { createProxyServer } from '../src/server.js';
@@ -482,4 +483,88 @@ test('a blocked model closes its activity entry exactly once', async () => {
   }
   assert.equal(ends.length, 1,
     `one blocked request closed its activity entry ${ends.length} times (statuses ${ends.join(', ')})`);
+});
+
+// ── the two halves of the recovery, each held ─────────────────────────────
+// Both were shipped undefended: moving the mark back after the hook, or
+// dropping the try/catch around the catch's own hook call, left the whole suite
+// green. The second is the one that matters — unguarded, a throwing activity
+// hook escapes an async request listener as an `unhandledRejection`, and
+// src/crash-log.js turns that into exit(1). The daemon dies on a bad hook.
+
+// HALF ONE: the entry is marked closed BEFORE the end hook runs, so a hook that
+// throws does not leave it looking open to the outer catch, which would then
+// call that same hook a second time for one request.
+test('a throwing end hook is not called twice for one request', async () => {
+  const am = new AccountManager(ACCTS, 0.98);
+  const calls = [];
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{}'); });
+  });
+  const upPort = await listen(upstream);
+  const proxy = createProxyServer(am, { proxy: {}, upstream: `http://127.0.0.1:${upPort}` }, {
+    onRequestEnd: (id, info) => { calls.push(info.status); throw new Error('the activity pane rethrew'); },
+  });
+  const port = await listen(proxy);
+  const realErr = console.error;
+  console.error = () => {};
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-opus-5', messages: [] }),
+    });
+    await res.text();
+  } finally {
+    console.error = realErr;
+    proxy.close();
+    upstream.close();
+  }
+  assert.equal(calls.length, 1,
+    `one request closed its activity entry ${calls.length} times (statuses ${calls.join(', ')})`);
+});
+
+// HALF TWO: the catch's OWN hook call is guarded, because the throw that landed
+// there may BE that hook. Unguarded it rethrows out of an async listener with
+// nothing above it — an unhandledRejection, which this daemon treats as fatal.
+test('a hook that throws on every call cannot bring the process down', async () => {
+  const am = new AccountManager(ACCTS, 0.98);
+  let calls = 0;
+  // BOTH hooks throw, which is what reaches the guarded call. The start hook
+  // throwing is what carries an OPEN entry into the outer catch — with the
+  // entry already closed by the inner `finally`, the catch has nothing to close
+  // and the guard is never exercised. So this is the one arrangement that
+  // reaches it: entry open, and the hook the catch must call throws too.
+  const proxy = createProxyServer(am, { proxy: {}, upstream: 'http://127.0.0.1:1' }, {
+    onRequestStart: () => { throw new Error('render() rethrew on open'); },
+    onRequestEnd: () => { calls += 1; throw new Error('the activity pane rethrew, every time'); },
+  });
+  const port = await listen(proxy);
+
+  const rejections = [];
+  const uncaught = [];
+  const onRejection = (e) => rejections.push(e?.message || String(e));
+  const onUncaught = (e) => uncaught.push(e?.message || String(e));
+  process.on('unhandledRejection', onRejection);
+  process.on('uncaughtException', onUncaught);
+  const realErr = console.error;
+  console.error = () => {};
+  try {
+    await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-opus-5', messages: [] }),
+    }).then(r => r.text()).catch(() => { /* the upstream is not there; that is fine */ });
+    await new Promise(r => setTimeout(r, 150));   // let any rejection surface
+  } finally {
+    console.error = realErr;
+    process.off('unhandledRejection', onRejection);
+    process.off('uncaughtException', onUncaught);
+    proxy.close();
+  }
+  assert.ok(calls > 0, 'the hook was never called, so this proves nothing');
+  assert.deepEqual(rejections, [],
+    'a throwing activity hook escaped as an unhandled rejection, which crash-log turns into exit(1)');
+  assert.deepEqual(uncaught, [], 'a throwing activity hook escaped as an uncaught exception');
 });

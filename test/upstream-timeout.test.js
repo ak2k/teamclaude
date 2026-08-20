@@ -214,3 +214,66 @@ test('an error that is genuinely about the account still fails over', () => {
   assert.equal(isTransientUpstreamError(withCode('CERT_HAS_EXPIRED')), false);
   assert.equal(isTransientUpstreamError('not an error at all'), false);
 });
+
+// ── the whole classifier, table-driven ────────────────────────────────────
+// "Unit-tested over every code" was false: six of the nine socket-scoped codes
+// were held by nothing, including TEAMCLAUDE_HEADERS_TIMEOUT and
+// TEAMCLAUDE_BODY_TIMEOUT — the codes THIS FILE's own watchdogs raise, whose
+// entire purpose is "close the connection, do not march the fleet". Shrinking
+// the set to three left the suite green. So the table names every arm, and a
+// code dropped from either set fails here rather than silently starting to burn
+// the fleet on a timeout.
+//
+// `otherHostAvailable` is varied per row because it is the whole difference
+// between the two sets: socket-scoped codes ignore it, host-scoped ones do not.
+const CLASSIFIER_TABLE = [
+  // [label, error, otherHostAvailable, expected transient?]
+  ['ECONNRESET', withCode('ECONNRESET'), false, true],
+  ['ECONNRESET, another host available', withCode('ECONNRESET'), true, true],
+  ['ECONNREFUSED', withCode('ECONNREFUSED'), false, true],
+  ['ECONNREFUSED, another host available', withCode('ECONNREFUSED'), true, true],
+  ['ETIMEDOUT', withCode('ETIMEDOUT'), false, true],
+  ['ETIMEDOUT, another host available', withCode('ETIMEDOUT'), true, true],
+  ['EPIPE', withCode('EPIPE'), false, true],
+  ['UND_ERR_CONNECT_TIMEOUT', withCode('UND_ERR_CONNECT_TIMEOUT'), false, true],
+  ['UND_ERR_HEADERS_TIMEOUT', withCode('UND_ERR_HEADERS_TIMEOUT'), false, true],
+  ['UND_ERR_BODY_TIMEOUT', withCode('UND_ERR_BODY_TIMEOUT'), false, true],
+  // Our own watchdogs. If these ever fail over, a slow upstream costs the fleet.
+  ['TEAMCLAUDE_HEADERS_TIMEOUT', withCode('TEAMCLAUDE_HEADERS_TIMEOUT'), false, true],
+  ['TEAMCLAUDE_HEADERS_TIMEOUT, another host', withCode('TEAMCLAUDE_HEADERS_TIMEOUT'), true, true],
+  ['TEAMCLAUDE_BODY_TIMEOUT', withCode('TEAMCLAUDE_BODY_TIMEOUT'), false, true],
+  ['TEAMCLAUDE_BODY_TIMEOUT, another host', withCode('TEAMCLAUDE_BODY_TIMEOUT'), true, true],
+  // The name arm: an abort or a timeout carries no code of ours.
+  ['name TimeoutError', Object.assign(new Error('timed out'), { name: 'TimeoutError' }), false, true],
+  ['name AbortError', Object.assign(new Error('aborted'), { name: 'AbortError' }), false, true],
+  ['name AbortError, another host', Object.assign(new Error('aborted'), { name: 'AbortError' }), true, true],
+  // The message arm: Node's global fetch reports everything as this.
+  ['message "fetch failed"', new TypeError('fetch failed'), false, true],
+  // Host-scoped: the only codes `otherHostAvailable` may change the answer for.
+  ['ENOTFOUND', withCode('ENOTFOUND'), false, true],
+  ['ENOTFOUND, another host available', withCode('ENOTFOUND'), true, false],
+  ['EAI_AGAIN', withCode('EAI_AGAIN'), false, true],
+  ['EAI_AGAIN, another host available', withCode('EAI_AGAIN'), true, false],
+  ['EHOSTUNREACH', withCode('EHOSTUNREACH'), false, true],
+  ['EHOSTUNREACH, another host available', withCode('EHOSTUNREACH'), true, false],
+  ['ENETUNREACH', withCode('ENETUNREACH'), false, true],
+  ['ENETUNREACH, another host available', withCode('ENETUNREACH'), true, false],
+  ['ENETDOWN', withCode('ENETDOWN'), false, true],
+  ['ENETDOWN, another host available', withCode('ENETDOWN'), true, false],
+  // Genuinely about this account or this request: fail over.
+  ['an unclassified transport error', new Error('upstream proxy refused CONNECT: HTTP/1.1 407'), false, false],
+  ['CERT_HAS_EXPIRED', withCode('CERT_HAS_EXPIRED'), false, false],
+  ['CERT_HAS_EXPIRED, another host', withCode('CERT_HAS_EXPIRED'), true, false],
+  ['not an Error at all', 'a string', false, false],
+];
+
+test('every arm of the upstream-error classifier is pinned', () => {
+  for (const [label, err, otherHostAvailable, expected] of CLASSIFIER_TABLE) {
+    assert.equal(isTransientUpstreamError(err, { otherHostAvailable }), expected,
+      `${label}: expected ${expected ? 'transient (close, let the client retry)' : 'failover'}`);
+  }
+  // A positive control on the table itself: it must contain rows that go BOTH
+  // ways, or a predicate stuck on one answer would satisfy every row.
+  const outcomes = new Set(CLASSIFIER_TABLE.map(r => r[3]));
+  assert.equal(outcomes.size, 2, 'the table only asserts one outcome, so it cannot detect a stuck predicate');
+});
