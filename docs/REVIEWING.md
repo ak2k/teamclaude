@@ -301,11 +301,50 @@ block:
 Accepted candidates land in this doc in the review's fix commit. Without
 that loop, skip the ceremony and expect drift.
 
-## Not yet mechanized
+## What is mechanized, and what is still prose
 
-bincache/cache pins the falsifiable claims its equivalent doc makes with a
-test (`tests/reviewing-doc.test.ts`), so that a code change making the doc
-wrong fails CI rather than waiting for an incident. **This doc has no such
-test.** Every `file:line` above is therefore a claim that can rot silently
-— which is invariant 9 applied to this file, currently unenforced. Treat
-line numbers as hints and the symbol names as the real anchors.
+`test/reviewing-doc.test.js` pins this doc's falsifiable claims, after the
+pattern bincache/cache uses for its equivalent (`tests/reviewing-doc.test.ts`):
+a code change that makes one of them wrong fails the suite instead of waiting
+for an incident. It checks the claims that have actually rotted — no outer
+catch described as log-only, neither described as closing an activity entry it
+never opens, both carrying both answer arms, the ledger ordering, every named
+symbol still present in `src/`, no overturned residual cited as if it were
+live, no hardcoded test count, and the ledger below counting itself.
+
+What it cannot check is whether the prose is *right* — only whether it still
+agrees with the code. Every `file:line` in this doc remains a claim that can
+rot silently, which is why the danger-zone table names symbols instead. Treat
+line numbers as hints and symbol names as the anchors.
+
+## The tests that named a property their body never reached
+
+5 tests on this branch were green while asserting nothing about the property
+their name claimed. Each was found by changing the code underneath it — four by
+mutation, one by a reviewer reading the body against its name — and not one by
+its author re-reading it. That ratio is the argument for the mutation tables,
+and against "I read it again and it looks right" as evidence.
+
+Append an entry rather than editing the count in your head: the test above
+fails when the number in the previous paragraph stops matching this list.
+
+1. `a throw after the response is streamed does not answer a second time`
+   replied with a buffered `application/json` body, which never enters
+   `streamResponse`. The throw it injected therefore landed with the headers
+   still unsent — the opposite of the case its name describes, and the one the
+   test above it already covered. *Caught in review.*
+2. The family-metering fixture stepped the Fable window from 1 straight to 3,
+   skipping the crossing it existed to produce, so the P1 rollover regression
+   passed it unchanged. *Caught by mutation against `259c7c1`.*
+3. Both DNS classification tests reached the classifier through port 1 with
+   `ECONNREFUSED` standing in for a resolver failure. That code was already
+   unconditional, so both arms passed identically before and after the change
+   they were written for. *Caught by mutation.*
+4. The h2 retry-ladder test named per-rung coverage. Reverting any single rung
+   survives, because the first still-guarded rung stops the ladder — only the
+   whole set gates, and the per-site rows are equivalent mutants of each other.
+   *Caught by mutation.*
+5. The MITM throwing-hook test first ran against the base listener, where
+   `createProxyServer`'s catch nests around the failure and swallows it, so it
+   passed against the unguarded code. Only the MITM path, which wires the async
+   listener with no wrapper, can observe that guard. *Caught by mutation.*

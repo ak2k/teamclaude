@@ -117,6 +117,35 @@ test('the residuals REVIEWING.md suppresses are still accepted', () => {
   }
 });
 
+// The doc said it had no test of this kind for as long as it had one — the
+// claim outlived its own falsification by three commits, in the section whose
+// subject is claims outliving their truth.
+test('REVIEWING.md does not deny the mechanization it has', () => {
+  assert.ok(!/This doc has no such test/.test(claims),
+    'the doc says it is unmechanized while this file is running against it');
+});
+
+// The one count the doc is allowed to state, because it is checked. A ledger of
+// past incidents only grows by appending, so the number is the length of the
+// list — stated once for the reader, verified here so it cannot drift from it.
+test('the ledger of tests that measured nothing counts itself', () => {
+  const start = doc.indexOf('## The tests that named a property');
+  assert.ok(start > 0, 'the ledger section is gone from REVIEWING.md');
+  const rest = doc.slice(start + 3);
+  const end = rest.indexOf('\n## ');
+  const section = end === -1 ? rest : rest.slice(0, end);
+
+  const stated = Number(/(\d+) tests on this branch/.exec(section)?.[1]);
+  const entries = [...section.matchAll(/^\d+\. /gm)].length;
+  assert.ok(stated > 0, 'the ledger no longer states a count, which was the point of writing it');
+  assert.equal(entries, stated,
+    `the ledger says ${stated} tests and lists ${entries} — appending an entry means updating the number`);
+  // Each entry has to say what caught it; "found somehow" is the part with no
+  // value, since the whole claim is about which instrument finds these.
+  const attributed = [...section.matchAll(/\*Caught (in|by) [^*]+\*/g)].length;
+  assert.equal(attributed, entries, 'a ledger entry does not say what caught it');
+});
+
 // The count the doc used to quote, which was twelve short. Asserting the number
 // here rather than in prose means it is maintained by the suite that produces it.
 test('the documented test-file count matches what the suite runs', () => {
