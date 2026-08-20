@@ -319,3 +319,62 @@ test('tunnel: upstream connect failure returns 502, not a silent drop', T, async
     closeHard(proxy);
   }
 });
+
+// An abandoned MITM request must not walk the retry ladder. `res.destroyed` is
+// the guard on every rung, and `Http2ServerResponse` has no such property — so
+// on the busiest path each rung read `undefined`, and a client that had gone
+// away still spent an upstream call, and its quota, on every remaining account.
+// Measured before the guards were widened: 1 upstream call on h1, 4 on h2.
+test('MITM h2: a cancelled request stops the retry ladder instead of spending every account', T, async () => {
+  const { caCertPem, leafCertPem, leafKeyPem } = generateCertChain('localhost');
+  const hits = [];
+  let cancelled = null;
+  const seenFirstHit = new Promise(r => { cancelled = r; });
+
+  // Every account is answered with a quota rejection, which is the branch that
+  // marks the account and retries the next one. The first hit waits for the
+  // client to go away before answering, so the abort lands before rung two.
+  const upstream = http.createServer(async (req, res) => {
+    for await (const c of req) void c;
+    hits.push(req.headers['authorization'] || 'none');
+    if (hits.length === 1) { cancelled(); await new Promise(r => setTimeout(r, 250)); }
+    res.writeHead(429, {
+      'content-type': 'application/json',
+      'retry-after': '1',
+      'anthropic-ratelimit-unified-7d-status': 'rejected',
+    });
+    res.end('{}');
+  });
+  const upPort = await listen(upstream);
+
+  const am = new AccountManager(
+    ['a', 'b', 'c', 'd'].map((n, i) => oauthAccount(n, `t-${n}`, { accountUuid: `${ACCOUNT_UUID.slice(0, -1)}${i}` })),
+    0.98,
+  );
+  const proxy = makeProxy(am, upPort, { leafCertPem, leafKeyPem });
+  const proxyPort = await listen(proxy);
+
+  const realLog = console.log; const realErr = console.error;
+  console.log = () => {}; console.error = () => {};
+  let client;
+  try {
+    const sock = await connectThroughProxy(proxyPort, `127.0.0.1:${upPort}`, caCertPem, ['h2']);
+    client = http2.connect(`https://localhost:${upPort}`, { createConnection: () => sock });
+    const stream = client.request({ ':method': 'POST', ':path': '/v1/messages', 'content-type': 'application/json' });
+    stream.on('error', () => { /* the cancel below is the point */ });
+    stream.end(JSON.stringify({ model: 'claude-opus-5', messages: [] }));
+
+    await seenFirstHit;          // upstream has the first attempt
+    stream.close(http2.constants.NGHTTP2_CANCEL);   // the client goes away
+    await new Promise(r => setTimeout(r, 1500));    // let any further rungs run
+  } finally {
+    console.log = realLog; console.error = realErr;
+    try { client?.destroy(); } catch { /* already gone */ }
+    closeHard(proxy); closeHard(upstream);
+  }
+
+  assert.ok(hits.length >= 1, 'the request never reached the upstream, so this proves nothing');
+  assert.equal(hits.length, 1,
+    `a cancelled h2 request spent ${hits.length} of ${am.accounts.length} accounts; `
+    + 'every rung past the first is quota burned for a client that is gone');
+});

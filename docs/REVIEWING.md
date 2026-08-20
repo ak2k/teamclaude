@@ -101,17 +101,21 @@ any severity.
    allowance alone, then reported it as having served an advisor family
    upstream refuses.*
 
-7. **Every error path answers the socket.** There are two outer catches.
-   `src/server.js:546` answers 502, guarded on `!res.headersSent &&
-   !res.destroyed` — the guard is load-bearing twice over: the inner
-   `finally` runs `onRequestEnd` *after* the response has streamed, and a
-   second `writeHead` there throws `ERR_HTTP_HEADERS_SENT` from inside the
-   recovery. `src/server.js:194` (`createProxyServer`'s own handler) is
-   still log-only. A `finally` that closes activity state belongs with it:
-   a throw between the two `try`s otherwise leaks one entry per aborted
-   request, forever, in a daemon that runs for weeks.
+7. **Every error path answers the socket, and closes what it opened.**
+   Both outer catches (`createProxyServer`'s own handler and
+   `createProxyRequestListener`'s) answer 502 and close the activity entry.
+   Each guard is load-bearing for a reason worth knowing before touching
+   it: `!res.headersSent` because the inner `finally` runs `onRequestEnd`
+   *after* the response has streamed, so a second `writeHead` throws
+   `ERR_HTTP_HEADERS_SENT` from inside the recovery; the ledger's open-mark
+   is set *before* the start hook and cleared *before* the end hook,
+   because a hook that half-registers and throws must not leave a row nobody
+   closes, nor be called twice for one request.
    *Precedent: `/tc-acct/%/v1/messages` — a malformed percent-escape in an
-   ordinary request line — hung the client permanently.*
+   ordinary request line — hung the client permanently. Then a throwing
+   status hook hung it again through the OTHER catch. Then a status hook
+   returning an unserializable value hung it a third time, because the fix
+   covered only the before-headers half (see invariant 14).*
 
 8. **A fixture must reach the branch, AND its state changes over time.**
    These are different questions and only the first is obvious. A fleet
@@ -185,6 +189,19 @@ any severity.
     was the old arm's cases. The failure was in the approval, not in the
     implementation, which is why this is a review invariant.*
 
+14. **A guard that decides whether to ANSWER must cover both halves:
+    headers-not-yet-sent AND headers-sent-but-body-unfinished.** They are
+    different repairs — one writes a status, the other can only destroy —
+    and code that has only the first looks complete, because the case it
+    handles is the one anybody thinks to test. `forwardRequest` has carried
+    both arms all along; both outer catches had only the first.
+    *Precedent: `getStatusExtra` returning a cycle or a BigInt. The value is
+    serialized AFTER `writeHead`, so the throw arrives with the 200 already
+    sent, the before-headers arm declines, and not one byte reaches the
+    client — a hang that survived the round which fixed the same catch for a
+    hook that THREW. Asking "and what if this throws one line later?" is the
+    whole check.*
+
 ## Danger zones (escalate scrutiny; small diffs, big blast radius)
 
 | Path | Why |
@@ -210,8 +227,8 @@ Never report anything `npx eslint .` enforces.
 ## Verification recipes (run these; do not reason from the diff alone)
 
 ```sh
-node --test test/*.test.js     # 728 tests
-node --test                    # 729 — the +1 is test/collapsing-fleet.js,
+node --test test/*.test.js     # count asserted by test/reviewing-doc.test.js
+node --test                    # one more — the +1 is test/collapsing-fleet.js,
                                # a 0-test helper node's discovery counts as a file
 npx eslint .
 

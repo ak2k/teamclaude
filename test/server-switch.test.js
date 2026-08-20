@@ -383,3 +383,103 @@ test('a request aborted mid-body closes its activity entry', async () => {
   assert.deepEqual(ended, started,
     `an aborted request left ${started.length - ended.length} activity entry(s) open forever`);
 });
+
+// A guard that decides whether to ANSWER has two halves, and the earlier fix
+// only had one. `getStatusExtra`'s value is serialized AFTER writeHead, so a
+// hook returning something JSON cannot represent — a cycle, a BigInt — throws
+// with the 200 already sent: the before-headers arm declines, nothing ends the
+// response, and not one byte reaches the client. Covering the throwing hook and
+// not this one is why three rounds of "the catch does not answer" kept
+// producing a fourth.
+test('a status hook returning an unserializable value does not hang the client', async () => {
+  const cyclic = {}; cyclic.self = cyclic;
+  for (const [label, extra] of [['a cycle', { cyclic }], ['a BigInt', { big: 1n }]]) {
+    const am = new AccountManager(ACCTS, 0.98);
+    let reached = false;
+    const proxy = createProxyServer(am, CONFIG, {
+      getStatusExtra: () => { reached = true; return extra; },
+    });
+    const port = await listen(proxy);
+    const realErr = console.error;
+    console.error = () => {};
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 4000);
+    let outcome;
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/teamclaude/status`, { signal: ac.signal });
+      await res.text();
+      outcome = `answered ${res.status}`;
+    } catch (err) {
+      // Headers were already sent, so there is no status left to change: the
+      // connection is destroyed and the client retries. That is the answer.
+      outcome = err.name === 'AbortError' ? 'HUNG' : 'closed';
+    } finally {
+      clearTimeout(timer);
+      console.error = realErr;
+      proxy.close();
+    }
+    assert.ok(reached, `the request never reached the hook returning ${label}`);
+    assert.notEqual(outcome, 'HUNG', `${label}: the client waited forever for a response nobody sent`);
+  }
+});
+
+// The ledger's START side, which is the mirror of the ordering fixed on the end
+// side: a hook that registers its row and THEN throws leaves the row held, and
+// nothing recorded to close it. This is the shipped hook's shape — the TUI does
+// `active.set(id, …)` and then `render()`, which rethrows.
+test('a hook that throws after registering its row still has the row closed', async () => {
+  const am = new AccountManager(ACCTS, 0.98);
+  const open = new Set();
+  const proxy = createProxyServer(am, { proxy: {}, upstream: 'http://127.0.0.1:1' }, {
+    onRequestStart: (id) => { open.add(id); throw new Error('render() rethrew'); },
+    onRequestEnd: (id) => { open.delete(id); },
+  });
+  const port = await listen(proxy);
+  const realErr = console.error;
+  console.error = () => {};
+  try {
+    await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-opus-5', messages: [] }),
+    }).then(r => r.text()).catch(() => {});
+  } finally {
+    console.error = realErr;
+    proxy.close();
+  }
+  assert.deepEqual([...open], [],
+    'a hook that threw after registering its row left the row open forever');
+});
+
+// The blocklist answers and returns on its own, so it owns the entry it closes.
+// Leaving it marked open means the outer catch closes it a second time — one
+// request, two closes — the moment anything downstream of it throws.
+test('a blocked model closes its activity entry exactly once', async () => {
+  const am = new AccountManager(ACCTS, 0.98);
+  const ends = [];
+  const proxy = createProxyServer(am, {
+    proxy: {}, upstream: 'http://127.0.0.1:1', blockedModels: ['*fable*'],
+  }, {
+    onRequestEnd: (id, info) => {
+      ends.push(info.status);
+      if (ends.length === 1) throw new Error('the activity pane rethrew');
+    },
+  });
+  const port = await listen(proxy);
+  const realErr = console.error;
+  console.error = () => {};
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-fable-5', messages: [] }),
+    });
+    assert.equal(res.status, 400, 'the blocklist did not answer, so this proves nothing');
+    await res.text();
+  } finally {
+    console.error = realErr;
+    proxy.close();
+  }
+  assert.equal(ends.length, 1,
+    `one blocked request closed its activity entry ${ends.length} times (statuses ${ends.join(', ')})`);
+});

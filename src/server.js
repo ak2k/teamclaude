@@ -190,7 +190,11 @@ export function createProxyServer(accountManager, config, hooks = {}, sx = null)
         return;
       }
 
-      return forward(req, res);
+      // Awaited: `forward` is async, so returning it unawaited puts any
+      // rejection outside this try — an unhandled rejection, which Node's
+      // default kills the process on. Nothing shipped can make it reject; the
+      // await costs nothing and removes the class.
+      return await forward(req, res);
     } catch (err) {
       console.error('[TeamClaude] Unhandled error:', err);
       // Answer the socket, for the same reason the proxied path does: a throw
@@ -202,6 +206,15 @@ export function createProxyServer(accountManager, config, hooks = {}, sx = null)
       if (!res.headersSent && !clientGone(res)) {
         res.writeHead(502, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ type: 'error', error: { type: 'proxy_error', message: 'Internal proxy error' } }));
+      } else if (!res.writableEnded) {
+        // Headers are already out, so there is no status left to send and
+        // nothing that can say what went wrong. Destroy, so the client sees a
+        // broken response and retries — the alternative is a socket nobody will
+        // ever write another byte to. `forwardRequest` has carried this arm all
+        // along; both outer catches were missing it, which is how a status hook
+        // returning an unserializable value (a cycle, a BigInt) hung the client
+        // even after the throwing case was fixed.
+        res.destroy();
       }
     }
   };
@@ -578,12 +591,19 @@ export function createProxyRequestListener({ accountManager, upstream, logDir = 
       // session-aware routing (issue #109) and colors the TUI activity stream.
       const sessionId = req.headers['x-claude-code-session-id'] || null;
       if (!hideActivity) {
+        // Marked open BEFORE the hook runs, for the mirror of the reason the
+        // inner `finally` clears it before ITS hook: a hook that registers its
+        // row and then throws would otherwise leave the row held and nothing
+        // recorded to close it. That is the shipped hook's literal shape —
+        // tui.onRequestStart does `active.set(id, …)` and then `render()`, which
+        // rethrows. The cost of this direction is one spurious close for a hook
+        // that threw before registering, which every consumer already tolerates.
+        openEntry = { reqId, sessionId };
         hooks.onRequestStart?.(reqId, { method: req.method, path: req.url, sessionId, pinned: pinnedIndex != null });
         // An OPEN activity entry, which something must now close. Every consumer
         // holds the row until told the request ended: the TUI keeps it in
         // `active` (and never idles its animation while one is left), headless
         // keeps it in `inFlight`. See the outer catch.
-        openEntry = { reqId, sessionId };
       }
 
       // Buffer request body (needed to resend on a different account after a 429).
@@ -618,6 +638,7 @@ export function createProxyRequestListener({ accountManager, upstream, logDir = 
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: `Model "${model}" is blocked by teamclaude (matched "${blockedBy}").` } }));
         }
+        openEntry = null;   // closed here, so the outer catch does not close it twice
         hooks.onRequestEnd?.(reqId, { method: req.method, path: req.url, account: '(blocked)', status: 400, model, sessionId });
         return;
       }
@@ -700,6 +721,15 @@ export function createProxyRequestListener({ accountManager, upstream, logDir = 
       if (!res.headersSent && !clientGone(res)) {
         res.writeHead(502, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ type: 'error', error: { type: 'proxy_error', message: 'Internal proxy error' } }));
+      } else if (!res.writableEnded) {
+        // Headers are already out, so there is no status left to send and
+        // nothing that can say what went wrong. Destroy, so the client sees a
+        // broken response and retries — the alternative is a socket nobody will
+        // ever write another byte to. `forwardRequest` has carried this arm all
+        // along; both outer catches were missing it, which is how a status hook
+        // returning an unserializable value (a cycle, a BigInt) hung the client
+        // even after the throwing case was fixed.
+        res.destroy();
       }
     }
   };
@@ -990,7 +1020,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       ctx.holdBudgetMs -= waitMs;
       console.log(`[TeamClaude] All accounts exhausted — holding connection, retry in ${Math.ceil(waitMs / 1000)}s (${Math.ceil(ctx.holdBudgetMs / 1000)}s budget left)`);
       await new Promise(resolve => setTimeout(resolve, waitMs));
-      if (res.destroyed) return;
+      if (clientGone(res)) return;
       return forwardRequest(req, res, body, accountManager, upstream, retryCount, hooks, reqId, ctx, logDir, sx, route);
     }
 
@@ -999,7 +1029,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       ctx.exhaustedRetries = exhaustedRetries + 1;
       console.log(`[TeamClaude] All accounts exhausted — waiting ${retryAfter}s before retry`);
       await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
-      if (res.destroyed) return;
+      if (clientGone(res)) return;
       return forwardRequest(req, res, body, accountManager, upstream, retryCount, hooks, reqId, ctx, logDir, sx, route);
     }
     res.writeHead(429, {
@@ -1093,7 +1123,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
     // only until the response headers arrive — long enough to stagger the burst,
     // then released so streaming bodies don't tie up concurrency. Fail-open: a
     // client that disconnects while waiting just drops out.
-    if (!await accountManager.admit(account.index, () => res.destroyed)) return;
+    if (!await accountManager.admit(account.index, () => clientGone(res))) return;
     let upstreamRes;
     try {
       upstreamRes = await upstreamFetch(upstreamUrl, {
@@ -1154,7 +1184,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
           accountManager.markRateLimited(account.index, hold);
         }
         ctx.tried.add(account.index);
-        if (res.destroyed) return;
+        if (clientGone(res)) return;
         return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, route);
       }
 
@@ -1182,7 +1212,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       // 429ing upstream can't loop forever through sx.
       if (switchingToSx && retryCount < maxRetries) {
         console.log(`[TeamClaude] 429 on "${account.name}" — retrying via sx.org (fresh egress IP)`);
-        if (res.destroyed) return;
+        if (clientGone(res)) return;
         return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, nextUseSx);
       }
 
@@ -1192,7 +1222,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       if (retryAfter <= RATE_LIMIT_ABSORB_MAX_SECONDS && retryCount < maxRetries) {
         console.log(`[TeamClaude] Rate-limit 429 on "${account.name}" — waiting ${retryAfter}s, retrying same account (no switch)`);
         await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
-        if (res.destroyed) return;
+        if (clientGone(res)) return;
         return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, nextUseSx);
       }
 
@@ -1244,7 +1274,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       await upstreamRes.body?.cancel();
       console.log(`[TeamClaude] 401 on "${account.name}" — token rejected; forcing refresh and retrying`);
       await accountManager.ensureTokenFresh(account.index, true);
-      if (res.destroyed) return;
+      if (clientGone(res)) return;
       return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, route);
     }
 
