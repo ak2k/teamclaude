@@ -146,6 +146,19 @@ test('the ledger of tests that measured nothing counts itself', () => {
   assert.equal(attributed, entries, 'a ledger entry does not say what caught it');
 });
 
+// Invariant 16: the load-bearing guard among a redundant set can only be
+// recorded in a comment, because mutation cannot distinguish it. That makes the
+// comment the single point of failure, so pin the one fact it rests on — the
+// backstop it names still exists. Deliberately NOT a count of guarded rungs: a
+// count of predicate sites in this file has already gone stale for reasons
+// unrelated to the claim, twice.
+test('the backstop clientGone\'s docstring names is still wired up', () => {
+  assert.match(server, /admit\(account\.index, \(\) => clientGone\(res\)\)/,
+    "admit() no longer gets the abort probe that clientGone's docstring credits with"
+    + ' stopping the ladder on its three unguarded rungs — the comment is now wrong,'
+    + ' and on those rungs an abandoned request spends every remaining account');
+});
+
 // The count the doc used to quote, which was twelve short. Asserting the number
 // here rather than in prose means it is maintained by the suite that produces it.
 test('the documented test-file count matches what the suite runs', () => {

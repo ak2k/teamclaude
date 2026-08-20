@@ -217,6 +217,22 @@ any severity.
     harder — it is `test/reviewing-doc.test.js`, which fails on both of those
     sentences and on a citation of an overturned entry that does not say so.*
 
+16. **When several guards can each stop the same thing, the comment must name
+    the one that actually holds the property.** Mutation is no help here and
+    quietly says so: revert any one of a set of redundant guards and the suite
+    stays green, because whichever stop is still standing gets there first. The
+    table reports every one of them as an equivalent mutant, which reads as "not
+    covered" and is really "not distinguishable". So the fact of which guard is
+    load-bearing cannot be recorded in a test at all — it has to be measured
+    once and written down, and the comment is the only place it can live.
+    *Precedent: round 7. `clientGone`'s docstring claimed every rung of the
+    retry ladder asked it; six of nine do. On the three that do not, the
+    no-burn property is held by `admit()`'s abort probe — measured at 1 of 4
+    accounts spent with the probe live against 4 of 4 with it inert. On the six
+    that do, reverting either the rung's own check OR the probe leaves the suite
+    green, so the table can see neither. The correct fix was the sentence: three
+    more guards would have been changing code to match a comment.*
+
 ## Danger zones (escalate scrutiny; small diffs, big blast radius)
 
 | Path | Why |

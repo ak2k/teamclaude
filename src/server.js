@@ -353,11 +353,33 @@ export function resolveAccountPin(accountManager, token) {
  * is `undefined` and the guard is inert), and the MITM path is the busy one.
  * The h2 equivalent lives on the underlying stream.
  *
- * Every site deciding whether to write a LATE response asks this one question
- * through this one helper — all three catches, the 429 answer, and every rung
- * of the retry ladder, where the inert read meant an abandoned MITM request
- * spent an upstream call and its quota on each remaining account. Three
- * predicates for one decision is the drift a shared helper exists to stop.
+ * Most sites deciding whether to write a LATE response ask this one question
+ * through this one helper: the two outer catches, `forwardRequest`'s late 502
+ * and its 429 answer, and six of the retry ladder's nine rungs — where the
+ * inert read meant an abandoned MITM request spent an upstream call and its
+ * quota on each remaining account.
+ *
+ * Two places do not, and are named because a helper's value is knowing exactly
+ * who is outside it:
+ *
+ *   - The listener's INNER catch around `forwardRequest` decides on a bare
+ *     `!res.headersSent` and has no headers-sent destroy arm. No input is known
+ *     to reach it with headers already sent; that is reasoning, not a
+ *     measurement, so it is TC-017 rather than a fix.
+ *   - Three rungs fail over without asking: the `status === 'error'` rung, the
+ *     403 rung and the transport-throw rung.
+ *
+ * WHAT ACTUALLY STOPS THE LADDER on those three is `admit()`'s abort probe,
+ * which is passed this helper and is checked at the top of every wait loop —
+ * measured on the 403 rung, an aborted request spends 1 of 4 accounts with the
+ * probe live and 4 of 4 with it inert. So there is no quota cost today, and the
+ * fix for the three bare rungs is this sentence rather than three more guards.
+ *
+ * On the six rungs that DO ask, the rung's check and `admit()` are redundant:
+ * reverting either one alone leaves the suite green, because whichever stop is
+ * still standing ends the ladder first. A mutation table reports both as
+ * equivalent mutants and cannot tell you which carries the property — which is
+ * the whole reason this paragraph exists.
  *
  * Deliberately NOT applied where the cost is neither quota nor an unanswered
  * client: the opt-in egress wait, and `streamResponse`'s breaks, which on h2
