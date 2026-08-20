@@ -5,6 +5,8 @@ import http from 'node:http';
 import net from 'node:net';
 import tls from 'node:tls';
 import { once } from 'node:events';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -432,4 +434,120 @@ test('MITM: a throwing activity hook cannot escape as an unhandled rejection', T
   assert.ok(ends > 0, 'the catch never tried to close the entry, so this proves nothing');
   assert.deepEqual(escaped, [],
     'a throwing activity hook escaped the MITM listener, where crash-log turns it into exit(1)');
+});
+
+// Paths for the child below, which runs the proxy out of process.
+const X509_PATH = fileURLToPath(new URL('../src/x509.js', import.meta.url));
+const MITM_PATH = fileURLToPath(new URL('../src/mitm.js', import.meta.url));
+const AM_PATH = fileURLToPath(new URL('../src/account-manager.js', import.meta.url));
+
+// A cancelled h2 stream must not strand the request handler.
+//
+// `res.write` to a cancelled stream returns false, which sends streamResponse
+// into its backpressure wait. That wait listens for `drain` or `close`, and on a
+// stream that is already closed neither will ever arrive: `close` fired before
+// the listener existed and `drain` does not fire on a closed stream. The read
+// that would have broken out first is the one this change is about.
+//
+// A stranded handler holds the event loop, so this runs in a child. In process
+// it would leave the runner unable to exit whether it passed or failed, and a
+// test that cannot fail cleanly is not a test.
+function h2SseCancelInChild() {
+  const source = `
+    import http from 'node:http';
+    import http2 from 'node:http2';
+    import { generateCertChain } from ${JSON.stringify(X509_PATH)};
+    import { createConnectHandler } from ${JSON.stringify(MITM_PATH)};
+    import { AccountManager } from ${JSON.stringify(AM_PATH)};
+
+    console.log = () => {}; console.error = () => {};
+    const listen = (s) => new Promise(r => s.listen(0, '127.0.0.1', () => r(s.address().port)));
+    const { caCertPem, leafCertPem, leafKeyPem } = generateCertChain('localhost');
+
+    // Keeps feeding the proxy, so it keeps writing to a client that has left.
+    let stop = false;
+    const upstream = http.createServer(async (req, res) => {
+      for await (const c of req) void c;
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+      for (let n = 0; !stop && n < 200; n++) {
+        res.write('data: {"n":' + n + '}\\n\\n');
+        await new Promise(r => setTimeout(r, 20));
+      }
+      res.end();
+    });
+    const upPort = await listen(upstream);
+
+    const started = [], ended = [];
+    const am = new AccountManager([{
+      name: 'a', type: 'oauth', accessToken: 't-a', refreshToken: 'r',
+      expiresAt: Date.now() + 3600000,
+    }], 0.98);
+    const proxy = http.createServer();
+    proxy.on('connect', createConnectHandler({
+      config: { proxy: {}, upstream: 'http://127.0.0.1:' + upPort },
+      accountManager: am,
+      ensureLeaf: async () => ({ key: leafKeyPem, cert: leafCertPem }),
+      hooks: { onRequestStart: (id) => started.push(id), onRequestEnd: (id) => ended.push(id) },
+    }));
+    const proxyPort = await listen(proxy);
+
+    // CONNECT, then h2 over the tunnel.
+    const net = await import('node:net');
+    const tls = await import('node:tls');
+    const raw = net.connect(proxyPort, '127.0.0.1');
+    await new Promise(r => raw.once('connect', r));
+    raw.write('CONNECT 127.0.0.1:' + upPort + ' HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\n\\r\\n');
+    await new Promise(r => raw.once('data', r));
+    const sock = tls.connect({ socket: raw, ca: caCertPem, servername: 'localhost', ALPNProtocols: ['h2'] });
+    await new Promise(r => sock.once('secureConnect', r));
+
+    const client = http2.connect('https://localhost:' + upPort, { createConnection: () => sock });
+    client.on('error', () => {});
+    const stream = client.request({ ':method': 'POST', ':path': '/v1/messages', 'content-type': 'application/json' });
+    stream.on('error', () => {});
+    stream.end(JSON.stringify({ model: 'claude-opus-5', messages: [], stream: true }));
+
+    let sawChunk = false;
+    await new Promise((resolve) => {
+      stream.on('data', () => { if (!sawChunk) { sawChunk = true; resolve(); } });
+      setTimeout(resolve, 6000);
+    });
+    stream.close(http2.constants.NGHTTP2_CANCEL);
+
+    // The entry closing is the signal that the handler returned.
+    const returned = await new Promise((resolve) => {
+      const deadline = setTimeout(() => resolve(false), 8000);
+      const poll = setInterval(() => {
+        if (started.length > 0 && ended.length >= started.length) {
+          clearTimeout(deadline); clearInterval(poll); resolve(true);
+        }
+      }, 50);
+    });
+    stop = true;
+    process.stdout.write(JSON.stringify({ sawChunk, started: started.length, ended: ended.length, returned }));
+    process.exit(0);
+  `;
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, ['--input-type=module', '--eval', source],
+      { stdio: ['ignore', 'pipe', 'pipe'] });
+    const out = [];
+    child.stdout.on('data', d => out.push(String(d)));
+    child.stderr.on('data', () => {});
+    // The ceiling is the point: a stranded handler keeps the child alive, so the
+    // parent has to be the one that gives up.
+    const kill = setTimeout(() => child.kill('SIGKILL'), 25000);
+    child.on('close', () => {
+      clearTimeout(kill);
+      try { resolve(JSON.parse(out.join(''))); } catch { resolve({ error: out.join('') || 'child produced nothing' }); }
+    });
+  });
+}
+
+test('MITM h2: a cancelled stream does not strand the request handler', { ...T, timeout: 60000 }, async () => {
+  const got = await h2SseCancelInChild();
+  assert.ok(got.sawChunk, `the stream never delivered a chunk, so nothing was cancelled mid-flight: ${JSON.stringify(got)}`);
+  assert.ok(got.started > 0, `no activity entry was opened, so this proves nothing: ${JSON.stringify(got)}`);
+  assert.ok(got.returned,
+    'a cancelled h2 stream left the request handler waiting on a drain or close that cannot arrive; '
+    + `its activity entry never closed and the handler holds the event loop: ${JSON.stringify(got)}`);
 });

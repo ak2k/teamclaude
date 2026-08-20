@@ -381,10 +381,15 @@ export function resolveAccountPin(accountManager, token) {
  * equivalent mutants and cannot tell you which carries the property — which is
  * the whole reason this paragraph exists.
  *
- * Deliberately NOT applied where the cost is neither quota nor an unanswered
- * client: the opt-in egress wait, and `streamResponse`'s breaks, which on h2
- * read out a body whose quota is already spent. Recorded in docs/RESIDUALS.md
- * rather than changed here.
+ * `streamResponse` reads it too. A write to a cancelled h2 stream returns false,
+ * which sends the loop into its backpressure wait. That wait resolves on `drain`
+ * or `close`; on a cancelled stream `close` fired before the listener was
+ * registered and `drain` never fires. Neither event arrives, and the handler
+ * stays there for the life of the process, holding its upstream reader and its
+ * activity entry. The bare read before the write let execution reach that wait.
+ *
+ * Still bare at the opt-in egress wait, where a cancelled request waits out a
+ * bounded hold and spends nothing. Recorded in docs/RESIDUALS.md.
  */
 function clientGone(res) {
   return !!res.destroyed || !!res.stream?.destroyed;
@@ -1465,7 +1470,7 @@ async function streamResponse(webStream, res, accountIndex, accountManager, body
       if (done) break;
 
       // Client disconnected — stop reading from upstream
-      if (res.destroyed) break;
+      if (clientGone(res)) break;
 
       // Forward chunk immediately
       const ok = res.write(value);
@@ -1495,7 +1500,7 @@ async function streamResponse(webStream, res, accountIndex, accountManager, body
           res.once('drain', done);
           res.once('close', done);
         });
-        if (res.destroyed) break;
+        if (clientGone(res)) break;
       }
     }
 
