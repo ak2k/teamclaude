@@ -3,6 +3,7 @@
 // suite, restores, and prints which test caught it.
 //
 // Usage: node tools/mutation-fix-table.mjs --repo=<checkout> [--force] [name prefix ...]
+//        node tools/mutation-fix-table.mjs --repo=<checkout> --anchors-only
 //
 // READ THIS BEFORE TRUSTING THE SUMMARY LINE. This is an instrument, and every
 // way it has lied so far has been by reporting health while measuring nothing:
@@ -11,6 +12,16 @@
 //     applied, so it proves nothing — and this happens precisely when the code
 //     has moved, which is when you most need the answer. Exits non-zero and
 //     names them; never let one sit as a quiet row beside a healthy count.
+//   - AMBIGUOUS ANCHOR. `String.replace` with a string pattern rewrites only the
+//     FIRST match. An anchor that occurs twice therefore mutates whichever site
+//     comes first in the file, which may not be the one the row's label names.
+//     It misleads in whichever direction the duplicate happens to fall: if the
+//     first site is live code the row DIES and reads as coverage of a property
+//     nothing measured; if it is a comment or a dead branch the row LIVES and
+//     reads as a coverage gap that does not exist. Both cost a review, and
+//     neither announces itself — the run is clean either way. Anchors get
+//     uniquified rather than the replace made global, because a row means one
+//     site; a global replace would silently make it mean all of them.
 //   - RUNAWAY. Some mutations do not make the suite fail, they make it never
 //     finish. A run that has to be killed is a caught mutation, not a passing one.
 //   - TRUNCATED OUTPUT. A runaway logs as it spins and can exceed the child's
@@ -22,6 +33,12 @@
 // nothing was wrong. That is the same failure this table exists to catch in the
 // code, so hold the table to it too.
 //
+// `--anchors-only` checks every row's anchor and stops, without running the
+// suite or writing to the tree. The full table is a ~20-minute run and the
+// anchors are what rot, so keeping the cheap half separately runnable is the
+// difference between a check that gets run and one that waits for somebody to
+// have the time.
+//
 // The repo path is REQUIRED and has no default: this writes to src/ in the tree
 // it is pointed at, and a baked-in default is a way to silently overwrite a
 // checkout somebody else is reading. It refuses a dirty tree unless --force,
@@ -32,11 +49,12 @@ import fs from 'node:fs';
 const argv = process.argv.slice(2);
 const repoArg = argv.find(a => a.startsWith('--repo='));
 if (!repoArg) {
-  console.error('usage: tools/mutation-fix-table.mjs --repo=<checkout> [--force] [name prefix ...]');
+  console.error('usage: tools/mutation-fix-table.mjs --repo=<checkout> [--force] [--anchors-only] [name prefix ...]');
   process.exit(2);
 }
 const REPO = repoArg.slice('--repo='.length);
 const force = argv.includes('--force');
+const anchorsOnly = argv.includes('--anchors-only');
 // Run the suite with the interpreter running this harness, so the table is
 // measured on the same runtime the developer is using.
 const NODE = process.execPath;
@@ -45,7 +63,10 @@ if (!fs.existsSync(`${REPO}/src/account-manager.js`)) {
   console.error(`no ${REPO}/src/account-manager.js — is --repo a teamclaude checkout?`);
   process.exit(2);
 }
-requireSandbox(REPO, force);
+// Only the mutating run needs a sandbox. `--anchors-only` never writes, and
+// requiring the marker for it would mean the cheap check could not be run on the
+// tree you are actually working in — which is the one whose anchors just moved.
+if (!anchorsOnly) requireSandbox(REPO, force);
 
 // A tree is mutable by this harness only if it carries the marker. Clean is NOT
 // the same as mine: the shared checkout is usually clean, which is exactly how a
@@ -88,7 +109,7 @@ const MUTATIONS = [
     'const idx = this.accounts.indexOf(account);', 'const idx = accountIndex;'],
   ['F2  eviction probe vetoes on in-flight', 'src/session-tracker.js',
     'if (oldest === null) return false;\n    this.sessions.delete(oldest);\n    this.evicted += 1;\n    return true;', 'return false;'],
-  ['F3  window baselines keyed by window alone', 'src/window-watcher.js',
+  ['F3  window baselines collapse to one window per (bucket, account)', 'src/window-watcher.js',
     'if (!byWindow.has(seen.window)) byWindow.set(seen.window, seen.reset);',
     'if (!byWindow.has(seen.window)) { byWindow.clear(); byWindow.set(seen.window, seen.reset); }'],
   ['F5a recordSession loses ctx.model/ctx.advisorModel', 'src/server.js',
@@ -162,8 +183,22 @@ for (const [name, file, find, replace] of runs) {
     continue;
   }
   const original = fs.readFileSync(path, 'utf8');
-  if (!original.includes(find)) {
+  // Occurrences, not presence. One is the only count that means what the row
+  // says: zero mutated nothing, and two or more mutated the first site, which
+  // the label may not be about. The second case is why this is counted here
+  // rather than eyeballed — it produces a row that dies and looks healthy.
+  const hits = original.split(find).length - 1;
+  if (hits === 0) {
     rows.push([name, 'ANCHOR MISSING', [`anchor text is gone from ${file}`]]);
+    continue;
+  }
+  if (hits > 1) {
+    rows.push([name, 'ANCHOR AMBIGUOUS',
+      [`anchor matches ${hits} sites in ${file}; only the first would be mutated`]]);
+    continue;
+  }
+  if (anchorsOnly) {
+    rows.push([name, 'ANCHORED', []]);
     continue;
   }
   fs.writeFileSync(path, original.replace(find, replace));
@@ -191,17 +226,24 @@ for (const [name, verdict, fails] of rows) {
   for (const f of fails.slice(0, 4)) console.log(`               ↳ ${f}`);
 }
 const lived = rows.filter(r => r[1] === 'LIVES');
-const unanchored = rows.filter(r => r[1] === 'ANCHOR MISSING');
-console.log(`\n${rows.length - lived.length - unanchored.length}/${rows.length} mutations die.`);
-reportIndistinguishableRows(rows);
+const unanchored = rows.filter(r => r[1] === 'ANCHOR MISSING' || r[1] === 'ANCHOR AMBIGUOUS');
+// The count must say what was measured. In anchors-only mode nothing was run,
+// and printing "N/N mutations die" for a set of mutations that were never
+// applied would be this instrument telling the exact lie it is built to catch.
+console.log(anchorsOnly
+  ? `\n${rows.length - unanchored.length}/${rows.length} anchors match exactly one site. No mutation was run.`
+  : `\n${rows.length - lived.length - unanchored.length}/${rows.length} mutations die.`);
+if (!anchorsOnly) reportIndistinguishableRows(rows);
 
-// A mutation that could not be applied measured NOTHING. Left as a quiet row
-// beside a healthy count it reads as success, so it fails the run outright.
+// A mutation that could not be applied AT THE SITE ITS LABEL NAMES measured
+// nothing about that site. Left as a quiet row beside a healthy count it reads
+// as success, so it fails the run outright.
 if (unanchored.length) {
-  console.error(`\n${unanchored.length} mutation(s) could not be applied — the code they anchor on has`
-    + ' moved. These measured nothing; the count above does not cover them:');
-  for (const [name] of unanchored) console.error(`  - ${name}`);
-  console.error('\nRe-anchor each against the current source before trusting this table.');
+  console.error(`\n${unanchored.length} mutation(s) did not land on one named site — the code they`
+    + ' anchor on has moved or duplicated. These measured nothing; the count above does not cover them:');
+  for (const [name, verdict, why] of unanchored) console.error(`  - ${name}\n      ${verdict}: ${why[0]}`);
+  console.error('\nRe-anchor each against the current source before trusting this table:'
+    + ' extend the find-text until it matches exactly one site.');
   process.exit(1);
 }
 if (lived.length) process.exit(1);
