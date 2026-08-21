@@ -167,7 +167,7 @@ test('band beats load when pressures differ; flag off prefers load', () => {
 
 test('a pinned session is preempted exactly once when its weekly window rolls over', () => {
   const am = manager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ]);
   assert.equal(route(am, 's1').name, 'a'); // pinned + rollover detector seeded
@@ -190,7 +190,7 @@ test('draining the pinned account never preempts (anti-thrash)', () => {
 
 test('the cleared-window null gap does not preempt; the refreshed window does', () => {
   const am = manager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ]);
   assert.equal(route(am, 's1').name, 'a');
@@ -208,7 +208,7 @@ test('the cleared-window null gap does not preempt; the refreshed window does', 
 
 test('preempt: false keeps the pin across a rollover', () => {
   const am = manager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ]);
   // Seeded while preempt is on, so it is the honor-path gate that holds the pin
@@ -262,7 +262,7 @@ test('a high-pressure low-priority fallback cannot band out the preferred tier',
 
 test('distribute off: the current account is re-ranked when its window rolls over', () => {
   const am = manager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ], { distribute: false });
   am.currentIndex = 0;
@@ -391,7 +391,7 @@ test('with distribution off nothing seeds the pin rollover map', () => {
 // map that bounds it, so churn evicts the idle sessions around it instead.
 test('a live session keeps its baseline while unrelated sessions churn past the cap', () => {
   const am = manager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.05, resetH: 60 },
   ], { tracker: new SessionTracker({ maxSessions: 8 }) });
   route(am, 'live');
@@ -572,7 +572,7 @@ test('non-finite quota headers are ignored rather than stored', () => {
 
 test('an advisor-only stretch still observes the current account rolling over', () => {
   const am = manager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ], { distribute: false });
   am.currentIndex = 0;
@@ -630,7 +630,7 @@ test('a rollover that moves nothing is not consumed (current account)', () => {
 
 test('removing an account does not make the renumbering look like a rollover', () => {
   const am = manager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 70 },
     { name: 'c', used: 0.1, resetH: 80 },
   ]);
@@ -642,7 +642,7 @@ test('removing an account does not make the renumbering look like a rollover', (
 
 test('a sub-window forward move of the reset is not a rollover', () => {
   const am = manager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.05, resetH: 60 },
   ]);
   am.recordSession('s1', 0); // pinned to 'a', baseline seeded from it
@@ -661,7 +661,7 @@ test('a sub-window forward move of the reset is not a rollover', () => {
 
 test('a pin rollover survives a retry that lands back on the rolled account', () => {
   const am = manager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.05, resetH: 60 },
   ]);
   am.recordSession('s1', 0);
@@ -687,7 +687,7 @@ test('a pin rollover survives a retry that lands back on the rolled account', ()
 // first confirm leaves the session riding the rolled account with nothing owed.
 test('a sibling confirm cannot settle a rollover the session then fails back onto', () => {
   const am = manager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ]);
   assert.equal(route(am, 's1').name, 'a');
@@ -716,7 +716,7 @@ test('a sibling confirm cannot settle a rollover the session then fails back ont
 
 test('a rollover the session did move off is settled once, not re-fired', () => {
   const am = manager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ]);
   assert.equal(route(am, 's1').name, 'a');
@@ -735,7 +735,7 @@ test('a rollover the session did move off is settled once, not re-fired', () => 
 // session off one healthy account after another.
 test('a preempted session settles on its destination instead of chaining onward', () => {
   const am = manager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.05, resetH: 60 },
     { name: 'c', used: 0.05, resetH: 70 },
   ]);
@@ -818,7 +818,7 @@ test('a degraded advisor request does not settle the advisor family\'s rollover'
   const am = manager([
     { name: 'a', used: 0.2, resetH: 50, fableUsed: 0.99, fableResetH: 50 },
     { name: 'b', used: 0.99, resetH: 50, fableUsed: 0.3, fableResetH: 50 },
-    { name: 'c', used: 0.99, resetH: 50, fableUsed: 0.05, fableResetH: 60 },
+    { name: 'c', used: 0.99, resetH: 50, fableUsed: 0.3, fableResetH: 60 },
   ]);
   assert.equal(route(am, 's1', FABLE).name, 'b'); // Fable pinned to 'b'
   am.accounts[2].disabled = true;                 // nowhere for Fable to move yet
@@ -883,7 +883,7 @@ test('a rollover with nowhere to move does not pace the account already serving'
 
 test('a current-account rollover survives a retry that lands back on it', () => {
   const am = manager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.05, resetH: 60 },
   ], { distribute: false });
   am.currentIndex = 0;
@@ -901,7 +901,7 @@ test('a current-account rollover survives a retry that lands back on it', () => 
 // not consume an event that walk is still owed.
 test('a request that never consulted the current account does not settle its rollover', () => {
   const am = manager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ]);
   am.currentIndex = 0;
@@ -929,7 +929,7 @@ test('a request that never consulted the current account does not settle its rol
 
 test('a request routed by the current-account walk does settle its rollover', () => {
   const am = manager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ], { distribute: false });
   am.currentIndex = 0;
@@ -951,7 +951,7 @@ test('a request routed by the current-account walk does settle its rollover', ()
 // of comparing against it — and a rollover in between is gone for a week.
 test('the account chosen at launch is a rollover baseline, not a first sight', () => {
   const am = manager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ]);
   assert.equal(am.selectActiveAccount().name, 'a');
@@ -994,7 +994,7 @@ test('a live pinned session keeps its baseline through unrelated session churn',
   // holds a request in flight, which keeps it pinned however long it streams.
   let t = Date.now();
   const am = manager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.05, resetH: 60 },
   ], { tracker: new SessionTracker({ knownTtlMs: 1, activeTtlMs: 1, now: () => t }) });
   am.recordSession('live', 0);
@@ -1031,7 +1031,7 @@ test('the rollover baseline seeds every bucket a route can make governing', () =
 
 test('a pin preemption paces the herd onto its destination', () => {
   const am = manager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.05, resetH: 60 },
   ]);
   am.recordSession('s1', 0);
@@ -1188,7 +1188,7 @@ test('one clock per band: a tick between accounts cannot break an exact tie', ()
 
 test('a rollover that preempts a pin is counted once, on the event not the request', () => {
   const am = manager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ]);
   assert.equal(route(am, 's1').name, 'a');
@@ -1298,7 +1298,7 @@ test('a stuck current-account rollover says so too', () => {
 // because it is stuck". A preemption that worked must not be filed as stuck.
 test('a rollover that moves reports the move, not a stuck event', () => {
   const am = manager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ]);
   route(am, 's1');
@@ -1311,7 +1311,7 @@ test('a rollover that moves reports the move, not a stuck event', () => {
 test('flag off, and preempt off, count nothing and owe nothing', () => {
   for (const er of [null, { enabled: false }, { enabled: true, preempt: false }]) {
     const am = manager([
-      { name: 'a', used: 0.5, resetH: 50 },
+      { name: 'a', used: 0.1, resetH: 50 },
       { name: 'b', used: 0.1, resetH: 60 },
     ], { er });
     const label = JSON.stringify(er);
@@ -1328,7 +1328,7 @@ test('flag off, and preempt off, count nothing and owe nothing', () => {
 // zeroed by an operator editing an unrelated key while watching these numbers.
 test('a config reload retunes the feature without zeroing its counters', () => {
   const am = manager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ]);
   route(am, 's1');
@@ -1527,7 +1527,7 @@ test('a removed account\'s late calls stop naming its neighbour', () => {
 // there were rollovers to move.
 test('a preemption that failed back onto the rolled account is not counted as a move', () => {
   const am = manager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ]);
   assert.equal(route(am, 's1').name, 'a');
@@ -1548,7 +1548,7 @@ test('a preemption that failed back onto the rolled account is not counted as a 
 
 test('preemptions never outrun the rollovers there were to preempt', () => {
   const am = manager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ]);
   route(am, 's1');
@@ -1567,7 +1567,7 @@ test('preemptions never outrun the rollovers there were to preempt', () => {
 // every request a session makes after a rollover.
 test('a rollover a request already moved is not owed while its session is busy', () => {
   const am = manager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ]);
   assert.equal(route(am, 's1').name, 'a');
@@ -1592,7 +1592,7 @@ test('a rollover a request already moved is not owed while its session is busy',
 // THIS pass did, so a pass that came up empty must not leave its answer behind.
 test('viaCurrent answers for the pass that produced the account', () => {
   const am = manager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ], { distribute: false });
   am.setCurrentAccount(0);
@@ -1606,7 +1606,7 @@ test('viaCurrent answers for the pass that produced the account', () => {
 
 test('a manual pin does not settle the current account\'s rollover', () => {
   const am = manager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ], { distribute: false });
   am.setCurrentAccount(0);
@@ -1651,7 +1651,7 @@ test('a pass that came up empty leaves no viaCurrent behind for the next one', (
 // pressure band on. It gates both sticky choices, not just the session pin.
 test('preempt off leaves the current-account walk parked through a rollover', () => {
   const am = manager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ], { er: { enabled: true, preempt: false }, distribute: false });
   am.setCurrentAccount(0);
@@ -1681,7 +1681,7 @@ test('a higher-priority account still preempts a session pin', () => {
 // and an attempt it did move can still fail back — neither is a move.
 test('the current-account walk counts a preemption only once it stuck', () => {
   const am = manager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ], { distribute: false });
   am.setCurrentAccount(0);

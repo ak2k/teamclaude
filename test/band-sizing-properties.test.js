@@ -105,20 +105,37 @@ test('capacity sizing holds its invariants over generated fleets', () => {
     assert.ok(Math.abs(recomputed - decision.achieved) < 1e-9,
       `${where}: achieved ${decision.achieved} but the admitted set sums to ${recomputed}`);
 
-    // Nothing is admitted once the target is met, so the admitted set is
-    // MINIMAL for it. `keep` is emitted in tier order rather than admission
-    // order, so the account to drop is the least-pressure one admitted, not the
-    // last in the array: checking the array's own order would be checking a
-    // different claim and would fail on a fleet whose two orders disagree.
+    // Absence widens the band and never closes it: an account whose headroom
+    // nobody has measured is admitted wherever it sorts, including behind an
+    // account that already covered the target on its own. Ending the admission
+    // loop at coverage dropped exactly those, which is the whole of P1-2.
+    for (const a of tier) {
+      if (headroomOf(a, THRESHOLD).kind !== 'known') {
+        assert.ok(decision.keep.includes(a.index),
+          `${where}: an unmeasured account was sized out, so its quota can never become known`);
+      }
+    }
+
+    // Nothing with a MEASURED headroom is admitted once the target is met, so
+    // the admitted set is minimal for it. Unmeasured accounts are exempt by
+    // construction, per the property above: they are admitted regardless of
+    // where they sort and contribute nothing, so including them here would be
+    // asking whether dropping a zero changes a sum. `keep` is emitted in tier
+    // order rather than admission order, so the account to drop is the
+    // least-pressure one admitted, not the last in the array: checking the
+    // array's own order would be checking a different claim and would fail on a
+    // fleet whose two orders disagree.
     if (decision.achieved >= decision.target) {
-      const byPressureDesc = keptTier.slice().sort((x, y) => {
-        const px = pressureOf(x, now);
-        const py = pressureOf(y, now);
-        const xv = px.kind === 'known' ? px.value : -Infinity;
-        const yv = py.kind === 'known' ? py.value : -Infinity;
-        return yv - xv;
-      });
-      const withoutLast = byPressureDesc.slice(0, -1).reduce((sum, a) => {
+      const measured = keptTier
+        .filter(a => headroomOf(a, THRESHOLD).kind === 'known')
+        .sort((x, y) => {
+          const px = pressureOf(x, now);
+          const py = pressureOf(y, now);
+          const xv = px.kind === 'known' ? px.value : -Infinity;
+          const yv = py.kind === 'known' ? py.value : -Infinity;
+          return yv - xv;
+        });
+      const withoutLast = measured.slice(0, -1).reduce((sum, a) => {
         const h = headroomOf(a, THRESHOLD);
         return sum + (h.kind === 'known' ? h.value : 0);
       }, 0);

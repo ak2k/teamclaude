@@ -87,13 +87,24 @@
  */
 
 /**
+ * Why an account's five-hour capacity cannot be measured. `no-five-hour` is the
+ * account's own signal missing, which is the cold-start state and fixes itself
+ * the first time a window is reported. `no-headroom-scale` is the FLEET's:
+ * a `switchThreshold` that is not a positive finite number leaves no spendable
+ * range to measure against, and no amount of reporting will fix it. They are
+ * separate because one is the ordinary default and the other is a
+ * misconfiguration, and a reader who cannot tell them apart cannot tell whether
+ * to wait or to go and change something.
+ *
+ * @typedef {'no-five-hour' | 'no-headroom-scale'} HeadroomAbsentReason
+ */
+
+/**
  * How much of an account's five-hour capacity is still spendable, as a
- * fraction of the spendable range. Absent when the account has never reported
- * one, which is the cold-start state: a fleet nobody has measured has no
- * capacity signal to size against.
+ * fraction of the spendable range.
  *
  * @typedef {{ kind: 'known', value: number }
- *         | { kind: 'absent', reason: 'no-five-hour' }} Headroom
+ *         | { kind: 'absent', reason: HeadroomAbsentReason }} Headroom
  */
 
 /**
@@ -108,9 +119,15 @@
 /**
  * Why sizing fell back to the tolerance ratio. `no-capacity-signal` is the
  * cold-start and probe-off state and is the one upstream sees by default, so
- * the fallback is the ordinary path rather than an error path.
+ * the fallback is the ordinary path rather than an error path. The other two
+ * are degenerate configuration, and each names which knob: a threshold with no
+ * spendable range, and a coverage target no admitted set can reach. Three
+ * reasons rather than one because `reason` is the single field whose whole job
+ * is to say which state produced the decision, and folding distinct states into
+ * one string is the absence-as-a-coerced-value error committed in the one place
+ * built to prevent it.
  *
- * @typedef {'no-capacity-signal'} FallbackReason
+ * @typedef {'no-capacity-signal' | 'no-headroom-scale' | 'no-coverage-target'} FallbackReason
  */
 
 /**
@@ -176,10 +193,16 @@ export function pressureOf(account, now) {
  * @returns {Headroom}
  */
 export function headroomOf(account, switchThreshold) {
+  // The scale is checked before the account, because it is a property of the
+  // fleet: when it is degenerate EVERY account is unmeasurable, and reporting
+  // that as the account's own missing signal sends the reader looking at the
+  // wrong thing.
+  if (!Number.isFinite(switchThreshold) || switchThreshold <= 0) {
+    return { kind: 'absent', reason: 'no-headroom-scale' };
+  }
   if (account.fiveHour == null || !Number.isFinite(account.fiveHour)) {
     return { kind: 'absent', reason: 'no-five-hour' };
   }
-  if (!(switchThreshold > 0)) return { kind: 'absent', reason: 'no-five-hour' };
   const spendable = (switchThreshold - account.fiveHour) / switchThreshold;
   return { kind: 'known', value: Math.min(1, Math.max(0, spendable)) };
 }
@@ -209,17 +232,36 @@ export function headroomOf(account, switchThreshold) {
  * coverage: capacity that has not been measured cannot be a reason to stop
  * admitting.
  *
+ * @typedef {{ kind: 'sized', keep: number[], achieved: number }
+ *         | { kind: 'fallback', reason: FallbackReason }} SizingOutcome
+ */
+
+/**
  * @param {BandAccount[]} tier
  * @param {Pressure[]} pressures
  * @param {BandSnapshot} snapshot
- * @returns {{ keep: number[], achieved: number } | null}
+ * @returns {SizingOutcome}
  */
 function sizeByCapacity(tier, pressures, snapshot) {
+  // A target that is not a positive finite number cannot be reached by
+  // admitting accounts, and the loop below reads "already covered" for any
+  // value at or below zero — which admits nobody and empties the tier. The
+  // config validator clamps this, but `decideBand` is exported and takes a
+  // plain number, so the precondition has to hold here rather than upstream of
+  // here. Measured before the guard: coverage 0 returned an empty band, and a
+  // non-finite one published `target: null` on the wire.
+  if (!Number.isFinite(snapshot.coverage) || snapshot.coverage <= 0) {
+    return { kind: 'fallback', reason: 'no-coverage-target' };
+  }
+
   const headrooms = tier.map(a => headroomOf(a, snapshot.switchThreshold));
   // Cold start, and the probe-off default: nothing has reported a five-hour
   // level, so there is no capacity to size against and this rule does not run
   // at all. Off until the signal exists, rather than sized against a guess.
-  if (!headrooms.some(h => h.kind === 'known')) return null;
+  if (!headrooms.some(h => h.kind === 'known')) {
+    const scale = headrooms.some(h => h.kind === 'absent' && h.reason === 'no-headroom-scale');
+    return { kind: 'fallback', reason: scale ? 'no-headroom-scale' : 'no-capacity-signal' };
+  }
 
   // Descending pressure, so the most-expiring quota is spent first. Accounts
   // with no comparable pressure sort last but are still admitted, because the
@@ -234,13 +276,24 @@ function sizeByCapacity(tier, pressures, snapshot) {
   const keep = [];
   let achieved = 0;
   for (const entry of order) {
-    if (achieved >= snapshot.coverage) break;
-    keep.push(entry.account.index);
     switch (entry.headroom.kind) {
-      case 'known': achieved += entry.headroom.value; break;
-      // Admitted, but it cannot count toward a target it has not been measured
-      // against. Counting it would let an unmeasured account close the band.
-      case 'absent': break;
+      // Admitted wherever it sorts, and NOT subject to the coverage stop.
+      // Absence may widen the band and must never close it: an account nobody
+      // has measured is admitted because being used is how its capacity becomes
+      // known, and stopping before it would make the unknown permanent. Ending
+      // the loop early instead dropped every unmeasured account that happened
+      // to sort behind one that covered the target alone. It still contributes
+      // nothing to `achieved`, for the same reason it is admitted: capacity
+      // nobody has measured is not capacity.
+      case 'absent':
+        keep.push(entry.account.index);
+        break;
+      case 'known':
+        if (achieved < snapshot.coverage) {
+          keep.push(entry.account.index);
+          achieved += entry.headroom.value;
+        }
+        break;
       default: assertNever(entry.headroom, 'sizeByCapacity');
     }
   }
@@ -248,7 +301,11 @@ function sizeByCapacity(tier, pressures, snapshot) {
   // them: callers break ties by taking the first acceptable candidate, and
   // re-ranking here would move that decision into this function silently.
   const admitted = new Set(keep);
-  return { keep: tier.filter(a => admitted.has(a.index)).map(a => a.index), achieved };
+  return {
+    kind: 'sized',
+    keep: tier.filter(a => admitted.has(a.index)).map(a => a.index),
+    achieved,
+  };
 }
 
 /**
@@ -278,33 +335,48 @@ export function decideBand(snapshot) {
 
   // Capacity first; the ratio is what it degrades to when nothing has reported
   // a five-hour level.
-  const sized = sizeByCapacity(tier, pressures, snapshot);
-  if (sized) {
-    const keep = sized.keep.slice();
-    for (const account of accounts) {
-      if (account.priority !== top) keep.push(account.index);
+  const sizing = sizeByCapacity(tier, pressures, snapshot);
+  switch (sizing.kind) {
+    case 'sized': {
+      const keep = sizing.keep.slice();
+      for (const account of accounts) {
+        if (account.priority !== top) keep.push(account.index);
+      }
+      return { kind: 'sized', keep, target: snapshot.coverage, achieved: sizing.achieved };
     }
-    return { kind: 'sized', keep, target: snapshot.coverage, achieved: sized.achieved };
-  }
-
-  const floor = Math.max(...known) / tolerance;
-  // Surviving members of the top tier first, then every lower tier untouched.
-  // The order is part of the contract, not an accident of the loop: callers
-  // break ties by taking the first acceptable candidate, so emitting these in
-  // the snapshot's order instead would silently re-rank a mixed-priority fleet.
-  const keep = [];
-  for (let i = 0; i < tier.length; i += 1) {
-    const pressure = pressures[i];
-    switch (pressure.kind) {
-      // An unknown account stays in: using it is how its quota is discovered,
-      // and banding it out would make the unknown permanent.
-      case 'absent': keep.push(tier[i].index); break;
-      case 'known': if (pressure.value >= floor) keep.push(tier[i].index); break;
-      default: assertNever(pressure, 'decideBand');
+    case 'fallback': {
+      const maxKnown = Math.max(...known);
+      // A tolerance that is not a positive finite number cannot define a floor,
+      // and one BELOW 1 asks for accounts strictly better than the best there
+      // is. Both empty the tier, which contradicts the invariant this function
+      // documents two paragraphs up. Clamping the floor at the maximum makes
+      // "the maximum always qualifies" true by construction rather than by
+      // trusting the knob: at any tolerance >= 1 the clamp is inert and the
+      // ratio is unchanged. Measured before the guard: tolerance 0.5 on a
+      // two-account fleet kept nothing at all.
+      const ratio = Number.isFinite(tolerance) && tolerance > 0 ? tolerance : 1;
+      const floor = Math.min(maxKnown, maxKnown / ratio);
+      // Surviving members of the top tier first, then every lower tier
+      // untouched. The order is part of the contract, not an accident of the
+      // loop: callers break ties by taking the first acceptable candidate, so
+      // emitting these in the snapshot's order instead would silently re-rank a
+      // mixed-priority fleet.
+      const keep = [];
+      for (let i = 0; i < tier.length; i += 1) {
+        const pressure = pressures[i];
+        switch (pressure.kind) {
+          // An unknown account stays in: using it is how its quota is
+          // discovered, and banding it out would make the unknown permanent.
+          case 'absent': keep.push(tier[i].index); break;
+          case 'known': if (pressure.value >= floor) keep.push(tier[i].index); break;
+          default: assertNever(pressure, 'decideBand');
+        }
+      }
+      for (const account of accounts) {
+        if (account.priority !== top) keep.push(account.index);
+      }
+      return { kind: 'banded', keep, floor, reason: sizing.reason };
     }
+    default: return assertNever(sizing, 'decideBand');
   }
-  for (const account of accounts) {
-    if (account.priority !== top) keep.push(account.index);
-  }
-  return { kind: 'banded', keep, floor, reason: 'no-capacity-signal' };
 }

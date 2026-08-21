@@ -251,3 +251,82 @@ test('an advisor request lands on the executing model\'s family', () => {
     'a bucket the request did not execute on was charged');
   assert.equal(am.sessionTracker.sessions.get(SID).tokens.get(OPUS_BUCKET).cacheRead, 4000);
 });
+
+// ---------------------------------------------------------------------------
+// SPLIT-FAMILY ATTRIBUTION. A session holds one pin per weekly family, and
+// those pins commonly name DIFFERENT accounts: 20.1% of the 1504 sessions in
+// the transcript corpus span more than one family. `loadFor` tested the pin per
+// session and then summed every bucket, so each account the session touched was
+// charged the session's whole context and the pick could not tell them apart.
+// ---------------------------------------------------------------------------
+
+test('a session split across two accounts charges each one only what it served', () => {
+  const now = 1_000_000;
+  const t = new SessionTracker({ now: () => now });
+  t.touch(SID, 0, [OPUS_BUCKET], now);
+  t.touch(SID, 1, [FABLE_BUCKET], now);
+  t.recordTokens(SID, OPUS_BUCKET, startUsage({ cache_read_input_tokens: 100000 }), now);
+  t.recordTokens(SID, FABLE_BUCKET, startUsage({ cache_read_input_tokens: 7000 }), now);
+
+  // The premise: this really is ONE session pinned to two DIFFERENT accounts.
+  // Without it the assertions below hold trivially on a fixture that never
+  // reached the split at all.
+  const pins = t.sessions.get(SID).pins;
+  assert.equal(pins.get(OPUS_BUCKET).idx, 0);
+  assert.equal(pins.get(FABLE_BUCKET).idx, 1);
+  const rest = startUsage().cache_creation_input_tokens + startUsage().input_tokens;
+
+  const a0 = t.loadFor(0, now);
+  const a1 = t.loadFor(1, now);
+  assert.equal(a0.context, 100000 + rest, 'account 0 was charged context it never served');
+  assert.equal(a1.context, 7000 + rest, 'account 1 was charged context it never served');
+  assert.notEqual(a0.context, a1.context, 'both accounts read the same total, so the split was pooled');
+  assert.equal(a0.reports, 1, 'reports must be attributed the same way as the context behind them');
+  assert.equal(a1.reports, 1);
+});
+
+test('a split session still counts as one active session on each account it holds', () => {
+  const now = 1_000_000;
+  const t = new SessionTracker({ now: () => now });
+  t.touch(SID, 0, [OPUS_BUCKET], now);
+  t.touch(SID, 1, [FABLE_BUCKET], now);
+  // Cardinality is a property of the relationship, not of the spend: the
+  // session genuinely is live on both accounts, so both see one. Only the token
+  // quantities are divided, and this pins that the fix did not divide both.
+  assert.equal(t.loadFor(0, now).sessions, 1);
+  assert.equal(t.loadFor(1, now).sessions, 1);
+});
+
+test('the consolidated walk agrees with the count it replaced, on every account', () => {
+  const now = 1_000_000;
+  const t = new SessionTracker({ now: () => now });
+  t.touch('s1', 0, [OPUS_BUCKET], now);
+  t.touch('s1', 1, [FABLE_BUCKET], now);
+  t.touch('s2', 0, [OPUS_BUCKET, FABLE_BUCKET], now);
+  t.touch('s3', 2, [OPUS_BUCKET], now);
+  // `activeCountFor` is the public API the session term used before the three
+  // walks were folded into one. The folded walk now derives its count from a
+  // per-PIN test where that one tests the session, so the two agreeing is a
+  // real claim rather than a restatement.
+  for (const idx of [0, 1, 2, 3]) {
+    assert.equal(t.loadFor(idx, now).sessions, t.activeCountFor(idx, now),
+      `account ${idx}: the folded walk and activeCountFor disagree`);
+  }
+});
+
+test('a bucket whose pin has gone stale stops counting, and takes its context with it', () => {
+  const now = 1_000_000;
+  const t = new SessionTracker({ now: () => now, activeTtlMs: 60_000 });
+  // Both buckets are on the SAME account, so the session-level pin test cannot
+  // separate them: only the per-pin test can drop the hour-cold one.
+  t.touch(SID, 0, [FABLE_BUCKET], now - 3_600_000);
+  t.recordTokens(SID, FABLE_BUCKET, startUsage({ cache_read_input_tokens: 90000 }), now - 3_600_000);
+  t.touch(SID, 0, [OPUS_BUCKET], now);
+  t.recordTokens(SID, OPUS_BUCKET, startUsage({ cache_read_input_tokens: 1000 }), now);
+
+  const measured = t.loadFor(0, now);
+  assert.equal(measured.sessions, 1, 'the session is still active through its fresh Opus pin');
+  assert.ok(measured.context < 90000,
+    'an hour-cold Fable context is still counted as load the account is carrying now');
+  assert.equal(measured.reports, 1, 'the stale bucket\'s report is still being counted');
+});

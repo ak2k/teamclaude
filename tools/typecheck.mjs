@@ -16,8 +16,23 @@
 // directory.
 //
 // The compiler lives in tools/typecheck/ with its own lockfile so the runtime
-// dependency set of the shipped package is untouched. It is excluded from the
-// carried patch.
+// dependency set of the shipped package is untouched.
+//
+// WHERE THIS RUNS, AND WHERE IT DOES NOT. `npm run typecheck`, `npm run check`,
+// and a CI step on the node-24 leg. It does NOT travel with the carried patch:
+// that patch covers src/, test/, docs/ and eslint.config.js, and neither
+// tools/ nor .github/ nor package.json is in it. So this gates development of
+// the branch and not the patched build. Making it travel means either adding
+// tools/ to the patch surface or expressing it as a `checks.<system>.*`
+// derivation in the consuming flake, which is a scope call rather than an
+// oversight.
+//
+// SCOPE IS TWO FILES, AND account-manager.js CANNOT JOIN THEM CHEAPLY. Adding
+// it produces 488 errors, 316 of which are implicit-any parameters: a typing
+// project, not a gate. That leaves its apply sites uncovered here, which is a
+// real gap and the reason an unhandled `sized` variant once reached runtime
+// with ten green unit tables. The seam table covers those sites instead, and
+// that is the instrument that caught it.
 //
 // Usage: node tools/typecheck.mjs [--repo=<checkout>]
 // Exits 0 clean, 1 on a type error, 2 when the check could not be performed.

@@ -94,7 +94,14 @@ const FORWARD_AWAIT = '        await forwardRequest(req, res, body, accountManag
 const REC_STREAM = '      accountManager.recordTokenUsage(accountIndex, sessionId, model, merged);';
 const REC_BODY = '      accountManager.recordTokenUsage(accountIndex, sessionId, model, json.usage);';
 const BAND_APPLY = '    const decision = decideBand(this._bandSnapshot(candidates, model, Date.now()));\n';
-const SIZED_BRANCH = '  const sized = sizeByCapacity(tier, pressures, snapshot);\n';
+const SIZED_BRANCH = '  const sizing = sizeByCapacity(tier, pressures, snapshot);\n';
+const COVERAGE_STOP = '        if (achieved < snapshot.coverage) {\n';
+const ABSENT_ADMIT = '      case \'absent\':\n        keep.push(entry.account.index);\n        break;\n';
+const PICK_PRESSURE = '          pressure: pressures[i],\n';
+const PICK_PRESSURE_TERM = '  { term: \'pressure\', of: a => pressureRank(a.pressure) },\n';
+const BEST_PRESSURE = '          || (priority === bestPriority && pressure < bestPressure)\n';
+const PRESSURE_OFF = '      return candidates.map(() => ({ kind: \'absent\', reason: \'expiry-routing-off\' }));\n';
+const LOAD_BUCKET = '        const t = s.tokens?.get(bucket);\n';
 const PICK_APPLY = '    const decision = decidePick(this._pickSnapshot(candidates, model, now));\n';
 const PICK_LOAD = '          load: measured.context,\n';
 const PICK_OBSERVED = '          observed: measured.reports,\n';
@@ -198,8 +205,18 @@ const M = [
   // The capacity rule never runs and every fleet degrades to the ratio. This is
   // the fallback path made universal, so it is exactly what a build that
   // silently lost the five-hour signal would do.
-  ['bandDecision      capacity rule never runs', SIZED_BRANCH, '  const sized = null;\n',
+  ['bandDecision      capacity rule never runs', SIZED_BRANCH,
+    '  const sizing = { kind: \'fallback\', reason: \'no-capacity-signal\' };\n',
     'src/band-decision.js'],
+  // Absence closes the band again: the unmeasured account is only admitted
+  // while the target is unmet, which is the P1-2 defect exactly.
+  ['bandDecision      absence stops widening the band', ABSENT_ADMIT,
+    '      case \'absent\':\n        if (achieved < snapshot.coverage) keep.push(entry.account.index);\n'
+    + '        break;\n', 'src/band-decision.js'],
+  // The coverage stop never fires, so the band admits the whole tier every
+  // time. Sizing stops being a size and the widening is unbounded.
+  ['bandDecision      coverage never stops admission', COVERAGE_STOP,
+    '        if (true) {\n', 'src/band-decision.js'],
   // The five-hour level is never read, so no account ever has measurable
   // capacity and cold start becomes permanent.
   ['bandDecision      five-hour never read', FIVE_HOUR_READ,
@@ -218,6 +235,30 @@ const M = [
   // reverts to counting sessions with every gate still green.
   ['pickDecision      arrival signal never read', PICK_OBSERVED, '          observed: 0,\n',
     'src/account-manager.js'],
+  // The expiry-pressure tiebreak. Four rows, because it reaches selection by
+  // four separable steps and severing any one of them silently restores the
+  // reset-timestamp proxy: the snapshot field, the term that ranks it, the
+  // distribute-off loop that ranks it separately, and the off switch that has
+  // to make it inert rather than merely small.
+  ['pickDecision      pressure never reaches the snapshot', PICK_PRESSURE,
+    '          pressure: { kind: \'absent\', reason: \'expiry-routing-off\' },\n',
+    'src/account-manager.js'],
+  ['pickDecision      pressure term never ranks', PICK_PRESSURE_TERM, '',
+    'src/pick-decision.js'],
+  ['pickDecision      distribute-off ignores pressure', BEST_PRESSURE, '',
+    'src/account-manager.js'],
+  // The off switch stops being off: the disabled path starts consulting a
+  // pressure the operator asked it not to, which is the flag-off equivalence
+  // claim broken from the inside.
+  ['pickDecision      disabled path consults pressure anyway', PRESSURE_OFF, '',
+    'src/account-manager.js'],
+  // Per-bucket load attribution. Restoring the session-level sum charges every
+  // account a split session touches with the session's whole context.
+  ['loadFor           split session pooled across accounts', LOAD_BUCKET,
+    '        const t = [...(s.tokens?.values() || [])].reduce((acc, x) =>\n'
+    + '          ({ context: acc.context + x.context, reports: acc.reports + x.reports }),\n'
+    + '          { context: 0, reports: 0 });\n',
+    'src/session-tracker.js'],
 
   ['recordTokenUsage  merge drops message_start', MERGE_START, ''],
   ['recordTokenUsage  merge drops message_delta', MERGE_DELTA, ''],

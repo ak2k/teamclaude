@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AccountManager } from '../src/account-manager.js';
-import { decidePick, decidingTerms } from '../src/pick-decision.js';
+import { decidePick, decidingTerms, pressureRank } from '../src/pick-decision.js';
 
 // The load weight: selection ranked by what accounts are measurably carrying
 // rather than by how many sessions each holds.
@@ -260,6 +260,9 @@ function rng(seed) {
   };
 }
 
+/** No expiry pressure at all, which is what the disabled path supplies. */
+const OFF = { kind: 'absent', reason: 'expiry-routing-off' };
+
 /** The pre-weight chain, verbatim: priority, then sessions, then in-flight, then reset. */
 function referencePick(accounts) {
   let best = null;
@@ -275,7 +278,7 @@ function referencePick(accounts) {
   return best ? best.index : null;
 }
 
-test('with nothing measured the weight is exactly the rule it replaced', () => {
+test('with nothing measured and no pressure consulted, the chain is exactly the rule it replaced', () => {
   const rand = rng(20260821);
   let compared = 0;
   let discriminated = 0;
@@ -289,6 +292,11 @@ test('with nothing measured the weight is exactly the rule it replaced', () => {
         load: 0,                                   // the cold-start fleet
         sessions: Math.floor(rand() * 4),
         inFlight: Math.floor(rand() * 3),
+        // Absent for every account, which is both the cold-start fleet and the
+        // disabled path. Two inert terms rather than one, and the claim is the
+        // same for both: an absent signal cannot discriminate, so the chain
+        // reduces to what it was before either term existed.
+        pressure: rand() < 0.5 ? OFF : { kind: 'absent', reason: 'no-utilization' },
         reset: rand() < 0.2 ? -Infinity : Math.floor(rand() * 1e6),
       });
     }
@@ -296,6 +304,8 @@ test('with nothing measured the weight is exactly the rule it replaced', () => {
     assert.equal(decision.kind, 'picked');
     assert.equal(decision.index, referencePick(accounts), `trial ${trial}`);
     assert.notEqual(decision.by, 'load', `trial ${trial}: load decided on an unmeasured fleet`);
+    assert.notEqual(decision.by, 'pressure',
+      `trial ${trial}: pressure decided on a fleet where every account's is absent`);
     compared += 1;
     if (decision.by !== 'first') discriminated += 1;
   }
@@ -307,6 +317,7 @@ test('with nothing measured the weight is exactly the rule it replaced', () => {
 test('the winner is lexicographically minimal over every term', () => {
   const rand = rng(987654321);
   let loadDecided = 0;
+  let pressureCompared = 0;
   for (let trial = 0; trial < 5000; trial += 1) {
     const n = 1 + Math.floor(rand() * 5);
     const accounts = [];
@@ -314,14 +325,21 @@ test('the winner is lexicographically minimal over every term', () => {
       accounts.push({
         index: i,
         priority: rand() < 0.25 ? 100 : 0,
-        load: rand() < 0.3 ? 0 : Math.floor(rand() * 1e6),
-        sessions: Math.floor(rand() * 4),
-        inFlight: Math.floor(rand() * 3),
+        // Coarse on purpose. Drawn from a wide continuous range, `load` alone
+        // decides almost every fleet and the terms behind it are never reached:
+        // this generator produced 5000 winners and let pressure decide 10 of
+        // them, which is a minimality claim about a term the run barely
+        // evaluated.
+        load: rand() < 0.6 ? 0 : Math.floor(rand() * 2) * 1000,
+        sessions: rand() < 0.6 ? 0 : 1,
+        inFlight: rand() < 0.8 ? 0 : 1,
+        pressure: rand() < 0.2 ? OFF : { kind: 'known', value: Math.floor(rand() * 4) * 1e-6 },
         reset: Math.floor(rand() * 1e6),
       });
     }
     const decision = decidePick({ accounts });
-    const key = a => [a.priority, a.load, a.sessions, a.inFlight, a.reset];
+    const key = a => [a.priority, a.load, a.sessions, a.inFlight, pressureRank(a.pressure), a.reset];
+    const PRESSURE_SLOT = 4;
     const winner = accounts.find(a => a.index === decision.index);
     for (const other of accounts) {
       const w = key(winner);
@@ -329,8 +347,160 @@ test('the winner is lexicographically minimal over every term', () => {
       const at = w.findIndex((v, i) => v !== o[i]);
       assert.ok(at === -1 || w[at] < o[at],
         `trial ${trial}: account ${other.index} beats the winner at term ${at}`);
+      // Count the comparisons that actually reached the pressure slot. `by` is
+      // the wrong statistic for this: it names the first term that
+      // discriminates against the FIELD, so a fleet with any priority spread
+      // reports `priority` however deep the winner was really decided, and the
+      // slot below can go unchecked while the count looks healthy.
+      if (at === PRESSURE_SLOT) pressureCompared += 1;
     }
     if (decision.by === 'load') loadDecided += 1;
   }
   assert.ok(loadDecided > 500, `load decided only ${loadDecided} times, so the term is barely exercised`);
+  assert.ok(pressureCompared > 500,
+    `only ${pressureCompared} comparisons reached the pressure slot, so its position in the key is untested`);
+});
+
+// The briefed invariant, stated as it was briefed: within any band, the pick
+// must never prefer a strictly-lower-pressure member on account of an earlier
+// reset timestamp. An exact pressure tie may keep the existing reset tiebreak.
+//
+// Scoped to the accounts that TIE the winner on every term above pressure,
+// because those are the only ones the reset tiebreak could have decided
+// against. A lower-pressure account that wins on load wins for a reason this
+// invariant says nothing about.
+test('the pick never prefers a strictly lower pressure member on an earlier reset', () => {
+  const rand = rng(20260821);
+  let contested = 0;
+  for (let trial = 0; trial < 5000; trial += 1) {
+    const n = 2 + Math.floor(rand() * 4);
+    const accounts = [];
+    for (let i = 0; i < n; i += 1) {
+      accounts.push({
+        index: i,
+        priority: 0,
+        // Ties are common on purpose: this invariant only has teeth where the
+        // terms above pressure fail to discriminate.
+        load: rand() < 0.6 ? 0 : Math.floor(rand() * 3) * 1000,
+        sessions: rand() < 0.6 ? 0 : Math.floor(rand() * 3),
+        inFlight: 0,
+        pressure: rand() < 0.15 ? OFF : { kind: 'known', value: rand() * 1e-5 },
+        reset: Math.floor(rand() * 1e6),
+      });
+    }
+    const decision = decidePick({ accounts });
+    const winner = accounts.find(a => a.index === decision.index);
+    const above = a => [a.priority, a.load, a.sessions, a.inFlight].join('|');
+    for (const other of accounts) {
+      if (other.index === winner.index || above(other) !== above(winner)) continue;
+      contested += 1;
+      const wp = winner.pressure;
+      const op = other.pressure;
+      if (wp.kind === 'known' && op.kind === 'known') {
+        assert.ok(wp.value >= op.value,
+          `trial ${trial}: won with pressure ${wp.value} over ${op.value}, on the reset alone`);
+      }
+    }
+  }
+  assert.ok(contested > 2000,
+    `only ${contested} pairs tied above pressure, so the invariant was barely tested`);
+});
+
+// ---------------------------------------------------------------------------
+// THE MEASURED CELL, through the real manager rather than the pure function.
+//
+// Two accounts, same priority, both with a five-hour level such that neither
+// covers a coverage target of 1 alone — which is what makes capacity sizing
+// widen the band to both. Once it does, the reset tiebreak picks the account
+// that is nearly drained but resets sooner, over one holding 3.2x the expiring
+// quota. The tolerance ratio used to hide this by banding the low-pressure
+// member out before the pick ever saw it, so sizing the band is what exposed
+// the tiebreak rather than what broke it.
+//
+// Note for anyone reading the evidence: the flag-off differential is silent
+// about this cell by construction. It is a claim about the DISABLED path, and
+// this changes selection with expiry routing ON.
+// ---------------------------------------------------------------------------
+
+const HOUR = 3600e3;
+
+function contestedFleet(extra = {}) {
+  const now = Date.now();
+  const specs = [
+    { name: 'drained-resets-soon', quota: { unified7d: 0.97, unified7dReset: now + 1 * HOUR, unified5h: 0.5 } },
+    { name: 'fresh-resets-later', quota: { unified7d: 0.05, unified7dReset: now + 10 * HOUR, unified5h: 0.5 } },
+  ];
+  const am = new AccountManager(specs.map(s => ({ ...acct(s.name) })), 0.98,
+    { expiryRouting: { enabled: true, tolerance: 1.5 }, ...extra });
+  specs.forEach((s, i) => { am.accounts[i].quota = { ...am.accounts[i].quota, ...s.quota }; });
+  return am;
+}
+
+test('inside a capacity-widened band the pick takes the expiring quota, not the earlier reset', () => {
+  const am = contestedFleet();
+  const now = Date.now();
+
+  // Premises. Each one is a way this fixture could fail to reach the defect
+  // while still passing: a band that never widened, a pressure ordering that
+  // agreed with the reset ordering anyway, or a target one account covered.
+  const snapshot = am._bandSnapshot(am.accounts, OPUS, now);
+  const [pA, pB] = am._pickPressures(am.accounts, OPUS, now);
+  assert.equal(pA.kind, 'known');
+  assert.equal(pB.kind, 'known');
+  assert.ok(pB.value > pA.value, 'the fresher account does not hold more expiring quota');
+  assert.ok(snapshot.accounts[0].resetAt < snapshot.accounts[1].resetAt,
+    'the two orderings agree, so this fixture cannot tell them apart');
+  const band = am._bandedCandidates(null, OPUS);
+  assert.deepEqual(band.map(a => a.name), ['drained-resets-soon', 'fresh-resets-later'],
+    'the band did not widen to both, so no low-pressure member is admitted to prefer');
+
+  assert.equal(am._pickBestAvailable(null, OPUS).name, 'fresh-resets-later',
+    'expiry on, distribute off: took the earlier reset over 3.2x the expiring quota');
+});
+
+test('the same inversion through the distributing path, once the load terms tie', () => {
+  const am = contestedFleet({ distributeSessions: true });
+  // No sessions recorded, so load, sessions and in-flight are all equal and the
+  // decision falls through to the terms this is about.
+  const decision = pick(am);
+  assert.equal(decision.by, 'pressure',
+    'something above pressure discriminated, so the tiebreak was never reached');
+  assert.equal(am.accounts[decision.index].name, 'fresh-resets-later');
+});
+
+// Driven through `decidePick` rather than the manager, and that is forced
+// rather than convenient. Pressure is headroom over time REMAINING, so two
+// accounts whose pressures are equal at one instant stop being equal at the
+// next unless their reset and utilization are both identical — in which case
+// the reset term has nothing to discriminate on either, and the fixture cannot
+// state the claim. A manager-driven version of this test passes by having the
+// later-resetting account win on pressure, which is the opposite of what it
+// says it is checking.
+test('an exact pressure tie still falls through to the soonest reset', () => {
+  const tied = value => [
+    { index: 0, priority: 0, load: 0, observed: 0, sessions: 0, inFlight: 0,
+      pressure: { kind: 'known', value }, reset: 10_000 },
+    { index: 1, priority: 0, load: 0, observed: 0, sessions: 0, inFlight: 0,
+      pressure: { kind: 'known', value }, reset: 5_000 },
+  ];
+  const decision = decidePick({ accounts: tied(1.3889e-5) });
+  assert.equal(decision.index, 1, 'an exact pressure tie must keep the existing reset tiebreak');
+  assert.equal(decision.by, 'reset', 'pressure discriminated on a fleet where it is equal');
+
+  // And absence ties the same way, which is what makes the disabled path fall
+  // through to exactly the rule that preceded this term.
+  const off = tied(0).map(a => ({ ...a, pressure: OFF }));
+  assert.equal(decidePick({ accounts: off }).index, 1);
+});
+
+test('with expiry routing off, no account has a pressure to rank on', () => {
+  const am = contestedFleet({ expiryRouting: { enabled: false } });
+  const pressures = am._pickPressures(am.accounts, OPUS, Date.now());
+  for (const p of pressures) {
+    assert.deepEqual(p, { kind: 'absent', reason: 'expiry-routing-off' },
+      'the disabled path is consulting a pressure it was told not to');
+  }
+  // Inert rather than special-cased: every account ranks equal, so the reset
+  // tiebreak decides exactly as it did before the term existed.
+  assert.equal(am._pickBestAvailable(null, OPUS).name, 'drained-resets-soon');
 });

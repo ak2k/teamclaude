@@ -328,19 +328,35 @@ export class SessionTracker {
     }
   }
 
-  // Does this session count as load on `accountIndex` right now? A pin counts
-  // while the bucket it belongs to was served within the active window — a
-  // session that took one diverted Fable request an hour ago is not load on
-  // that account for the rest of the hour, and counting it there skews the
-  // spreading signal the whole feature exists to provide. A request in flight
-  // keeps the pin it is spending counted however long it streams, which is the
-  // freshest one: a 5-minute completion must not drop out of "active".
-  _pinsInclude(s, accountIndex, now) {
+  // The instant of the pin a still-streaming request is spending, or -Infinity
+  // when nothing is in flight. Hoisted out of the per-pin test below so that
+  // asking about one pin at a time does not rescan every pin to find it.
+  _newestPinAt(s) {
     let newest = -Infinity;
     if (s.inFlight > 0) for (const pin of s.pins.values()) newest = Math.max(newest, pin.at);
+    return newest;
+  }
+
+  // Does THIS pin count as load on `accountIndex` right now? A pin counts while
+  // the bucket it belongs to was served within the active window — a session
+  // that took one diverted Fable request an hour ago is not load on that account
+  // for the rest of the hour, and counting it there skews the spreading signal
+  // the whole feature exists to provide. A request in flight keeps the pin it is
+  // spending counted however long it streams, which is the freshest one: a
+  // 5-minute completion must not drop out of "active".
+  //
+  // Per PIN rather than per session, because the two questions have different
+  // answers: a session is load on every account it is currently spending, while
+  // each bucket's tokens were spent on exactly one of them.
+  _pinCounts(pin, accountIndex, now, newest) {
+    if (pin.idx !== accountIndex) return false;
+    return now - pin.at <= this.activeTtlMs || pin.at === newest;
+  }
+
+  _pinsInclude(s, accountIndex, now) {
+    const newest = this._newestPinAt(s);
     for (const pin of s.pins.values()) {
-      if (pin.idx !== accountIndex) continue;
-      if (now - pin.at <= this.activeTtlMs || pin.at === newest) return true;
+      if (this._pinCounts(pin, accountIndex, now, newest)) return true;
     }
     return false;
   }
@@ -380,9 +396,21 @@ export class SessionTracker {
   // serve; its lifetime total is a fact about its past and would rank a long
   // quiet session above a young heavy one.
   //
-  // POOLED ACROSS FAMILIES, deliberately. The rate ceiling an account can hit
-  // is its five-hour bucket, and that bucket is shared by every family, so load
-  // measured against it cannot be split by family either.
+  // POOLED ACROSS FAMILIES ON THIS ACCOUNT, AND SPLIT BY ACCOUNT. The rate
+  // ceiling an account can hit is its five-hour bucket, and that bucket is
+  // shared by every family, so load on ONE account is not divided by family.
+  // It is emphatically divided by account: a session spanning two families
+  // holds a separate pin per family, commonly on two different accounts, and
+  // each bucket's tokens were spent on whichever account served that bucket.
+  // Testing the pin per session and then summing every bucket charged the whole
+  // context to both — two accounts carrying 100000 and 7000 each read 107000
+  // and the pick could not tell them apart. That is not an edge case: 20.1% of
+  // the 1504 sessions in the transcript corpus span more than one family.
+  //
+  // The count is deliberately NOT divided the same way. A split session is
+  // genuinely active on both accounts, so it counts once on each; its tokens
+  // were spent once, on one of them. Cardinality is a property of the
+  // relationship, quantity is a property of the transaction.
   //
   // WHY `reports` COMES BACK TOO. `context` of 0 is enormously plausible: an
   // idle session legitimately has none. So if the token read were ever lost,
@@ -401,12 +429,18 @@ export class SessionTracker {
     let context = 0;
     let reports = 0;
     for (const s of this.sessions.values()) {
-      if (!this._isActive(s, now) || !this._pinsInclude(s, accountIndex, now)) continue;
-      sessions += 1;
-      for (const t of s.tokens?.values() || []) {
+      if (!this._isActive(s, now)) continue;
+      const newest = this._newestPinAt(s);
+      let counted = false;
+      for (const [bucket, pin] of s.pins) {
+        if (!this._pinCounts(pin, accountIndex, now, newest)) continue;
+        counted = true;
+        const t = s.tokens?.get(bucket);
+        if (!t) continue;
         context += t.context;
         reports += t.reports;
       }
+      if (counted) sessions += 1;
     }
     return { sessions, context, reports };
   }

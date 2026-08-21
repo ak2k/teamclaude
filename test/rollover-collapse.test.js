@@ -31,7 +31,7 @@ const SONNET_BUCKET = 'unified7dSonnet';
 
 test('settling a collapsed bucket does not settle the one it shares a window with', () => {
   const am = collapsingManager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ]);
   // An advisor request runs both families on one account, so both buckets pin
@@ -50,7 +50,7 @@ test('settling a collapsed bucket does not settle the one it shares a window wit
 
 test('settling the shared bucket does not settle the family bucket collapsed onto it', () => {
   const am = collapsingManager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ]);
   assert.equal(route(am, 's1', OPUS, FABLE).name, 'a');
@@ -62,7 +62,7 @@ test('settling the shared bucket does not settle the family bucket collapsed ont
 
 test('a third bucket collapsed onto the same window is not settled either', () => {
   const am = collapsingManager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ]);
   // Sonnet is the live fleet's own case: every account reports unified7dSonnet
@@ -124,7 +124,7 @@ const advisorRequest = (executor, advisor) => ({
 
 test('a session whose buckets collapse is moved off the rolled account on every family', async () => {
   const am = collapsingManager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ]);
   assertCollapses(am);
@@ -245,7 +245,7 @@ test('the stuck-rollover throttle follows an account through a removal', () => {
 
 test('the current-account walk settles a collapsed bucket under that bucket', () => {
   const am = collapsingManager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ], { distribute: false });
   assertCollapses(am);
@@ -273,7 +273,7 @@ test('the current-account walk settles a collapsed bucket under that bucket', ()
 
 test('a collapsed bucket settling does not swallow the shared bucket\'s roll on the current account', () => {
   const am = collapsingManager([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ], { distribute: false });
   am.setCurrentAccount(0);

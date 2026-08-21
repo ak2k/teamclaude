@@ -50,8 +50,25 @@ import { assertNever } from './band-decision.js';
  *   observed: number,
  *   sessions: number,
  *   inFlight: number,
+ *   pressure: PickPressure,
  *   reset: number,
  * }} PickAccount
+ */
+
+/**
+ * Why an account has no expiry pressure to rank on. The first three are the
+ * band's own `AbsentReason` — a window nobody has reported. The fourth is the
+ * operator having switched expiry routing off, which is not a missing
+ * measurement but a decision not to consult one, and folding it into the others
+ * would say the fleet is waiting for a signal that is never being asked for.
+ * Both make the term inert; only the reason tells them apart.
+ *
+ * @typedef {import('./band-decision.js').AbsentReason | 'expiry-routing-off'} PickPressureAbsentReason
+ */
+
+/**
+ * @typedef {{ kind: 'known', value: number }
+ *         | { kind: 'absent', reason: PickPressureAbsentReason }} PickPressure
  */
 
 /**
@@ -63,7 +80,7 @@ import { assertNever } from './band-decision.js';
  * cold-start claim checkable from outside: on an unmeasured fleet it can never
  * be `load`, and a test can say so rather than trusting the comment above.
  *
- * @typedef {'priority' | 'load' | 'sessions' | 'in-flight' | 'reset' | 'first'} PickTerm
+ * @typedef {'priority' | 'load' | 'sessions' | 'in-flight' | 'pressure' | 'reset' | 'first'} PickTerm
  */
 
 /**
@@ -72,9 +89,43 @@ import { assertNever } from './band-decision.js';
  */
 
 /**
+ * Descending pressure as an ascending rank, so every term in the list still
+ * reads "lower wins".
+ *
+ * Absence ranks FIRST, which is the bias this codebase already applies to an
+ * unreported window on the `reset` term below: an account nothing is known
+ * about gets used, because being used is how it becomes known. That is not a
+ * claim it has high pressure. When EVERY account is absent — expiry routing
+ * off, or a fleet nobody has measured — they all rank equal, the term cannot
+ * discriminate, and the terms below decide exactly as they did before this one
+ * existed. That is what keeps the disabled path byte-identical rather than
+ * merely similar.
+ *
+ * @param {PickPressure} pressure
+ * @returns {number}
+ */
+export function pressureRank(pressure) {
+  switch (pressure.kind) {
+    case 'known': return -pressure.value;
+    case 'absent': return -Infinity;
+    default: return assertNever(pressure, 'pressureRank');
+  }
+}
+
+/**
  * The ordered comparison. Lower wins on every term, which is why `reset` is a
  * timestamp rather than a duration: the soonest-resetting account is the one
  * whose quota is closest to expiring unspent.
+ *
+ * WHY PRESSURE SITS AHEAD OF RESET. An earlier reset is a proxy for expiring
+ * quota and it is only a good one at equal headroom, where the two agree
+ * exactly — soonest reset IS highest pressure. Where headroom differs they come
+ * apart, and the proxy loses: a nearly-drained account resetting in an hour
+ * beat one holding 20x the quota that expires in ten, purely on the timestamp.
+ * The tolerance ratio used to hide this by banding such an account out, so
+ * sizing the band for parallel capacity is what exposed it. Pressure therefore
+ * generalises the reset tiebreak rather than reversing it, and `reset` stays
+ * behind it to settle exact pressure ties.
  *
  * @type {{ term: PickTerm, of: (a: PickAccount) => number }[]}
  */
@@ -84,6 +135,7 @@ const TERMS = [
   { term: 'load', of: a => a.load },
   { term: 'sessions', of: a => a.sessions },
   { term: 'in-flight', of: a => a.inFlight },
+  { term: 'pressure', of: a => pressureRank(a.pressure) },
   { term: 'reset', of: a => a.reset },
 ];
 

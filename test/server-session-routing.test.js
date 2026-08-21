@@ -152,7 +152,7 @@ test('an advisor request pins both families to the account that served it', asyn
 // nothing, so the next request preempts again.
 test('a rollover settles once the client\'s response came off the rolled account', async () => {
   const am = fleet([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ]);
   const upstream = scriptedUpstream();
@@ -174,7 +174,7 @@ test('a rollover settles once the client\'s response came off the rolled account
 
 test('a rollover the client\'s response came back onto is not settled', async () => {
   const am = fleet([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ]);
   // 'b' refuses the credential, so the preempted attempt fails over back to 'a'
@@ -234,7 +234,7 @@ test('a session is held in flight for the duration of its request', async () => 
 // Only the in-flight hold can tell the settlement to wait for that.
 test('an overlapping sibling does not settle a rollover the session fails back onto', async () => {
   const am = fleet([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ]);
   let releaseSlow;
@@ -325,7 +325,7 @@ test('a degraded advisor request does not pin the family it never served', async
 // settles that event; the previous test's session traffic must not.
 test('a session-less request settles the current account\'s rollover', async () => {
   const am = fleet([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ]);
   const upstream = scriptedUpstream();
@@ -345,7 +345,7 @@ test('a session-less request settles the current account\'s rollover', async () 
 
 test('a session\'s request does not settle the current account\'s rollover', async () => {
   const am = fleet([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ]);
   // Every account is out of Opus band once 'a' rolls except 'b', so the session
@@ -450,7 +450,7 @@ test('an advisor request settles the advisor family\'s rollover', async () => {
 // attempt that is re-routed and then fails back has moved nothing.
 test('a current-account attempt that failed back does not settle its rollover', async () => {
   const am = fleet([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ]);
   // 'b' refuses the credential the first time it is tried, so the preempted
@@ -557,7 +557,7 @@ test('a thrown request leaves no session immortal, always-active or unevictable'
 // released is also a rollover that never settles.
 test('a thrown request does not strand the session\'s pending rollover', async () => {
   const am = fleet([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ]);
   const upstream = scriptedUpstream();
@@ -586,7 +586,7 @@ test('a thrown request does not strand the session\'s pending rollover', async (
 // account that just gained a full week.
 test('a /tc-acct/ pinned request does not settle the current account\'s rollover', async () => {
   const am = fleet([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ]);
   const upstream = scriptedUpstream();
@@ -668,7 +668,7 @@ test('a fleet answering 403 is tried once per account, then reported', async () 
 // session id can fail this: with no session, there is no `served` record at all.
 test('the confirmation names the session whose rollover it settles', async () => {
   const am = fleet([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
     { name: 'c', used: 0.1, resetH: 400 },
   ]);
@@ -693,7 +693,7 @@ test('the confirmation names the session whose rollover it settles', async () =>
 // positive half of the pair — it says what the right answer looks like.
 test('the confirmation names the account that served, not the fleet\'s current one', async () => {
   const am = fleet([
-    { name: 'a', used: 0.5, resetH: 50 },
+    { name: 'a', used: 0.1, resetH: 50 },
     { name: 'b', used: 0.1, resetH: 60 },
   ]);
   const upstream = scriptedUpstream();

@@ -220,3 +220,121 @@ test('capacity sizing changes which account real selection returns', () => {
   assert.equal(loaded.getActiveAccount(null, OPUS, null, 's2').name, 'spare',
     'selection ignored the widened band: the second session should spread onto it');
 });
+
+// ---------------------------------------------------------------------------
+// ABSENCE MAY WIDEN THE BAND AND MUST NEVER CLOSE IT. The admission loop
+// stopped as soon as coverage was met, which dropped every unmeasured account
+// that happened to sort behind one covering the target alone — the one class of
+// account the band exists to keep in, since being used is how its quota becomes
+// known.
+// ---------------------------------------------------------------------------
+
+test('an unmeasured account sorted behind a covering one is still admitted', () => {
+  const am = managerWith([
+    // Highest pressure and a wholly unspent five-hour bucket: covers alone.
+    acct('covers-alone', { quota: { ...weekly(0.1, 1), unified5h: 0 } }),
+    // Lower pressure, so it sorts LAST, and no five-hour level ever reported.
+    acct('never-reported', { quota: weekly(0.9, 10) }),
+  ]);
+
+  // Three premises, because the first two fixtures written for this reached
+  // `passthrough` and sorted the unknown account FIRST — the case that already
+  // worked. Either would have read as "not reproduced".
+  const decision = decide(am);
+  assert.equal(decision.kind, 'sized', 'never reached the capacity path');
+  const snap = am._bandSnapshot(am.accounts, OPUS, Date.now());
+  assert.equal(headroomOf(snap.accounts[0], am.switchThreshold).kind, 'known');
+  assert.equal(headroomOf(snap.accounts[1], am.switchThreshold).kind, 'absent',
+    'the second account has a measurable headroom, so nothing here is unmeasured');
+  assert.ok(decision.achieved >= decision.target,
+    'the target was not met, so nothing would have stopped the loop anyway');
+
+  assert.ok(decision.keep.includes(1),
+    'the unmeasured account was sized out, so its capacity can never become known');
+  assert.equal(decision.achieved, 1,
+    'the unmeasured account counted toward coverage, which lets it close the band');
+});
+
+test('an unmeasured account admitted this way still cannot close the band', () => {
+  // Same shape, but the measured account no longer covers alone. The unknown
+  // one is admitted first on pressure and must not stop the loop reaching the
+  // measured account behind it.
+  const am = managerWith([
+    acct('never-reported', { quota: weekly(0.1, 1) }),
+    acct('measured', { quota: { ...weekly(0.5, 1), unified5h: 0.5 } }),
+  ]);
+  const decision = decide(am);
+  assert.equal(decision.kind, 'sized');
+  assert.deepEqual(decision.keep, [0, 1], 'the unmeasured account closed the band on its own');
+});
+
+// ---------------------------------------------------------------------------
+// DEGENERATE KNOBS. `decideBand` is exported and takes plain numbers, so the
+// config validator's clamps are not what makes these safe. Each one used to
+// empty the tier or publish a nonsense target, and an empty candidate set is an
+// outage.
+// ---------------------------------------------------------------------------
+
+// These drive `decideBand` with an overridden snapshot rather than going
+// through `managerWith`, because `setExpiryRouting` clamps both knobs —
+// `tolerance` to `Math.max(1, ...)`, `coverage` to a positive default. Routed
+// through the manager these tests pass against the UNGUARDED function: the
+// validator answers them and the guard is never reached. That is the whole
+// hazard being fixed here, since `decideBand` is exported and typed as taking
+// plain numbers, so the clamp upstream is not what makes it safe.
+const snapshotOf = (accounts) => {
+  const am = managerWith(accounts);
+  return am._bandSnapshot(am.accounts, OPUS, Date.now());
+};
+
+const measuredSnapshot = () => snapshotOf([
+  acct('a', { quota: { ...weekly(0.1, 1), unified5h: 0.2 } }),
+  acct('b', { quota: { ...weekly(0.5, 1), unified5h: 0.3 } }),
+]);
+
+for (const coverage of [0, -1, NaN, Infinity]) {
+  test(`coverage ${coverage} falls back to the ratio instead of emptying the tier`, () => {
+    const snapshot = { ...measuredSnapshot(), coverage };
+    assert.ok(!Number.isFinite(snapshot.coverage) || snapshot.coverage <= 0,
+      'the coverage under test was normalised away before the decision saw it');
+    const decision = decideBand(snapshot);
+    assert.equal(decision.kind, 'banded');
+    assert.ok(decision.keep.length > 0, `coverage ${coverage} banded to empty`);
+    assert.equal(decision.reason, 'no-coverage-target',
+      'the reason must name the knob, not the cold-start state it is not in');
+  });
+}
+
+for (const tolerance of [0.5, 0, -1, NaN]) {
+  test(`tolerance ${tolerance} still keeps the highest-pressure account`, () => {
+    // No five-hour level anywhere, so the ratio path runs and the floor is what
+    // decides. A tolerance below 1 asks for accounts strictly better than the
+    // best there is; the maximum has to qualify regardless.
+    const base = snapshotOf([
+      acct('a', { quota: weekly(0.1, 1) }),
+      acct('b', { quota: weekly(0.5, 1) }),
+    ]);
+    const snapshot = { ...base, tolerance };
+    assert.ok(!(snapshot.tolerance >= 1),
+      'the tolerance under test was normalised away before the decision saw it');
+    const decision = decideBand(snapshot);
+    assert.equal(decision.kind, 'banded');
+    assert.ok(decision.keep.length > 0, `tolerance ${tolerance} banded to empty`);
+    assert.ok(decision.keep.includes(0), 'the highest-pressure account was banded out');
+  });
+}
+
+test('a switch threshold with no spendable range says so, and is not the cold-start state', () => {
+  const decision = decideBand({ ...measuredSnapshot(), switchThreshold: 0 });
+  assert.equal(decision.kind, 'banded');
+  assert.equal(decision.reason, 'no-headroom-scale',
+    'a degenerate threshold is a misconfiguration to fix, not a window to wait for');
+  assert.ok(decision.keep.length > 0);
+});
+
+test('the two headroom absences are distinguishable at the source', () => {
+  const account = { index: 0, priority: 0, utilization: 0.1, resetAt: Date.now() + 3600e3, fiveHour: 0.2 };
+  assert.deepEqual(headroomOf(account, 0), { kind: 'absent', reason: 'no-headroom-scale' });
+  assert.deepEqual(headroomOf({ ...account, fiveHour: null }, 0.98),
+    { kind: 'absent', reason: 'no-five-hour' });
+});

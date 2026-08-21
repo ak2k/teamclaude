@@ -34,6 +34,17 @@ jobs:
         if: matrix.node == 24
         run: npm run lint
 
+      # The decision layer's JSDoc describes tagged unions whose whole point is
+      # that absence is a variant rather than a coerced null, and comments
+      # describing a union do not enforce one. The compiler lives in its own
+      # package so the shipped dependency set is untouched, which is why this
+      # installs separately from the root `npm install` above.
+      - name: Typecheck the decision layer
+        if: matrix.node == 24
+        run: |
+          npm ci --prefix tools/typecheck
+          npm run typecheck
+
   nix:
     name: nix package
     runs-on: ubuntu-latest

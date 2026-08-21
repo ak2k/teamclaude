@@ -9,6 +9,7 @@
   "autoUpdate": true,
   "expiryRouting": {
     "enabled": false,
+    "coverage": 1,
     "tolerance": 1.5,
     "preempt": true
   },

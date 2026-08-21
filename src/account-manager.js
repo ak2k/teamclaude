@@ -4,7 +4,7 @@ import { weeklyBucketForModel, modelGlobMatches, WEEKLY_BUCKET_KEYS } from './mo
 import { SessionTracker } from './session-tracker.js';
 import { WindowWatcher } from './window-watcher.js';
 import { decideBand, pressureOf, assertNever } from './band-decision.js';
-import { decidePick } from './pick-decision.js';
+import { decidePick, pressureRank } from './pick-decision.js';
 
 // Re-exported for callers that import these model helpers from here.
 export { isFableModel, parseRequestModel, parseAdvisorModel } from './model.js';
@@ -576,10 +576,11 @@ export class AccountManager {
     return this._pickLeastLoaded(exclude, model, advisorModel);
   }
 
-  /** Best-available biased toward the fewest active sessions, so new sessions
+  /** Best-available biased toward the least measured load, so new sessions
    * spread across equal-priority accounts instead of funnelling onto one. Order:
-   * priority → [top pressure band, when expiry routing is on] → fewest active
-   * sessions → fewest in-flight → soonest weekly reset (the existing tiebreak). */
+   * priority → [top pressure band, when expiry routing is on] → least measured
+   * load → fewest active sessions → fewest in-flight → highest expiry pressure
+   * (inert when expiry routing is off) → soonest weekly reset. */
   _pickLeastLoaded(exclude = null, model = null, advisorModel = null) {
     const now = Date.now();
     const candidates = this._bandedCandidates(exclude, model, advisorModel);
@@ -606,8 +607,9 @@ export class AccountManager {
    * @returns {import('./pick-decision.js').PickSnapshot}
    */
   _pickSnapshot(candidates, model, now) {
+    const pressures = this._pickPressures(candidates, model, now);
     return {
-      accounts: candidates.map(a => {
+      accounts: candidates.map((a, i) => {
         const measured = this.sessionTracker.loadFor(a.index, now);
         return {
           index: a.index,
@@ -616,10 +618,34 @@ export class AccountManager {
           observed: measured.reports,
           sessions: measured.sessions,
           inFlight: a.inFlight || 0,
+          pressure: pressures[i],
           reset: this._governingWeeklyReset(a, model) || -Infinity,
         };
       }),
     };
+  }
+
+  /**
+   * Each candidate's expiry pressure as the pick ranks it, positionally aligned
+   * with `candidates` because `_bandSnapshot` maps that same array.
+   *
+   * WITH EXPIRY ROUTING OFF THE TERM IS ABSENT FOR EVERY ACCOUNT, and that is
+   * the whole of the off switch. The operator has said not to rank on expiring
+   * quota, so the pressure is not unknown, it is not being consulted — a
+   * distinct state, named as one. Every account ranking equal makes the term
+   * inert rather than special-cased, so the disabled path reduces to the term
+   * order that preceded it instead of to a branch someone has to keep correct.
+   *
+   * @param {{index: number, quota?: Record<string, unknown>}[]} candidates
+   * @param {string | null} model
+   * @param {number} now
+   * @returns {import('./pick-decision.js').PickPressure[]}
+   */
+  _pickPressures(candidates, model, now) {
+    if (!this.expiryRouting.enabled) {
+      return candidates.map(() => ({ kind: 'absent', reason: 'expiry-routing-off' }));
+    }
+    return this._bandSnapshot(candidates, model, now).accounts.map(a => pressureOf(a, now));
   }
 
   /** Record that a session's request was served by an account (always on, even
@@ -999,7 +1025,12 @@ export class AccountManager {
    * highest-pressure account qualifies. Silently landing there from an unset
    * key would look like the feature was disabled rather than tuned; so would
    * Infinity, which bands in every account.
-   *   { enabled?: bool, tolerance?: number >= 1, preempt?: bool }
+   *
+   * These clamps are a convenience for operators, NOT what makes the decision
+   * safe. `decideBand` is exported and takes plain numbers, so it guards its own
+   * preconditions; a test that routes a degenerate knob through here is testing
+   * this normalisation and nothing else.
+   *   { enabled?: bool, coverage?: number > 0, tolerance?: number >= 1, preempt?: bool }
    */
   setExpiryRouting(cfg) {
     const c = cfg || {};
@@ -1611,34 +1642,55 @@ export class AccountManager {
   /**
    * Pick the best available account by selection order, WITHOUT mutating state:
    *   1. lowest `priority` value (operator-controlled; default 0, lower = preferred)
-   *   2. then the account with no known weekly limit — using it lets us
-   *      discover its quota
-   *   3. then the account whose weekly limit expires soonest: that quota is
+   *   2. then the account with no known weekly quota — using it lets us
+   *      discover it
+   *   3. then the account with the most expiring quota (headroom per second
+   *      until its window resets), when expiry routing is on
+   *   4. then the account whose weekly limit expires soonest: that quota is
    *      closest to refreshing, so spending it first preserves accounts whose
    *      weekly window resets further out.
-   * With all priorities at the default 0, this reduces to the weekly-reset
-   * heuristic. Returns the account or null if none are available.
+   * With expiry routing off, step 3 is absent for every account and this
+   * reduces to the weekly-reset heuristic exactly as before.
+   *
+   * STEP 3 GENERALISES STEP 4 RATHER THAN COMPETING WITH IT. At equal weekly
+   * headroom the two agree — soonest reset IS highest pressure — so they differ
+   * only where headroom differs, which is where the timestamp alone was wrong:
+   * a nearly-drained account resetting in an hour used to beat one holding 20x
+   * the quota that expires in ten. Sizing the band for parallel capacity is what
+   * exposed that, because the tolerance ratio had been banding the low-pressure
+   * member out before this loop ever saw it. Returns the account or null if none
+   * are available.
    */
   _pickBestAvailable(exclude = null, model = null, advisorModel = null) {
     let best = null;
     let bestPriority = Infinity;
+    let bestPressure = Infinity;
     let bestReset = Infinity;
 
     const candidates = this._bandedCandidates(exclude, model, advisorModel);
-    for (const account of candidates) {
+    // One clock for every candidate, for the reason the band reads one: pressure
+    // rises continuously as a window nears its reset, so scoring two accounts at
+    // different instants decides an exact tie on the microseconds between two
+    // Date.now() reads.
+    const now = Date.now();
+    const pressures = this._pickPressures(candidates, model, now);
+    candidates.forEach((account, i) => {
       const priority = account.priority || 0;
+      const pressure = pressureRank(pressures[i]);
       // Rank by the reset of the weekly bucket that governs THIS model (Fable and
       // Sonnet have their own), so a Fable request spends the account whose Fable
       // window refreshes soonest while preserving accounts that reset later for
       // Opus/Sonnet. Unknown reset sorts first so we probe and fill it in.
       const weeklyReset = this._governingWeeklyReset(account, model) || -Infinity;
-      if (priority < bestPriority ||
-          (priority === bestPriority && weeklyReset < bestReset)) {
+      if (priority < bestPriority
+          || (priority === bestPriority && pressure < bestPressure)
+          || (priority === bestPriority && pressure === bestPressure && weeklyReset < bestReset)) {
         bestPriority = priority;
+        bestPressure = pressure;
         bestReset = weeklyReset;
         best = account;
       }
-    }
+    });
     return best;
   }
 
