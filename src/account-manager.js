@@ -993,6 +993,17 @@ export class AccountManager {
         ? Math.max(1, c.tolerance)
         : 1.5,
       preempt: typeof c.preempt === 'boolean' ? c.preempt : true,
+      // How much absorptive five-hour capacity the band must add up to,
+      // counted in whole accounts. One is the smallest target that describes
+      // the fleet at all: it says "keep as much capacity admitted as a single
+      // untouched account has". Raising it hedges wider and spends
+      // non-expiring quota sooner; it is not derived from any measurement, and
+      // nothing here tunes it. Same validation posture as `tolerance`: only a
+      // real finite number counts, and it clamps to a positive value because a
+      // target of zero admits nobody.
+      coverage: typeof c.coverage === 'number' && Number.isFinite(c.coverage)
+        ? Math.max(Number.MIN_VALUE, c.coverage)
+        : 1,
     };
   }
 
@@ -1061,7 +1072,11 @@ export class AccountManager {
     const decision = decideBand(this._bandSnapshot(candidates, model, Date.now()));
     switch (decision.kind) {
       case 'passthrough': return candidates;
-      case 'banded': {
+      // Both narrowing variants name the accounts they kept, in the order the
+      // caller must see them; which rule chose them is the decision's business
+      // and does not change how the choice is applied.
+      case 'banded':
+      case 'sized': {
         const byIndex = new Map(candidates.map(a => [a.index, a]));
         return decision.keep.map(i => byIndex.get(i)).filter(Boolean);
       }
@@ -1091,15 +1106,23 @@ export class AccountManager {
       now,
       enabled: !!this.expiryRouting.enabled,
       tolerance: this.expiryRouting.tolerance,
+      switchThreshold: this.switchThreshold,
+      coverage: this.expiryRouting.coverage,
       accounts: candidates.map(a => {
         const key = this._governingBucket(a, model);
         const used = a.quota[key];
         const reset = a.quota[`${key}Reset`];
+        // `unified5h` is read by its own name rather than through
+        // `_governingBucket`, because there is exactly one five-hour bucket per
+        // account and it is shared by every family. Resolving it per family
+        // would imply a per-family figure upstream does not publish.
+        const fiveHour = a.quota.unified5h;
         return {
           index: a.index,
           priority: a.priority || 0,
           utilization: typeof used === 'number' ? used : (used == null ? null : NaN),
           resetAt: typeof reset === 'number' && reset ? reset : null,
+          fiveHour: typeof fiveHour === 'number' ? fiveHour : null,
         };
       }),
     };

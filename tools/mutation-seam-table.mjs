@@ -94,6 +94,8 @@ const FORWARD_AWAIT = '        await forwardRequest(req, res, body, accountManag
 const REC_STREAM = '      accountManager.recordTokenUsage(accountIndex, sessionId, model, merged);';
 const REC_BODY = '      accountManager.recordTokenUsage(accountIndex, sessionId, model, json.usage);';
 const BAND_APPLY = '    const decision = decideBand(this._bandSnapshot(candidates, model, Date.now()));\n';
+const SIZED_BRANCH = '  const sized = sizeByCapacity(tier, pressures, snapshot);\n';
+const FIVE_HOUR_READ = '          fiveHour: typeof fiveHour === \'number\' ? fiveHour : null,\n';
 const MERGE_START = '      Object.assign(merged, data.message.usage);';
 const MERGE_DELTA = '      Object.assign(merged, data.usage);';
 const GUARDED_WRITE = '    if (Object.keys(merged).length) {\n'
@@ -190,6 +192,15 @@ const M = [
   ['bandDecision      snapshot ignores the clock', BAND_APPLY,
     '    const decision = decideBand(this._bandSnapshot(candidates, model, 0));\n',
     'src/account-manager.js'],
+  // The capacity rule never runs and every fleet degrades to the ratio. This is
+  // the fallback path made universal, so it is exactly what a build that
+  // silently lost the five-hour signal would do.
+  ['bandDecision      capacity rule never runs', SIZED_BRANCH, '  const sized = null;\n',
+    'src/band-decision.js'],
+  // The five-hour level is never read, so no account ever has measurable
+  // capacity and cold start becomes permanent.
+  ['bandDecision      five-hour never read', FIVE_HOUR_READ,
+    '          fiveHour: null,\n', 'src/account-manager.js'],
 
   ['recordTokenUsage  merge drops message_start', MERGE_START, ''],
   ['recordTokenUsage  merge drops message_delta', MERGE_DELTA, ''],

@@ -86,7 +86,12 @@ function managerWith(accounts, tolerance = 1.5, enabled = true, extra = {}) {
   return am;
 }
 
-test('the decision agrees with the banding it replaced, over generated fleets', () => {
+// SCOPE, now that capacity sizing exists: none of these fleets report a
+// five-hour level, so every one of them takes the tolerance fallback. That is
+// deliberate and it is the thing worth pinning here: the fallback is what
+// upstream runs by default with the probe off, so it is the path that must not
+// have moved. The capacity rule's own properties are in band-sizing.test.js.
+test('the fallback agrees with the banding it replaced, over generated fleets', () => {
   const rand = rng(20260820);
   let compared = 0;
   let banded = 0;
@@ -103,6 +108,11 @@ test('the decision agrees with the banding it replaced, over generated fleets', 
       ? decision.keep
       : am.accounts.map(a => a.index);
 
+    // Checks the scope claim above rather than trusting it: if a generated
+    // fleet ever reached the capacity path, this comparison would be against
+    // the wrong rule and its agreement would mean nothing.
+    assert.notEqual(decision.kind, 'sized',
+      'a fleet reporting no five-hour level took the capacity path');
     assert.deepEqual(actual, expected,
       `trial ${trial}: n=${n} tolerance=${tolerance.toFixed(3)}`);
     compared += 1;

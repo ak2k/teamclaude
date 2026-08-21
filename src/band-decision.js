@@ -51,21 +51,49 @@
  * omitting it: absent reads as "not known yet", which invites a consumer to
  * wait for a value that is never coming.
  *
+ * `fiveHour` is that account's five-hour utilization, and it is the ONLY field
+ * here with no family: see the paragraph above. It is the rate signal. A weekly
+ * bucket says how much quota is left before the week ends; the five-hour bucket
+ * says how fast it can be spent right now, and it is the one that gates.
+ *
  * @typedef {{
  *   index: number,
  *   priority: number,
  *   utilization: number | null,
  *   resetAt: number | null,
+ *   fiveHour: number | null,
  * }} BandAccount
  */
 
 /**
+ * `switchThreshold` is the utilization at which an account stops being
+ * available at all. Headroom is measured against it rather than against 1.0
+ * because the quota above it cannot be spent: an account at the threshold has
+ * no usable capacity left, whatever the raw figure says. It is the operator's
+ * existing knob, not a number chosen to fit any measurement.
+ *
+ * `coverage` is how much absorptive capacity the admitted set must add up to,
+ * counted in whole accounts. One means "as much capacity as a single untouched
+ * account", which is the smallest target that can describe the fleet at all.
+ *
  * @typedef {{
  *   now: number,
  *   enabled: boolean,
  *   tolerance: number,
+ *   switchThreshold: number,
+ *   coverage: number,
  *   accounts: BandAccount[],
  * }} BandSnapshot
+ */
+
+/**
+ * How much of an account's five-hour capacity is still spendable, as a
+ * fraction of the spendable range. Absent when the account has never reported
+ * one, which is the cold-start state: a fleet nobody has measured has no
+ * capacity signal to size against.
+ *
+ * @typedef {{ kind: 'known', value: number }
+ *         | { kind: 'absent', reason: 'no-five-hour' }} Headroom
  */
 
 /**
@@ -78,8 +106,23 @@
  */
 
 /**
+ * Why sizing fell back to the tolerance ratio. `no-capacity-signal` is the
+ * cold-start and probe-off state and is the one upstream sees by default, so
+ * the fallback is the ordinary path rather than an error path.
+ *
+ * @typedef {'no-capacity-signal'} FallbackReason
+ */
+
+/**
+ * `sized` is the capacity rule: accounts admitted in descending pressure order
+ * until the admitted set's five-hour headroom reaches the target. `banded` is
+ * the tolerance ratio it falls back to. They are separate variants rather than
+ * one variant with a flag because a consumer that wants to know which rule ran,
+ * and every log that reports a band, should not have to infer it.
+ *
  * @typedef {{ kind: 'passthrough', reason: PassthroughReason }
- *         | { kind: 'banded', keep: number[], floor: number }} BandDecision
+ *         | { kind: 'banded', keep: number[], floor: number, reason: FallbackReason }
+ *         | { kind: 'sized', keep: number[], target: number, achieved: number }} BandDecision
  */
 
 /**
@@ -128,6 +171,87 @@ export function pressureOf(account, now) {
 }
 
 /**
+ * @param {BandAccount} account
+ * @param {number} switchThreshold
+ * @returns {Headroom}
+ */
+export function headroomOf(account, switchThreshold) {
+  if (account.fiveHour == null || !Number.isFinite(account.fiveHour)) {
+    return { kind: 'absent', reason: 'no-five-hour' };
+  }
+  if (!(switchThreshold > 0)) return { kind: 'absent', reason: 'no-five-hour' };
+  const spendable = (switchThreshold - account.fiveHour) / switchThreshold;
+  return { kind: 'known', value: Math.min(1, Math.max(0, spendable)) };
+}
+
+/**
+ * Band sizing as a capacity question rather than a ratio question.
+ *
+ * The ratio asks "how much worse in pressure may an account be and still be
+ * used". The question that decides whether the fleet gates is "how many
+ * accounts must run in parallel to cover demand", and those are different
+ * enough that a single scalar cannot express the second. At an 18x to 28x
+ * pressure gap the ratio collapses the band to one account and the fleet runs
+ * one account at a time while the rest idle.
+ *
+ * Demand is not forecast here, and no history is kept. The five-hour level IS
+ * the integral of demand: an account absorbing more than its share climbs
+ * toward its own gate, and its remaining headroom falls. So admitting accounts
+ * in descending pressure order until their combined headroom reaches the target
+ * spends the most-expiring quota first while keeping enough parallel capacity
+ * to absorb what is actually arriving. Fresh fleet, one account covers it and
+ * the band stays narrow; loaded fleet, the same rule widens on its own.
+ *
+ * The error is deliberately asymmetric. Under-sizing gates the fleet and forces
+ * a migration that destroys cache; over-sizing spends quota that was not going
+ * to expire, which costs nothing while the fleet is demand-limited. So an
+ * account whose headroom is unknown is admitted and contributes NOTHING to
+ * coverage: capacity that has not been measured cannot be a reason to stop
+ * admitting.
+ *
+ * @param {BandAccount[]} tier
+ * @param {Pressure[]} pressures
+ * @param {BandSnapshot} snapshot
+ * @returns {{ keep: number[], achieved: number } | null}
+ */
+function sizeByCapacity(tier, pressures, snapshot) {
+  const headrooms = tier.map(a => headroomOf(a, snapshot.switchThreshold));
+  // Cold start, and the probe-off default: nothing has reported a five-hour
+  // level, so there is no capacity to size against and this rule does not run
+  // at all. Off until the signal exists, rather than sized against a guess.
+  if (!headrooms.some(h => h.kind === 'known')) return null;
+
+  // Descending pressure, so the most-expiring quota is spent first. Accounts
+  // with no comparable pressure sort last but are still admitted, because the
+  // way their quota becomes known is by being used.
+  const order = tier.map((account, i) => ({ account, pressure: pressures[i], headroom: headrooms[i] }));
+  order.sort((a, b) => {
+    const av = a.pressure.kind === 'known' ? a.pressure.value : -Infinity;
+    const bv = b.pressure.kind === 'known' ? b.pressure.value : -Infinity;
+    return bv - av;
+  });
+
+  const keep = [];
+  let achieved = 0;
+  for (const entry of order) {
+    if (achieved >= snapshot.coverage) break;
+    keep.push(entry.account.index);
+    switch (entry.headroom.kind) {
+      case 'known': achieved += entry.headroom.value; break;
+      // Admitted, but it cannot count toward a target it has not been measured
+      // against. Counting it would let an unmeasured account close the band.
+      case 'absent': break;
+      default: assertNever(entry.headroom, 'sizeByCapacity');
+    }
+  }
+  // Emitted in the tier's own order, not the pressure order used to choose
+  // them: callers break ties by taking the first acceptable candidate, and
+  // re-ranking here would move that decision into this function silently.
+  const admitted = new Set(keep);
+  return { keep: tier.filter(a => admitted.has(a.index)).map(a => a.index), achieved };
+}
+
+/**
  * The accounts worth spending, as a decision. Pure.
  *
  * Only the best priority tier is banded. Priority is the operator's explicit
@@ -152,6 +276,17 @@ export function decideBand(snapshot) {
   // maximum to measure a floor against and no basis for preferring any of them.
   if (!known.length) return { kind: 'passthrough', reason: 'no-known-pressure' };
 
+  // Capacity first; the ratio is what it degrades to when nothing has reported
+  // a five-hour level.
+  const sized = sizeByCapacity(tier, pressures, snapshot);
+  if (sized) {
+    const keep = sized.keep.slice();
+    for (const account of accounts) {
+      if (account.priority !== top) keep.push(account.index);
+    }
+    return { kind: 'sized', keep, target: snapshot.coverage, achieved: sized.achieved };
+  }
+
   const floor = Math.max(...known) / tolerance;
   // Surviving members of the top tier first, then every lower tier untouched.
   // The order is part of the contract, not an accident of the loop: callers
@@ -171,5 +306,5 @@ export function decideBand(snapshot) {
   for (const account of accounts) {
     if (account.priority !== top) keep.push(account.index);
   }
-  return { kind: 'banded', keep, floor };
+  return { kind: 'banded', keep, floor, reason: 'no-capacity-signal' };
 }

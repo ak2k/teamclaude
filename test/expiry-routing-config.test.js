@@ -84,16 +84,18 @@ async function withServer(expiryRouting, fn, extra = {}) {
 const NO_ROLLOVERS = { rolloversDetected: 0, rolloversPreempted: 0, rolloversOwed: 0 };
 
 test('expiryRouting in the config file reaches the running manager', async () => {
-  await withServer({ enabled: true, tolerance: 3, preempt: false }, async ({ port }) => {
+  await withServer({ enabled: true, tolerance: 3, preempt: false, coverage: 2 }, async ({ port }) => {
     const s = await status(port);
-    assert.deepEqual(s.expiryRouting, { enabled: true, tolerance: 3, preempt: false, stats: NO_ROLLOVERS });
+    assert.deepEqual(s.expiryRouting,
+      { enabled: true, tolerance: 3, preempt: false, coverage: 2, stats: NO_ROLLOVERS });
   });
 });
 
 test('an absent expiryRouting key leaves the feature off with its defaults', async () => {
   await withServer(null, async ({ port }) => {
     const s = await status(port);
-    assert.deepEqual(s.expiryRouting, { enabled: false, tolerance: 1.5, preempt: true, stats: NO_ROLLOVERS });
+    assert.deepEqual(s.expiryRouting,
+      { enabled: false, tolerance: 1.5, preempt: true, coverage: 1, stats: NO_ROLLOVERS });
   });
 });
 
