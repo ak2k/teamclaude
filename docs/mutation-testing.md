@@ -46,6 +46,31 @@ finish. Dropping the per-request exclusion set turns failover into an unbounded
 retry loop: the suite spins instead of failing. A run that has to be killed is a
 caught mutation, not a passing one — but only if the harness says so.
 
+*And the detection has a window, which makes its verdict load-dependent.*
+Runaway is recognised as `killed || signal || ENOBUFS` against a 180s wall and a
+64 MB buffer, so a runaway that neither floods nor exceeds that window inside it
+reads as **SURVIVES**. The failure is a false negative: it errs toward *looking
+healthy*, which is the direction nobody double-checks. This is not theoretical —
+on a box at load average 33, the exclusion-set row read SURVIVES three times in
+a row, on the tip and again at base, and was written up as a pre-existing
+survivor. Interleaved runs across both trees with strays killed between each
+read RUNS AWAY 3/3 and 3/3; driving the mutation directly produced 5.8 million
+lines before it was killed. The runaway is real and the detector is what failed.
+
+**Rule: check load and clear strays before trusting any verdict from this table,
+and treat a lone SURVIVES on a busy machine as unmeasured rather than
+measured.** Repeating the row does not help — every re-run inherits the same
+contaminated machine, so repetition confirms the artifact instead of exposing
+it. Vary the suspected condition instead: interleave the trees, clean between,
+and see whether the difference tracks the tree or the box.
+
+*Open item, with the disambiguation already named:* whether to widen the window
+or key detection on something load-independent. Nobody has decided. The cheap
+next step is to apply the mutation by hand and watch whether the suite hangs or
+completes — if it completes, the loop became bounded at some point and this
+entry is stale, which is the more interesting outcome, because a bound nobody
+designed is a bound nobody is holding.
+
 **5. Truncated output.** The runaway above logs as it spins and exceeded the
 child process's default 1 MB stdout buffer in 1.6 seconds. The captured head
 then contained no failure markers at all, and the harness — grepping that head
@@ -136,6 +161,37 @@ green unmutated baseline run at the start of the table, which you need anyway: i
 the suite is red or flaky before any mutation is applied, every row reads as
 caught and the whole table is meaningless in the confident direction.
 
+### A gate that catches both a defect and real work is worse than no gate
+
+Two guards here were written, fired on legitimate rows, and had to be narrowed.
+Both narrowings are the point, not the guards.
+
+**Uniform failure.** A mutant that breaks itself fails everything, and a wall of
+failures reads as a confident kill. So flag any result whose failures span more
+than half the test files, or where every failure across files is a single
+exception class — *a signal too uniform to be information*. First version of that
+rule said "any non-assertion class across files", and it immediately misgraded a
+real kill: a mutation that removed a published field made its consumers throw
+`TypeError`, and **that TypeError was the property**, not a broken mutant. The
+consumer failing *is* what the row exists to demonstrate. Narrowed to
+`ReferenceError` only, which is the class a mutant naming something that does
+not exist actually produces. Keeping it narrow costs coverage of hypothetical
+shapes and buys not misgrading real work — the trade a gate has to win, or it
+gets ignored, and an ignored gate is worse than an absent one because it still
+reads green.
+
+**The parse gate answers "does it parse", not "is it a mutation".** `node --check`
+catches the orphaned-block mutant, and it passes happily on a mutant that
+references an undefined name — which then fails every test file with a
+`ReferenceError` and reads as a kill. The two guards are complementary and
+neither replaces the other: parse-check for syntax, uniform-failure for a mutant
+that broke itself at runtime.
+
+Verify each guard the same way as the harness: with a deliberately broken row
+built to trip it, and a genuine row that must stay caught. A guard that has only
+ever been *run* has not been *verified*, and one that has only ever been seen to
+**refuse** has not been seen to **permit**.
+
 **A green instrument tells you nothing until you have seen it go red, and a full
 table tells you nothing until you have checked that its rows differ.**
 
@@ -166,6 +222,46 @@ refusal for every tree including the one you are standing in:
 Also: a kill between write and restore leaves the mutation behind. The harness
 can only restore what it read, so if it dies mid-cycle, check `git status`
 before trusting the tree.
+
+## And `git status` clean is not the tree being right
+
+The counterpart to the section above, and the one that cost the most here.
+Everything else in this document is *absence* — a signal that never arrived.
+This one is presence wearing absence's clothes: state that is wrong **precisely
+because it was successfully recorded**.
+
+A `node_modules` symlink pointing at an absolute path inside another agent's
+scratch worktree was committed into a change. `git status` read clean, and the
+report said "tree clean" in good faith, because a committed file is not a dirty
+file. Suite, eslint, both mutation tables and the differential fuzz were all
+indifferent to it. It shipped, and the same fault survived into the *next*
+commit after the class had been named.
+
+The mechanism generalises past the instance: `.gitignore` said `node_modules/`
+**with a trailing slash**, which matches a directory. A symlink of that name is
+not a directory, so the rule never matched it and `git add -A` took it. Drop the
+slash.
+
+The check is one line, and belongs in the battery beside the others:
+
+    git ls-files -s | awk '$1 == "120000"'   # every committed symlink
+
+then resolve each target and fail on any that is **absolute** — not merely on
+ones escaping the repo, because an absolute path cannot be correct in another
+checkout even when it happens to resolve in this one — or that lexically escapes
+the repo root. Resolve **lexically**, with no `stat`: a verdict that depends on
+whether the target exists on the machine running the check is a verdict that
+moves with the checkout.
+
+Capture its red against a commit that still carries a fault. That free failing
+case expires the moment you fix it, and a gate nobody has watched fire is an
+assumption.
+
+The rule underneath, worth more than the check: **any all-clear computed as a
+difference — clean tree, empty diff, no new findings — reports success once the
+unwanted thing has been absorbed into the baseline it compares against.** Ask
+what the baseline would have to contain for the check to stay quiet while being
+wrong, and check that separately.
 
 ## Known equivalent mutants
 
