@@ -1,0 +1,9 @@
+{
+  "name": "teamclaude-typecheck",
+  "private": true,
+  "description": "Compiler for tools/typecheck.mjs. Kept out of the app's dependency set on purpose: nothing shipped imports it, and it must not appear in the runtime tree or the carried patch.",
+  "license": "ISC",
+  "dependencies": {
+    "typescript": "5.6.3"
+  }
+}

@@ -3,6 +3,7 @@ import { sameIdentity } from './identity.js';
 import { weeklyBucketForModel, modelGlobMatches, WEEKLY_BUCKET_KEYS } from './model.js';
 import { SessionTracker } from './session-tracker.js';
 import { WindowWatcher } from './window-watcher.js';
+import { decideBand, pressureOf, assertNever } from './band-decision.js';
 
 // Re-exported for callers that import these model helpers from here.
 export { isFableModel, parseRequestModel, parseAdvisorModel } from './model.js';
@@ -1010,34 +1011,21 @@ export class AccountManager {
    * scored against the same instant.
    */
   _expiryPressure(account, model = null, now = Date.now()) {
-    // Both halves of the ratio are read from the ONE bucket _governingBucket
-    // names. A family bucket reporting a utilization but no window makes this
-    // unknown rather than borrowing the shared window's horizon: dividing one
-    // bucket's headroom by another bucket's clock scores an account on quota it
-    // does not have.
-    const key = this._governingBucket(account, model);
-    const used = account.quota[key];
-    const reset = account.quota[`${key}Reset`];
-    if (used == null || !reset) return null;
-    const seconds = (reset - now) / 1000;
-    if (seconds <= 0) return 0;
-    // A utilization that arrived non-finite is not a fraction of anything, and
-    // it must be rejected BEFORE the clamp below — clamping would turn it into
-    // a number that reads as a completely unspent window, the strongest score
-    // there is. Unknown instead: the band keeps such an account in without
-    // ranking it.
-    if (!Number.isFinite(used)) return null;
-    // Utilization is a fraction of the window, so clamp it to that domain
-    // rather than trusting it: a value outside 0-1 is not a smaller or larger
-    // usage but a claim to headroom the window cannot hold.
-    const u = Math.min(1, Math.max(0, used));
-    const pressure = (1 - u) / seconds;
-    // The remaining guard is for getStatus(), which publishes this as each
-    // account's `pressure` over the wire: a score that is not a number has to
-    // arrive as null, the value that reads there as "not known yet".
-    // _topPressureBand filters non-finite itself and does not rely on this.
-    return Number.isFinite(pressure) ? pressure : null;
+    // One implementation of pressure, in the decision layer. This wrapper is
+    // the status payload's view of it, which has to publish `null` where the
+    // decision says `absent`: two encodings of the same fact, and the wire
+    // format is not free to change. Reimplementing the arithmetic here instead
+    // would give the published figure and the routing decision separate
+    // definitions of the same word.
+    const [snapshotAccount] = this._bandSnapshot([account], model, now).accounts;
+    const pressure = pressureOf(snapshotAccount, now);
+    switch (pressure.kind) {
+      case 'known': return pressure.value;
+      case 'absent': return null;
+      default: return assertNever(pressure, '_expiryPressure');
+    }
   }
+
 
   /**
    * The accounts a selection pass may choose from: everything eligible for this
@@ -1066,26 +1054,55 @@ export class AccountManager {
    * empty.
    */
   _topPressureBand(candidates, model = null) {
-    if (!this.expiryRouting.enabled || candidates.length <= 1) return candidates;
     // One clock for the whole band: pressure rises continuously as a window
     // nears its reset, so scoring accounts at different instants would break an
-    // exact tie on the microseconds between two Date.now() reads.
-    const now = Date.now();
-    const prio = a => a.priority || 0;
-    // Band only the best (lowest-value) priority tier. Priority is the
-    // operator's explicit order and must keep winning: a high-pressure
-    // low-priority fallback (e.g. an API-key account at priority 100) must not
-    // band out the tier the operator preferred. Lower tiers pass through
-    // unfiltered — they are only ever picked when the top tier is empty, which
-    // a band cannot cause (its maximum always qualifies).
-    const top = Math.min(...candidates.map(prio));
-    const tier = candidates.filter(a => prio(a) === top);
-    const rest = candidates.filter(a => prio(a) !== top);
-    const pressures = tier.map(a => this._expiryPressure(a, model, now));
-    const known = pressures.filter(p => Number.isFinite(p));
-    if (!known.length) return candidates;
-    const floor = Math.max(...known) / this.expiryRouting.tolerance;
-    return tier.filter((a, i) => !Number.isFinite(pressures[i]) || pressures[i] >= floor).concat(rest);
+    // exact tie on the microseconds between two Date.now() reads. Read once
+    // here and handed to the decision, which never reads a clock of its own.
+    const decision = decideBand(this._bandSnapshot(candidates, model, Date.now()));
+    switch (decision.kind) {
+      case 'passthrough': return candidates;
+      case 'banded': {
+        const byIndex = new Map(candidates.map(a => [a.index, a]));
+        return decision.keep.map(i => byIndex.get(i)).filter(Boolean);
+      }
+      default: return assertNever(decision, '_topPressureBand');
+    }
+  }
+
+  /**
+   * The band decision's view of a candidate set. Reads the accounts and the
+   * config; the decision itself reads neither. `now` is passed in rather than
+   * taken here so that a caller wanting to ask what the band WOULD have done at
+   * some instant can, and so the pure layer stays drivable from a test.
+   *
+   * Both halves of each account's ratio come from the ONE bucket
+   * `_governingBucket` names. A family bucket reporting a utilization but no
+   * window makes that account unknown rather than borrowing the shared window's
+   * horizon: dividing one bucket's headroom by another bucket's clock scores an
+   * account on quota it does not have.
+   *
+   * @param {{index: number, priority?: number, quota: Record<string, unknown>}[]} candidates
+   * @param {string | null} model
+   * @param {number} now
+   * @returns {import('./band-decision.js').BandSnapshot}
+   */
+  _bandSnapshot(candidates, model, now) {
+    return {
+      now,
+      enabled: !!this.expiryRouting.enabled,
+      tolerance: this.expiryRouting.tolerance,
+      accounts: candidates.map(a => {
+        const key = this._governingBucket(a, model);
+        const used = a.quota[key];
+        const reset = a.quota[`${key}Reset`];
+        return {
+          index: a.index,
+          priority: a.priority || 0,
+          utilization: typeof used === 'number' ? used : (used == null ? null : NaN),
+          resetAt: typeof reset === 'number' && reset ? reset : null,
+        };
+      }),
+    };
   }
 
   /**

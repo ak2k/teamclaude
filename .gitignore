@@ -3,3 +3,8 @@ config.json
 *.log
 package-lock.json
 .mutation-sandbox
+
+# The app package deliberately does not pin (line 4). The typecheck tool must:
+# it is a gate, and a gate whose compiler version drifts is a gate whose verdict
+# drifts with it.
+!tools/typecheck/package-lock.json

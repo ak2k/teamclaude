@@ -93,13 +93,16 @@ const END_IN_FINALLY = '        accountManager.endSession(sessionId);\n';
 const FORWARD_AWAIT = '        await forwardRequest(req, res, body, accountManager, upstream, 0, hooks, reqId, ctx, logDir, sx);\n';
 const REC_STREAM = '      accountManager.recordTokenUsage(accountIndex, sessionId, model, merged);';
 const REC_BODY = '      accountManager.recordTokenUsage(accountIndex, sessionId, model, json.usage);';
+const BAND_APPLY = '    const decision = decideBand(this._bandSnapshot(candidates, model, Date.now()));\n';
 const MERGE_START = '      Object.assign(merged, data.message.usage);';
 const MERGE_DELTA = '      Object.assign(merged, data.usage);';
 const GUARDED_WRITE = '    if (Object.keys(merged).length) {\n'
   + '      accountManager.recordTokenUsage(accountIndex, sessionId, model, merged);\n'
   + '    }\n';
 
-// [label, find, replace]
+// [label, find, replace], or [label, find, replace, relativeFile] for a
+// seam that does not live in src/server.js. The default keeps every
+// pre-existing row meaning exactly what it did.
 const M = [
   // getActiveAccount — the call itself cannot be deleted (nothing would route),
   // so each argument is dropped in turn.
@@ -177,6 +180,17 @@ const M = [
   ['recordTokenUsage  body arg usage', REC_BODY,
     '      accountManager.recordTokenUsage(accountIndex, sessionId, model, {});'],
 
+  // The band decision's WIRING, not its arithmetic. A row mutating `decideBand`
+  // dies against the decision's own unit tables and says nothing about whether
+  // anything calls it; these sever the call site instead, which is the failure
+  // that ships green.
+  ['bandDecision      call site ignores the decision', BAND_APPLY,
+    '    const decision = decideBand(this._bandSnapshot(candidates, model, Date.now()));\n'
+    + '    void decision;\n    return candidates;\n', 'src/account-manager.js'],
+  ['bandDecision      snapshot ignores the clock', BAND_APPLY,
+    '    const decision = decideBand(this._bandSnapshot(candidates, model, 0));\n',
+    'src/account-manager.js'],
+
   ['recordTokenUsage  merge drops message_start', MERGE_START, ''],
   ['recordTokenUsage  merge drops message_delta', MERGE_DELTA, ''],
   // Which report wins. The delta's figures are cumulative for the message, so
@@ -191,11 +205,23 @@ const M = [
 ];
 
 const wanted = args.filter(a => !a.startsWith('--') );
-const original = fs.readFileSync(FILE, 'utf8');
+// One cached original per touched file. Read once so a row cannot restore
+// a file from a copy some earlier row had already mutated.
+const originals = new Map();
+const readOriginal = (file) => {
+  if (!originals.has(file)) originals.set(file, fs.readFileSync(file, 'utf8'));
+  return originals.get(file);
+};
 const rows = [];
 
-for (const [label, find, replace] of M) {
+for (const [label, find, replace, relativeFile] of M) {
   if (wanted.length && !wanted.some(w => label.startsWith(w))) continue;
+  const target = relativeFile ? `${REPO}/${relativeFile}` : FILE;
+  if (!fs.existsSync(target)) {
+    rows.push([label, 'ANCHOR MISSING', []]);
+    continue;
+  }
+  const original = readOriginal(target);
   if (!original.includes(find)) { rows.push([label, 'ANCHOR MISSING', []]); continue; }
   let mutated = original.replace(find, replace);
   // The "moved earlier" variant: delete the confirm at its real site and put it
@@ -211,7 +237,7 @@ for (const [label, find, replace] of M) {
   if (label.endsWith('moved out of the finally into the try')) {
     mutated = mutated.replace(FORWARD_AWAIT, FORWARD_AWAIT + END_IN_FINALLY);
   }
-  fs.writeFileSync(FILE, mutated);
+  fs.writeFileSync(target, mutated);
   let out = '';
   let timedOut = false;
   try {
@@ -224,7 +250,7 @@ for (const [label, find, replace] of M) {
     // ENOBUFS means it drowned its own log before the timeout could fire.
     timedOut = err.killed || err.signal != null || err.code === 'ENOBUFS';
   } finally {
-    fs.writeFileSync(FILE, original);
+    fs.writeFileSync(target, original);
   }
   const fails = [...new Set([...out.matchAll(/^✖ (.+?) \(/gm)].map(m => m[1]))];
   const verdict = timedOut ? 'RUNS AWAY' : (fails.length ? 'DIES' : 'SURVIVES');
@@ -246,7 +272,7 @@ reportIndistinguishableRows(rows);
 // non-zero and says which ones lost their anchor.
 if (unanchored.length) {
   console.error(`\n${unanchored.length} mutation(s) could not be applied — their anchor text is gone from`
-    + ` ${FILE}. These measured nothing; the count above does not cover them:`);
+    + ' their target file. These measured nothing; the count above does not cover them:');
   for (const [label] of unanchored) console.error(`  - ${label}`);
   console.error('\nRe-anchor each against the current source before trusting this table.');
   process.exit(1);
@@ -278,7 +304,7 @@ function reportIndistinguishableRows(all) {
     // Only a row that died has a meaningful set. A survivor's set is empty by
     // definition, and a runaway's is whatever was captured before it was killed.
     if (verdict !== 'DIES' || !fails.length) continue;
-    const key = [...fails].sort().join(' ');
+    const key = [...fails].sort().join('\\u0000');
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(label);
   }
