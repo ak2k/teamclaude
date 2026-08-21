@@ -95,6 +95,9 @@ const REC_STREAM = '      accountManager.recordTokenUsage(accountIndex, sessionI
 const REC_BODY = '      accountManager.recordTokenUsage(accountIndex, sessionId, model, json.usage);';
 const BAND_APPLY = '    const decision = decideBand(this._bandSnapshot(candidates, model, Date.now()));\n';
 const SIZED_BRANCH = '  const sized = sizeByCapacity(tier, pressures, snapshot);\n';
+const PICK_APPLY = '    const decision = decidePick(this._pickSnapshot(candidates, model, now));\n';
+const PICK_LOAD = '          load: measured.context,\n';
+const PICK_OBSERVED = '          observed: measured.reports,\n';
 const FIVE_HOUR_READ = '          fiveHour: typeof fiveHour === \'number\' ? fiveHour : null,\n';
 const MERGE_START = '      Object.assign(merged, data.message.usage);';
 const MERGE_DELTA = '      Object.assign(merged, data.usage);';
@@ -201,6 +204,20 @@ const M = [
   // capacity and cold start becomes permanent.
   ['bandDecision      five-hour never read', FIVE_HOUR_READ,
     '          fiveHour: null,\n', 'src/account-manager.js'],
+
+  // The load weight's wiring. The first severs the call site; the second makes
+  // the fleet permanently unmeasured, which is the cold-start state made
+  // universal and is what a build that silently lost the token read would do.
+  ['pickDecision      call site ignores the decision', PICK_APPLY,
+    '    const decision = decidePick(this._pickSnapshot(candidates, model, now));\n'
+    + '    void decision;\n    return candidates[0] || null;\n', 'src/account-manager.js'],
+  ['pickDecision      load never measured', PICK_LOAD, '          load: 0,\n',
+    'src/account-manager.js'],
+  // The arrival signal itself. Without it, a lost token read is
+  // indistinguishable from a fleet that never recorded one, and the weight
+  // reverts to counting sessions with every gate still green.
+  ['pickDecision      arrival signal never read', PICK_OBSERVED, '          observed: 0,\n',
+    'src/account-manager.js'],
 
   ['recordTokenUsage  merge drops message_start', MERGE_START, ''],
   ['recordTokenUsage  merge drops message_delta', MERGE_DELTA, ''],

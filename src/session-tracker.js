@@ -367,6 +367,50 @@ export class SessionTracker {
     return n;
   }
 
+  // Everything the selection weight needs about one account, in ONE pass.
+  //
+  // The count, the measured footprint and the report count are all sums over
+  // the same sessions under the same two predicates, so asking for them
+  // separately walked every session three times per account per pick. On a
+  // fleet at SESSION_MAX that is three O(sessions x accounts) traversals on the
+  // selection path to answer one question.
+  //
+  // WHY CONTEXT AND NOT CUMULATIVE TOKENS. This asks what an account is
+  // carrying NOW. A session's context is what each of its requests costs to
+  // serve; its lifetime total is a fact about its past and would rank a long
+  // quiet session above a young heavy one.
+  //
+  // POOLED ACROSS FAMILIES, deliberately. The rate ceiling an account can hit
+  // is its five-hour bucket, and that bucket is shared by every family, so load
+  // measured against it cannot be split by family either.
+  //
+  // WHY `reports` COMES BACK TOO. `context` of 0 is enormously plausible: an
+  // idle session legitimately has none. So if the token read were ever lost,
+  // every account would score zero, selection would fall back to counting
+  // sessions, the fallback would be CORRECT behaviour, and the fleet would be
+  // indistinguishable from one that had never recorded a token. Carrying the
+  // report count keeps "no tokens because idle" separable from "no tokens
+  // because nothing was observed" at the boundary, which is the distinction
+  // `reports` was added to preserve one layer in.
+  //
+  // Zero across the board is not a special case: an unmeasured fleet scores
+  // every account zero, the load term cannot discriminate, and the caller's
+  // remaining tiebreaks decide exactly as they did before any of this existed.
+  loadFor(accountIndex, now = this._now()) {
+    let sessions = 0;
+    let context = 0;
+    let reports = 0;
+    for (const s of this.sessions.values()) {
+      if (!this._isActive(s, now) || !this._pinsInclude(s, accountIndex, now)) continue;
+      sessions += 1;
+      for (const t of s.tokens?.values() || []) {
+        context += t.context;
+        reports += t.reports;
+      }
+    }
+    return { sessions, context, reports };
+  }
+
   // Drop sessions idle longer than the known window (but never one still in flight).
   sweep(now = this._now()) {
     this._lastSweep = now;

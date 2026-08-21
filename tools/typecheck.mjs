@@ -31,6 +31,7 @@ const REPO = path.resolve(repoArg ? repoArg.slice('--repo='.length) : '.');
 // The decision layer, and nothing else.
 const CHECKED = [
   'src/band-decision.js',
+  'src/pick-decision.js',
 ];
 
 const tsc = path.join(REPO, 'tools', 'typecheck', 'node_modules', '.bin', 'tsc');

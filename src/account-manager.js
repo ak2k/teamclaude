@@ -4,6 +4,7 @@ import { weeklyBucketForModel, modelGlobMatches, WEEKLY_BUCKET_KEYS } from './mo
 import { SessionTracker } from './session-tracker.js';
 import { WindowWatcher } from './window-watcher.js';
 import { decideBand, pressureOf, assertNever } from './band-decision.js';
+import { decidePick } from './pick-decision.js';
 
 // Re-exported for callers that import these model helpers from here.
 export { isFableModel, parseRequestModel, parseAdvisorModel } from './model.js';
@@ -582,28 +583,43 @@ export class AccountManager {
   _pickLeastLoaded(exclude = null, model = null, advisorModel = null) {
     const now = Date.now();
     const candidates = this._bandedCandidates(exclude, model, advisorModel);
-    let best = null;
-    let bestPriority = Infinity;
-    let bestSessions = Infinity;
-    let bestInFlight = Infinity;
-    let bestReset = Infinity;
-    for (const account of candidates) {
-      const priority = account.priority || 0;
-      const sessions = this.sessionTracker.activeCountFor(account.index, now);
-      const inFlight = account.inFlight || 0;
-      const reset = this._governingWeeklyReset(account, model) || -Infinity;
-      if (priority < bestPriority
-        || (priority === bestPriority && sessions < bestSessions)
-        || (priority === bestPriority && sessions === bestSessions && inFlight < bestInFlight)
-        || (priority === bestPriority && sessions === bestSessions && inFlight === bestInFlight && reset < bestReset)) {
-        best = account;
-        bestPriority = priority;
-        bestSessions = sessions;
-        bestInFlight = inFlight;
-        bestReset = reset;
-      }
+    const decision = decidePick(this._pickSnapshot(candidates, model, now));
+    switch (decision.kind) {
+      case 'none': return null;
+      case 'picked': return candidates.find(a => a.index === decision.index) || null;
+      default: return assertNever(decision, '_pickLeastLoaded');
     }
-    return best;
+  }
+
+  /**
+   * The pick decision's view of a candidate set. Reads the accounts and the
+   * session tracker; the decision itself reads neither.
+   *
+   * `reset` falls back to `-Infinity` rather than to a large number when the
+   * governing window is unknown, preserving the pre-existing bias: an account
+   * whose reset nobody has reported sorts FIRST on that term, so it gets used
+   * and its quota gets discovered.
+   *
+   * @param {{index: number, priority?: number, inFlight?: number}[]} candidates
+   * @param {string | null} model
+   * @param {number} now
+   * @returns {import('./pick-decision.js').PickSnapshot}
+   */
+  _pickSnapshot(candidates, model, now) {
+    return {
+      accounts: candidates.map(a => {
+        const measured = this.sessionTracker.loadFor(a.index, now);
+        return {
+          index: a.index,
+          priority: a.priority || 0,
+          load: measured.context,
+          observed: measured.reports,
+          sessions: measured.sessions,
+          inFlight: a.inFlight || 0,
+          reset: this._governingWeeklyReset(a, model) || -Infinity,
+        };
+      }),
+    };
   }
 
   /** Record that a session's request was served by an account (always on, even
@@ -2122,6 +2138,8 @@ export class AccountManager {
     // view it is derived from but published under expiryRouting, which is the
     // feature it says something about.
     const { pendingRollovers, ...sessions } = this.sessionTracker.stats();
+    // One walk per account for the whole payload, not one per field read.
+    const measured = new Map(this.accounts.map(a => [a.index, this.sessionTracker.loadFor(a.index)]));
     return {
       currentAccount: this.accounts[this.currentIndex]?.name,
       switchThreshold: this.switchThreshold,
@@ -2155,6 +2173,15 @@ export class AccountManager {
         disabled: a.disabled || false,
         status: a.status,
         sessions: sessions.perAccount[a.index] || 0,
+        // What this account is measurably carrying, and how many upstream
+        // reports back that figure. Published together because neither is
+        // legible alone: `load: 0` with sessions on the account is a dead token
+        // pipeline when `observed` is 0 and a genuinely idle one when it is
+        // not, and nothing else on this payload separates them. That is the
+        // same distinction `reports` exists for one layer in, at the level an
+        // operator actually reads.
+        load: measured.get(a.index).context,
+        observed: measured.get(a.index).reports,
         // Shared-weekly pressure (model-agnostic view); null while unknown.
         pressure: this._expiryPressure(a),
         quota: { ...a.quota },

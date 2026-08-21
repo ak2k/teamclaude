@@ -279,6 +279,7 @@ test('the session view reports the token totals and the live cached footprint', 
     'both accounts report the same cache total');
   assert.equal(s.accounts[1].usage.totalCacheCreationTokens, 50);
 
+
   assert.equal(s.sessions.tokens.byBucket.unified7d.cacheRead, 4000,
     'the Opus weekly bucket is not reported on its own');
   assert.equal(s.sessions.tokens.byBucket.unified7dFable.cacheRead, 1000,
@@ -288,4 +289,29 @@ test('the session view reports the token totals and the live cached footprint', 
   assert.equal(s.accounts[0].usage.byBucket.unified7d.cacheReadTokens, 4000,
     "the account's per-family split is not reported");
   assert.equal(s.accounts[1].usage.byBucket.unified7dFable.cacheReadTokens, 1000);
+});
+
+// An operator reading a fleet during an incident needs to tell a dead token
+// pipeline from an idle account, and `load` alone cannot: zero is what both
+// look like. `observed` is the report count backing that load, so the pair is
+// legible where neither half is on its own. Both are asserted away from their
+// defaults, because a field that stops reading its source agrees with zero.
+test('each account publishes what it is carrying and how many reports back it', () => {
+  const am = new AccountManager([apikey('busy'), apikey('idle')], 0.98);
+  // recordSession rather than touch: a pin is what makes a session count as
+  // load on an account, and touch without buckets creates none.
+  am.recordSession('s1', 0, 'claude-opus-5');
+  am.recordTokenUsage(0, 's1', 'claude-opus-5', {
+    input_tokens: 12, cache_read_input_tokens: 300000,
+    cache_creation_input_tokens: 1000, output_tokens: 700,
+  });
+
+  const s = am.getStatus();
+  const [busy, idle] = s.accounts;
+  assert.equal(busy.load, 301012, "the account's measured load is not published");
+  assert.equal(busy.observed, 1,
+    'the report count backing that load is not published, so a dead token '
+    + 'pipeline reads exactly like an idle account');
+  assert.equal(idle.load, 0, 'an account carrying nothing reports no load');
+  assert.equal(idle.observed, 0);
 });
