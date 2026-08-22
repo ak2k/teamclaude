@@ -112,10 +112,30 @@ const GUARDED_WRITE = '    if (Object.keys(merged).length) {\n'
   + '      accountManager.recordTokenUsage(accountIndex, sessionId, model, merged);\n'
   + '    }\n';
 
+// Rows whose label starts with this are CONTROLS, not mutations: their expected
+// verdict is known before the run, so they are the only rows that say anything
+// about the harness rather than about the code. They are excluded from the
+// mutation count and checked separately below.
+const CONTROL = 'CONTROL';
+
 // [label, find, replace], or [label, find, replace, relativeFile] for a
 // seam that does not live in src/server.js. The default keeps every
 // pre-existing row meaning exactly what it did.
 const M = [
+  // The control. Its replacement is identical to what it finds, so the file is
+  // rewritten byte-for-byte and the suite runs against unmodified source: a
+  // truthful table must call this SURVIVES. It fails when the table has started
+  // reporting failures it did not cause — which is what an already-red suite
+  // does to every row at once, and what this table did before the baseline
+  // check below existed.
+  //
+  // It is a committed fixture rather than something reached for when the table
+  // is doubted. A control that only exists in the sandbox where somebody went
+  // looking is the same class of gap as the one it closes: it certifies the
+  // harness on the run nobody was worried about, and is absent on every run
+  // somebody trusted.
+  [`${CONTROL}        identity rewrite, mutates nothing`,
+    'export class SessionTracker', 'export class SessionTracker', 'src/session-tracker.js'],
   // getActiveAccount — the call itself cannot be deleted (nothing would route),
   // so each argument is dropped in turn.
   ['getActiveAccount  arg exclude (ctx.tried)', SELECT,
@@ -281,6 +301,49 @@ const readOriginal = (file) => {
   if (!originals.has(file)) originals.set(file, fs.readFileSync(file, 'utf8'));
   return originals.get(file);
 };
+// One suite run, returning the failing test names and whether it terminated.
+// Shared by the baseline below and every mutated row, so the two cannot come to
+// differ about what "failing" means.
+function runSuite() {
+  let out = '';
+  let timedOut = false;
+  try {
+    out = execFileSync(NODE, ['--test'], { cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 180_000, maxBuffer: 64 * 1024 * 1024 });
+  } catch (err) {
+    out = (err.stdout || '') + (err.stderr || '');
+    // A suite that never terminates is not a passing suite. Some mutations
+    // (dropping the per-request exclusion set) make retry loops unbounded, so
+    // the run has to be killed rather than reporting.
+    // ENOBUFS means it drowned its own log before the timeout could fire.
+    timedOut = err.killed || err.signal != null || err.code === 'ENOBUFS';
+  }
+  return { fails: [...new Set([...out.matchAll(/^✖ (.+?) \(/gm)].map(m => m[1]))], timedOut };
+}
+
+// THE BASELINE. Every verdict below is "did the suite fail after I mutated",
+// which only means "did the mutation break it" if the suite passed BEFORE. With
+// a test already red, every row reads DIES on that one failure and the table
+// reports total coverage of code nothing tests: measured in a sandbox with one
+// injected failure, an identity rewrite that mutates nothing read DIES and the
+// run exited 0.
+//
+// WHAT THIS DOES NOT COVER, precisely: one green run does not establish that the
+// suite is RELIABLY green. A test that fails intermittently passes here and is
+// then credited to whichever row it happens to fail under, which the
+// subtraction below cannot catch either — the name was not in the baseline set.
+// This closes the already-red door, not the flaky one.
+const baseline = runSuite();
+if (baseline.timedOut) {
+  console.error('baseline suite did not terminate, so no verdict below would mean anything');
+  process.exit(2);
+}
+if (baseline.fails.length) {
+  console.error(`baseline suite is not green: ${baseline.fails.length} test(s) fail before any mutation.`);
+  for (const f of baseline.fails) console.error(`  ✖ ${f}`);
+  console.error('\nEvery row would read DIES on these. Fix or skip them, then re-run.');
+  process.exit(2);
+}
+
 const rows = [];
 
 for (const [label, find, replace, relativeFile] of M) {
@@ -307,22 +370,20 @@ for (const [label, find, replace, relativeFile] of M) {
     mutated = mutated.replace(FORWARD_AWAIT, FORWARD_AWAIT + END_IN_FINALLY);
   }
   fs.writeFileSync(target, mutated);
-  let out = '';
-  let timedOut = false;
+  let run;
   try {
-    out = execFileSync(NODE, ['--test'], { cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 180_000, maxBuffer: 64 * 1024 * 1024 });
-  } catch (err) {
-    out = (err.stdout || '') + (err.stderr || '');
-    // A suite that never terminates is not a passing suite. Some mutations
-    // (dropping the per-request exclusion set) make retry loops unbounded, so
-    // the run has to be killed rather than reporting.
-    // ENOBUFS means it drowned its own log before the timeout could fire.
-    timedOut = err.killed || err.signal != null || err.code === 'ENOBUFS';
+    run = runSuite();
   } finally {
     fs.writeFileSync(target, original);
   }
-  const fails = [...new Set([...out.matchAll(/^✖ (.+?) \(/gm)].map(m => m[1]))];
-  const verdict = timedOut ? 'RUNS AWAY' : (fails.length ? 'DIES' : 'SURVIVES');
+  // Anything already failing at the baseline is not this row's doing. The
+  // baseline is empty by the check above, so this subtraction is belt to that
+  // brace: it keeps the invariant local to where a verdict is formed, where a
+  // later edit that softens the abort into a warning would otherwise start
+  // crediting rows with failures they did not cause.
+  const inBaseline = new Set(baseline.fails);
+  const fails = run.fails.filter(f => !inBaseline.has(f));
+  const verdict = run.timedOut ? 'RUNS AWAY' : (fails.length ? 'DIES' : 'SURVIVES');
   rows.push([label, verdict, fails]);
 }
 
@@ -330,10 +391,33 @@ for (const [label, verdict, fails] of rows) {
   console.log(`${verdict.padEnd(14)} ${label}`);
   for (const f of fails.slice(0, 3)) console.log(`               ↳ ${f}`);
 }
-const survived = rows.filter(r => r[1] === 'SURVIVES');
+// Controls are graded against their KNOWN expected verdict, mutations against
+// whether they died. Kept apart in the arithmetic as well as in the check: a
+// control counted as a mutation would either inflate the denominator with a row
+// that is meant to survive, or be read as a survivor and fail the run.
+const controls = rows.filter(r => r[0].startsWith(CONTROL));
+const mutations = rows.filter(r => !r[0].startsWith(CONTROL));
+const survived = mutations.filter(r => r[1] === 'SURVIVES');
 const unanchored = rows.filter(r => r[1] === 'ANCHOR MISSING');
-console.log(`\n${rows.length - survived.length - unanchored.length}/${rows.length} mutations die.`);
-reportIndistinguishableRows(rows);
+console.log(`\n${mutations.length - survived.length - unanchored.filter(r => !r[0].startsWith(CONTROL)).length}`
+  + `/${mutations.length} mutations die.`);
+
+// The control's expected verdict is the one value in this table known
+// independently of the run, so it is the only check that still works when the
+// checking logic is wrong. A control that DIES means the table is attributing
+// failures to a mutation that changed nothing.
+const badControls = controls.filter(r => r[1] !== 'SURVIVES');
+if (badControls.length) {
+  console.error(`\n${badControls.length} control row(s) did not survive. A row that mutates NOTHING`
+    + ' must not be graded as caught; every verdict above is suspect:');
+  for (const [label, verdict, fails] of badControls) {
+    console.error(`  - ${label}: ${verdict}`);
+    for (const f of fails.slice(0, 3)) console.error(`      ↳ ${f}`);
+  }
+  process.exit(2);
+}
+if (controls.length) console.log(`${controls.length} control row(s) survived, as they must.`);
+reportIndistinguishableRows(mutations);
 
 // A mutation whose anchor no longer matches measured NOTHING, and it degrades
 // exactly when the code moves — which is when this table is most worth running.
