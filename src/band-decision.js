@@ -276,24 +276,26 @@ function sizeByCapacity(tier, pressures, snapshot) {
   const keep = [];
   let achieved = 0;
   for (const entry of order) {
+    // ABSENCE ON EITHER AXIS, not just headroom. This rule ranks on two
+    // measurements — pressure decides the order, headroom decides when to stop
+    // — and an account missing EITHER is exempt from the coverage stop. Absence
+    // may widen the band and must never close it, because being used is how the
+    // missing measurement is obtained, and an account dropped for lacking one
+    // can never supply it. Restricting the exemption to headroom left the other
+    // half live: absent pressure sorts last, so it met a target a peer had
+    // already met and was dropped, which is the same defect one noun over.
+    const unmeasured = entry.headroom.kind === 'absent' || entry.pressure.kind === 'absent';
+    if (!unmeasured && achieved >= snapshot.coverage) continue;
+    keep.push(entry.account.index);
     switch (entry.headroom.kind) {
-      // Admitted wherever it sorts, and NOT subject to the coverage stop.
-      // Absence may widen the band and must never close it: an account nobody
-      // has measured is admitted because being used is how its capacity becomes
-      // known, and stopping before it would make the unknown permanent. Ending
-      // the loop early instead dropped every unmeasured account that happened
-      // to sort behind one that covered the target alone. It still contributes
-      // nothing to `achieved`, for the same reason it is admitted: capacity
-      // nobody has measured is not capacity.
-      case 'absent':
-        keep.push(entry.account.index);
-        break;
-      case 'known':
-        if (achieved < snapshot.coverage) {
-          keep.push(entry.account.index);
-          achieved += entry.headroom.value;
-        }
-        break;
+      // Counted whenever it is known, including for an account admitted by the
+      // exemption above. The reason absent headroom adds nothing is that
+      // unmeasured capacity is not capacity; that reason does not reach an
+      // account whose capacity IS measured and whose pressure merely is not.
+      // `achieved` reaches the wire as what the admitted set can absorb, and
+      // omitting measured capacity would understate it.
+      case 'known': achieved += entry.headroom.value; break;
+      case 'absent': break;
       default: assertNever(entry.headroom, 'sizeByCapacity');
     }
   }

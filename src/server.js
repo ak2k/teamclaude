@@ -699,7 +699,11 @@ export function createProxyRequestListener({ accountManager, upstream, logDir = 
       // Hold the session "in flight" across the WHOLE request (incl. retries and
       // a multi-minute streaming completion) so it stays counted as active and
       // never expires mid-request.
-      accountManager.beginSession(sessionId);
+      // The hold rides on `ctx` because it must reach two places the call below
+      // cannot: `recordSession`, once selection knows which pins this request
+      // spends, and `endSession` in the finally. `ctx` already spans retries and
+      // the whole streamed response, which is exactly the hold's lifetime.
+      ctx.hold = accountManager.beginSession(sessionId);
       try {
         await forwardRequest(req, res, body, accountManager, upstream, 0, hooks, reqId, ctx, logDir, sx);
       } catch (err) {
@@ -710,7 +714,7 @@ export function createProxyRequestListener({ accountManager, upstream, logDir = 
           res.end(JSON.stringify({ type: 'error', error: { type: 'proxy_error', message: 'Internal proxy error' } }));
         }
       } finally {
-        accountManager.endSession(sessionId);
+        accountManager.endSession(sessionId, ctx.hold);
         // Cleared BEFORE the hook runs: this path owns the entry from here, and
         // a hook that throws must not leave it looking unclosed to the outer
         // catch, which would call that same throwing hook a second time.
@@ -1083,7 +1087,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
   ctx.account = account.name;
   // Pin this session to the serving account (for affinity) and keep it "active"
   // in the running-sessions readout. Passive when distribution is off.
-  accountManager.recordSession(ctx.sessionId, account.index, ctx.model, ctx.advisorModel, ctx.decision);
+  accountManager.recordSession(ctx.sessionId, account.index, ctx.model, ctx.advisorModel, ctx.decision, ctx.hold);
   hooks.onRequestRouted?.(reqId, { account: account.name });
 
   // Refresh OAuth token if needed

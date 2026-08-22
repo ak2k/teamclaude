@@ -21,16 +21,13 @@ function oauth(name, extra = {}) {
 // apart, and any exact comparison of a clock-derived quantity across the pair
 // then fails on a stalled box — a flake that lands on whatever else was running.
 //
-// One thing to know before changing a `used`/`resetH` pair, or the tolerance
-// default, or how pressure is computed. The recurring
-// `{ a: 0.5/50h, b: 0.1/60h }` fixture — used here and in
-// server-session-routing.test.js — puts 'a' EXACTLY on the band's tolerance
-// floor: (1-0.5)/50h is precisely ((1-0.1)/60h) / 1.5. It stays in the band only
-// because a fixture is always built before it is scored, so the elapsed time
-// between the two is non-negative and 'a' drifts inside rather than outside.
-// That is stable, not lucky — but it means roughly ten tests here are sitting on
-// the boundary rather than comfortably inside it, and anything that moves the
-// floor moves all of them at once.
+// The `{ a: 0.5/50h, b: 0.1/60h }` knife edge these fixtures used to sit on is
+// gone. It put the first account EXACTLY on the band's tolerance floor —
+// (1-0.5)/50h is precisely ((1-0.1)/60h) / 1.5 — so roughly ten tests here were
+// on the boundary rather than inside it, and anything that moved the floor moved
+// all of them at once. 46 occurrences across three files; none remain. Keep it
+// that way: when a fixture needs an account inside the band, give it margin
+// rather than the smallest value that qualifies.
 function manager(specs, { er = { enabled: true }, distribute = true, tracker, now = Date.now() } = {}) {
   const am = new AccountManager(specs.map(s => oauth(s.name, s.extra)), 0.98,
     { distributeSessions: distribute, sessionTracker: tracker, ...(er ? { expiryRouting: er } : {}) });
@@ -979,7 +976,10 @@ test('removing an unrelated account keeps the current-account rollover detectabl
   const am = manager([
     { name: 'a', used: 0.1, resetH: 60 },
     { name: 'doomed', used: 0.1, resetH: 60 },
-    { name: 'c', used: 0.5, resetH: 50 },
+    // 0.3 rather than 0.5: at 0.5/50h this account sat EXACTLY on the tolerance
+    // floor that 'a' at 0.1/60h defines, which is the knife edge the header
+    // above used to warn about. It is the last instance of that pair.
+    { name: 'c', used: 0.3, resetH: 50 },
   ], { distribute: false });
   am.currentIndex = 2;
   assert.equal(am.getActiveAccount(null, OPUS).name, 'c'); // baseline seeded on 'c'
@@ -1079,6 +1079,113 @@ test('a session-quota reset cannot park the current account outside the band', (
   q.unified5hReset = Date.now() - 1000; // its 5h window just expired
   am.refreshExpiredQuotas();
   assert.equal(am.accounts[am.currentIndex].name, 'ample-later');
+});
+
+// The test above gives its ample account NO five-hour level, so the band falls
+// back to the tolerance ratio and never reaches capacity sizing. It is green
+// against a build where the band guard has stopped working, because the ratio
+// bands the drained account out before the guard is consulted. This is the same
+// fleet with both accounts reporting a five-hour level, which is what makes the
+// band widen and hands the guard a question membership can no longer answer.
+test('a session-quota reset cannot park current on a lower-pressure account inside a widened band', () => {
+  const am = manager([
+    { name: 'ample-later', used: 0.05, resetH: 10 },
+    { name: 'drained-sooner', used: 0.97, resetH: 1 },
+  ], { distribute: false });
+  am.accounts[0].quota.unified5h = 0;
+  am.accounts[0].quota.unified5hReset = Date.now() + 4 * H;
+  am.currentIndex = 0;
+  const q = am.accounts[1].quota;
+  q.unified5h = 0.5;
+  q.unified5hReset = Date.now() - 1000; // its 5h window just expired
+
+  // Pressure is read from the quota directly and is safe to ask up front.
+  assert.ok(am._expiryPressure(am.accounts[0]) > am._expiryPressure(am.accounts[1]),
+    'the incumbent is not the higher-pressure account, so there is nothing to hold');
+
+  // The band premise is RECORDED from the guard rather than asked for, because
+  // asking consumes it: `_bandedCandidates` runs `_isAvailable` ->
+  // `_isNearQuota` -> `_clearExpiredQuotas`, so calling it here clears the very
+  // 5h window whose expiry is this test's trigger. `refreshExpiredQuotas` then
+  // finds nothing reset, `_switchOnSessionReset` is never called, and the test
+  // passes without reaching the branch at all — which is exactly what it did
+  // when first written.
+  const seen = [];
+  const banded = am._bandedCandidates.bind(am);
+  am._bandedCandidates = (...a) => { const r = banded(...a); seen.push(r.map(x => x.name)); return r; };
+
+  am.refreshExpiredQuotas();
+
+  assert.ok(seen.length > 0, 'the guard was never reached, so nothing here was tested');
+  assert.deepEqual(seen[0], ['ample-later', 'drained-sooner'],
+    'the band did not widen, so membership still answers the question');
+  assert.equal(am.accounts[am.currentIndex].name, 'ample-later',
+    'parked current on the lower-pressure account');
+  // The consequence, not just the field: session-less traffic follows `current`,
+  // and drain never preempts, so a wrong `current` here is what serves.
+  assert.equal(am.getActiveAccount(null, OPUS, null, null, {}).name, 'ample-later',
+    'traffic was served by the lower-pressure account');
+});
+
+// The tests either side of this one have ONE eligible candidate, so they pin
+// the guard against leaving a better incumbent and say nothing about the order
+// candidates are ranked in. A seam row that made the ranking constant survived
+// the whole suite until this existed.
+test('a session-quota reset picks the most expiring candidate, not the soonest-resetting one', () => {
+  const am = manager([
+    // Far-dated and nearly drained, so both challengers qualify and neither is
+    // blocked by the guard against demoting the incumbent.
+    { name: 'incumbent', used: 0.9, resetH: 100 },
+    // Resets soonest of the three, which is what the old ranking chose on.
+    { name: 'sooner-reset', used: 0.7, resetH: 10 },
+    // Resets later than 'sooner-reset' but holds 1.3x its expiring quota.
+    { name: 'more-pressure', used: 0.2, resetH: 20 },
+  ], { distribute: false });
+  am.currentIndex = 0;
+  for (const i of [1, 2]) {
+    am.accounts[i].quota.unified5h = 0.5;
+    am.accounts[i].quota.unified5hReset = Date.now() - 1000;
+  }
+
+  const p = i => am._expiryPressure(am.accounts[i]);
+  assert.ok(am.accounts[1].quota.unified7dReset < am.accounts[2].quota.unified7dReset,
+    'the soonest-resetting account is not the one the old rule would have taken');
+  assert.ok(p(2) > p(1), 'the two orderings agree here, so this fixture cannot tell them apart');
+  assert.ok(p(2) > p(0), 'the incumbent outranks both, so the guard decides and the order does not');
+
+  const seen = [];
+  const banded = am._bandedCandidates.bind(am);
+  am._bandedCandidates = (...a) => { const r = banded(...a); seen.push(r.map(x => x.name)); return r; };
+
+  am.refreshExpiredQuotas();
+
+  assert.ok(seen.length > 0, 'the guard was never reached, so nothing here was tested');
+  assert.ok(seen[0].includes('sooner-reset') && seen[0].includes('more-pressure'),
+    `both candidates must be in the band or membership decides, not the order: [${seen[0]}]`);
+  assert.equal(am.accounts[am.currentIndex].name, 'more-pressure',
+    'ranked on the reset timestamp instead of the expiring quota');
+});
+
+test('a session-quota reset still switches when the resetting account holds more expiring quota', () => {
+  // The feature still has to work: same shape, but the account whose window
+  // reset is the one worth spending. A guard that never lets the switch happen
+  // would pass the test above and break this one.
+  const am = manager([
+    { name: 'drained-later', used: 0.9, resetH: 10 },
+    { name: 'ample-sooner', used: 0.05, resetH: 5 },
+  ], { distribute: false });
+  am.accounts[0].quota.unified5h = 0.5;
+  am.accounts[0].quota.unified5hReset = Date.now() + 4 * H;
+  am.currentIndex = 0;
+  const q = am.accounts[1].quota;
+  q.unified5h = 0.5;
+  q.unified5hReset = Date.now() - 1000;
+
+  assert.ok(am._expiryPressure(am.accounts[1]) > am._expiryPressure(am.accounts[0]),
+    'the challenger is not the higher-pressure account, so this proves nothing');
+  am.refreshExpiredQuotas();
+  assert.equal(am.accounts[am.currentIndex].name, 'ample-sooner',
+    'the switch was blocked even though the challenger was worth more');
 });
 
 test('a Fable rollover preemption does not drag the session\'s Opus traffic', () => {

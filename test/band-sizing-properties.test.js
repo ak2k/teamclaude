@@ -105,29 +105,33 @@ test('capacity sizing holds its invariants over generated fleets', () => {
     assert.ok(Math.abs(recomputed - decision.achieved) < 1e-9,
       `${where}: achieved ${decision.achieved} but the admitted set sums to ${recomputed}`);
 
-    // Absence widens the band and never closes it: an account whose headroom
-    // nobody has measured is admitted wherever it sorts, including behind an
-    // account that already covered the target on its own. Ending the admission
-    // loop at coverage dropped exactly those, which is the whole of P1-2.
+    // Absence widens the band and never closes it, on EITHER axis. This rule
+    // ranks on two measurements, and an account missing either one is admitted
+    // wherever it sorts — including behind an account that already covered the
+    // target alone. Written against headroom only, this property was green while
+    // absent PRESSURE was still being dropped: the same defect one noun over,
+    // and the reason to state the invariant over the inputs rather than over the
+    // one input that happened to be reported.
     for (const a of tier) {
-      if (headroomOf(a, THRESHOLD).kind !== 'known') {
+      const measured = headroomOf(a, THRESHOLD).kind === 'known' && pressureOf(a, now).kind === 'known';
+      if (!measured) {
         assert.ok(decision.keep.includes(a.index),
-          `${where}: an unmeasured account was sized out, so its quota can never become known`);
+          `${where}: an unmeasured account was sized out, so what it is missing can never become known`);
       }
     }
 
-    // Nothing with a MEASURED headroom is admitted once the target is met, so
-    // the admitted set is minimal for it. Unmeasured accounts are exempt by
-    // construction, per the property above: they are admitted regardless of
-    // where they sort and contribute nothing, so including them here would be
-    // asking whether dropping a zero changes a sum. `keep` is emitted in tier
-    // order rather than admission order, so the account to drop is the
-    // least-pressure one admitted, not the last in the array: checking the
-    // array's own order would be checking a different claim and would fail on a
-    // fleet whose two orders disagree.
+    // Nothing measured on BOTH axes is admitted once the target is met, so the
+    // admitted set is minimal for it. Accounts exempt under the property above
+    // are excluded here for the same reason they are exempt there: the coverage
+    // stop never governed them, so asking whether dropping one would have kept
+    // the target met is asking about a decision the rule did not take. `keep` is
+    // emitted in tier order rather than admission order, so the account to drop
+    // is the least-pressure one admitted, not the last in the array: checking
+    // the array's own order would be checking a different claim and would fail
+    // on a fleet whose two orders disagree.
     if (decision.achieved >= decision.target) {
       const measured = keptTier
-        .filter(a => headroomOf(a, THRESHOLD).kind === 'known')
+        .filter(a => headroomOf(a, THRESHOLD).kind === 'known' && pressureOf(a, now).kind === 'known')
         .sort((x, y) => {
           const px = pressureOf(x, now);
           const py = pressureOf(y, now);

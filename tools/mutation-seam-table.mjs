@@ -10,14 +10,24 @@
 //     applied, so it proves nothing — and this happens precisely when the code
 //     has moved, which is when you most need the answer. Exits non-zero and
 //     names them; never let one sit as a quiet row beside a healthy count.
-//   - RUNAWAY. Some mutations do not make the suite fail, they make it never
-//     finish (dropping the per-request exclusion set turns failover into an
-//     unbounded retry loop). A run that has to be killed is a caught mutation,
-//     not a passing one.
-//   - TRUNCATED OUTPUT. A runaway logs as it spins and can exceed the child's
-//     stdout buffer in seconds; the captured head then contains no failure
-//     markers at all and reads as SURVIVES. ENOBUFS is treated as a runaway for
-//     that reason, and maxBuffer is raised well past a normal run's output.
+//   - RUNAWAY. A mutation can make the suite never finish rather than fail
+//     (dropping the per-request exclusion set turns failover into an unbounded
+//     retry loop). A run that has to be killed is a caught mutation, not a
+//     passing one. NOTE: no row has been observed to reach this by timeout.
+//   - OUTPUT FLOOD, which is what the row above actually did. Measured over
+//     three repetitions of `getActiveAccount arg exclude`: ENOBUFS at 98s and
+//     65 MB with no `✖` anywhere, a clean finish at 12s naming 12 failing
+//     tests, then ENOBUFS again at 107s, with `killed=undefined` and
+//     `signal=null` every time. Nothing was unbounded and nothing was killed;
+//     the suite simply out-ran a 64 MiB pipe buffer about two thirds of the
+//     time, and losing that race produced a 65 MB head with no failure markers
+//     in it. Output now goes to a file, which has no such limit, so the verdict
+//     is the one the run produced rather than a coin flip.
+//   - INCOMPLETE RUN. A child that exits before the reporter writes its summary
+//     emits no failure markers either, and "no failures" is then
+//     indistinguishable from "nothing was looked at". Rows require a summary
+//     line and grade INDETERMINATE without one — never CAUGHT, since a process
+//     dying for an unrelated reason also writes no summary.
 //
 // The shape is always the same: green because nothing was checked, not because
 // nothing was wrong. That is the same failure this table exists to catch in the
@@ -34,6 +44,10 @@
 // what it read.
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+let runSeq = 0;
 
 const args = process.argv.slice(2);
 const repoArg = args.find(a => a.startsWith('--repo='));
@@ -43,6 +57,7 @@ if (!repoArg) {
 }
 const REPO = repoArg.slice('--repo='.length);
 const force = args.includes('--force');
+const fullFails = args.includes('--full-fails');
 // Run the suite with the interpreter running this harness, so the table is
 // measured on the same runtime the developer is using.
 const NODE = process.execPath;
@@ -85,18 +100,26 @@ if (dirty && !force) {
 }
 
 const SELECT = 'accountManager.getActiveAccount(ctx.tried, ctx.model, ctx.advisorModel, ctx.sessionId, ctx.decision)';
-const RECORD = 'accountManager.recordSession(ctx.sessionId, account.index, ctx.model, ctx.advisorModel, ctx.decision);';
+const RECORD = 'accountManager.recordSession(ctx.sessionId, account.index, ctx.model, ctx.advisorModel, ctx.decision, ctx.hold);';
 const CONFIRM = 'accountManager.confirmRouted(ctx.sessionId, account.index, ctx.model, ctx.advisorModel, ctx.decision);';
 // Indentation included: these two anchor the endSession MOVE, and the release
 // has to land inside the try rather than merely somewhere in the handler.
-const END_IN_FINALLY = '        accountManager.endSession(sessionId);\n';
+const BEGIN_SESSION = '      ctx.hold = accountManager.beginSession(sessionId);\n';
+const END_IN_FINALLY = '        accountManager.endSession(sessionId, ctx.hold);\n';
 const FORWARD_AWAIT = '        await forwardRequest(req, res, body, accountManager, upstream, 0, hooks, reqId, ctx, logDir, sx);\n';
 const REC_STREAM = '      accountManager.recordTokenUsage(accountIndex, sessionId, model, merged);';
 const REC_BODY = '      accountManager.recordTokenUsage(accountIndex, sessionId, model, json.usage);';
 const BAND_APPLY = '    const decision = decideBand(this._bandSnapshot(candidates, model, Date.now()));\n';
 const SIZED_BRANCH = '  const sizing = sizeByCapacity(tier, pressures, snapshot);\n';
-const COVERAGE_STOP = '        if (achieved < snapshot.coverage) {\n';
-const ABSENT_ADMIT = '      case \'absent\':\n        keep.push(entry.account.index);\n        break;\n';
+const UNMEASURED_BOTH = '    const unmeasured = entry.headroom.kind === \'absent\' || entry.pressure.kind === \'absent\';\n';
+const COVERAGE_STOP = '    if (!unmeasured && achieved >= snapshot.coverage) continue;\n';
+const RESET_RANK_GUARD = '    if (rankOf.get(best.index) > rankOf.get(current.index)) return;\n';
+const RESET_RANK_ORDER = '      if (mine < theirs\n';
+const HOLD_RELEASE = '    this._releaseHold(s, hold);\n';
+const HOLD_DRAIN = '      for (const h of [...s.holds]) this._releaseHold(s, h);\n';
+const HOLD_CLAIM = '        if (hold && hold.rid === s.rid && !hold.buckets.has(bucket)) {\n';
+const HOLD_OWNER_END = '    if (hold && hold.rid !== s.rid) return null;\n';
+const PIN_HELD = '    return now - pin.at <= this.activeTtlMs || (s.pinHolds.get(bucket) || 0) > 0;\n';
 const PICK_PRESSURE = '          pressure: pressures[i],\n';
 const PICK_PRESSURE_TERM = '  { term: \'pressure\', of: a => pressureRank(a.pressure) },\n';
 const BEST_PRESSURE = '          || (priority === bestPriority && pressure < bestPressure)\n';
@@ -122,20 +145,6 @@ const CONTROL = 'CONTROL';
 // seam that does not live in src/server.js. The default keeps every
 // pre-existing row meaning exactly what it did.
 const M = [
-  // The control. Its replacement is identical to what it finds, so the file is
-  // rewritten byte-for-byte and the suite runs against unmodified source: a
-  // truthful table must call this SURVIVES. It fails when the table has started
-  // reporting failures it did not cause — which is what an already-red suite
-  // does to every row at once, and what this table did before the baseline
-  // check below existed.
-  //
-  // It is a committed fixture rather than something reached for when the table
-  // is doubted. A control that only exists in the sandbox where somebody went
-  // looking is the same class of gap as the one it closes: it certifies the
-  // harness on the run nobody was worried about, and is absent on every run
-  // somebody trusted.
-  [`${CONTROL}        identity rewrite, mutates nothing`,
-    'export class SessionTracker', 'export class SessionTracker', 'src/session-tracker.js'],
   // getActiveAccount — the call itself cannot be deleted (nothing would route),
   // so each argument is dropped in turn.
   ['getActiveAccount  arg exclude (ctx.tried)', SELECT,
@@ -151,15 +160,21 @@ const M = [
 
   ['recordSession     call deleted', RECORD, ''],
   ['recordSession     arg sessionId', RECORD,
-    'accountManager.recordSession(null, account.index, ctx.model, ctx.advisorModel, ctx.decision);'],
+    'accountManager.recordSession(null, account.index, ctx.model, ctx.advisorModel, ctx.decision, ctx.hold);'],
   ['recordSession     arg accountIndex', RECORD,
-    'accountManager.recordSession(ctx.sessionId, accountManager.currentIndex, ctx.model, ctx.advisorModel, ctx.decision);'],
+    'accountManager.recordSession(ctx.sessionId, accountManager.currentIndex, ctx.model, ctx.advisorModel, ctx.decision, ctx.hold);'],
   ['recordSession     arg model', RECORD,
-    'accountManager.recordSession(ctx.sessionId, account.index, null, ctx.advisorModel, ctx.decision);'],
+    'accountManager.recordSession(ctx.sessionId, account.index, null, ctx.advisorModel, ctx.decision, ctx.hold);'],
   ['recordSession     arg advisorModel', RECORD,
-    'accountManager.recordSession(ctx.sessionId, account.index, ctx.model, null, ctx.decision);'],
+    'accountManager.recordSession(ctx.sessionId, account.index, ctx.model, null, ctx.decision, ctx.hold);'],
+  // Explicitly null rather than truncating the list: dropping `decision` off the
+  // end would slide `ctx.hold` into its place and mutate two arguments at once.
   ['recordSession     arg decision', RECORD,
-    'accountManager.recordSession(ctx.sessionId, account.index, ctx.model, ctx.advisorModel);'],
+    'accountManager.recordSession(ctx.sessionId, account.index, ctx.model, ctx.advisorModel, null, ctx.hold);'],
+  // The hold itself. Without it the pins this request spends are never claimed,
+  // so a live stream stops holding its account the moment the pin ages out.
+  ['recordSession     arg hold', RECORD,
+    'accountManager.recordSession(ctx.sessionId, account.index, ctx.model, ctx.advisorModel, ctx.decision);'],
 
   ['confirmRouted     call deleted', CONFIRM, ''],
   ['confirmRouted     arg sessionId', CONFIRM,
@@ -174,10 +189,17 @@ const M = [
     'accountManager.confirmRouted(ctx.sessionId, account.index, ctx.model, ctx.advisorModel);'],
   ['confirmRouted     moved before the retry branches', CONFIRM, ''], // paired with the insert below
 
-  ['beginSession      call deleted', 'accountManager.beginSession(sessionId);', ''],
-  ['beginSession      arg sessionId', 'accountManager.beginSession(sessionId);', 'accountManager.beginSession(null);'],
-  ['endSession        call deleted', 'accountManager.endSession(sessionId);', ''],
-  ['endSession        arg sessionId', 'accountManager.endSession(sessionId);', 'accountManager.endSession(null);'],
+  // The WHOLE statement, including `ctx.hold =`. Anchoring on the call alone
+  // left `ctx.hold = ;` behind, so the row measured that a syntax error breaks
+  // the suite rather than that the call matters: it died on 32 entries, every
+  // one a file that failed to parse, and not one a named test. A row can be
+  // green-looking, applied, and still be testing the language rather than the
+  // code.
+  ['beginSession      call deleted', BEGIN_SESSION, ''],
+  ['beginSession      arg sessionId', BEGIN_SESSION,
+    '      ctx.hold = accountManager.beginSession(null);\n'],
+  ['endSession        call deleted', 'accountManager.endSession(sessionId, ctx.hold);', ''],
+  ['endSession        arg sessionId', 'accountManager.endSession(sessionId, ctx.hold);', 'accountManager.endSession(null, ctx.hold);'],
   // This row used to DELETE the call rather than move it, which made it a
   // duplicate of "call deleted" — the two died on the identical three tests and
   // the matrix reported 23 mutations while testing 22. The placement claim is
@@ -228,15 +250,62 @@ const M = [
   ['bandDecision      capacity rule never runs', SIZED_BRANCH,
     '  const sizing = { kind: \'fallback\', reason: \'no-capacity-signal\' };\n',
     'src/band-decision.js'],
-  // Absence closes the band again: the unmeasured account is only admitted
-  // while the target is unmet, which is the P1-2 defect exactly.
-  ['bandDecision      absence stops widening the band', ABSENT_ADMIT,
-    '      case \'absent\':\n        if (achieved < snapshot.coverage) keep.push(entry.account.index);\n'
-    + '        break;\n', 'src/band-decision.js'],
+  // Absence closes the band again, on whichever axis is severed. Two rows, not
+  // one, because the exemption reads two measurements and a version covering
+  // only headroom shipped once and was reported as complete.
+  ['bandDecision      absent headroom stops widening', UNMEASURED_BOTH,
+    '    const unmeasured = entry.pressure.kind === \'absent\';\n', 'src/band-decision.js'],
+  ['bandDecision      absent pressure stops widening', UNMEASURED_BOTH,
+    '    const unmeasured = entry.headroom.kind === \'absent\';\n', 'src/band-decision.js'],
   // The coverage stop never fires, so the band admits the whole tier every
   // time. Sizing stops being a size and the widening is unbounded.
   ['bandDecision      coverage never stops admission', COVERAGE_STOP,
-    '        if (true) {\n', 'src/band-decision.js'],
+    '    if (false) continue;\n', 'src/band-decision.js'],
+  // The session-reset switch, a writer of `current` that selection never sees.
+  // Severing either half restores the reset-timestamp proxy: one stops it
+  // preferring the better candidate, the other lets it leave a strictly better
+  // incumbent behind.
+  ['bandDecision      session-reset leaves a better incumbent', RESET_RANK_GUARD, '',
+    'src/account-manager.js'],
+  ['bandDecision      session-reset ignores pressure order', RESET_RANK_ORDER,
+    '      if (false\n', 'src/account-manager.js'],
+
+  // Per-pin in-flight accounting. The claim, the read, and BOTH release paths:
+  // an unpaired release does not merely lose an integer here, it leaves a pin
+  // counted as loaded for the life of the record, so each release path gets its
+  // own row rather than trusting the other to cover it.
+  // THESE TWO COLLAPSE, and it is intended. One breaks the write side of the
+  // hold and the other the read side, and the suite cannot tell them apart
+  // because the read is the claim's only consumer: with nothing else looking at
+  // `pinHolds`, never writing it and never reading it are the same observable.
+  // Answered here rather than left for the flag to raise every run.
+  //
+  // The tripwire: this stops being true the moment `pinHolds` gains a second
+  // consumer — a status field, a migration policy, anything. At that point the
+  // two rows should separate on their own, and if they do not, the new consumer
+  // is not covered.
+  ['loadFor           in-flight pin never claimed', HOLD_CLAIM,
+    '        if (false) {\n', 'src/session-tracker.js'],
+  ['loadFor           held pin not counted as live', PIN_HELD,
+    '    return now - pin.at <= this.activeTtlMs;\n', 'src/session-tracker.js'],
+  ['loadFor           hold never released', HOLD_RELEASE, '', 'src/session-tracker.js'],
+  ['loadFor           lost hold never drained', HOLD_DRAIN, '', 'src/session-tracker.js'],
+  // Hold OWNERSHIP, both ends. A record can be evicted while its request is in
+  // flight, so a hold outlives the record that issued it; without these a stale
+  // release drains a live replacement and a stale claim adds a phantom count to
+  // it. Three rows, because the guard exists at three reachable points and one
+  // guarded entrance is not a guarded room.
+  ['loadFor           stale hold ends a stranger\'s request', HOLD_OWNER_END, '',
+    'src/session-tracker.js'],
+  // NO ROW for the same test inside `_releaseHold`. It is an equivalent mutant:
+  // both callers are safe by construction — `endRequest` has already returned on
+  // a foreign hold, and the zero-count drain iterates `s.holds`, which contains
+  // only this record's own — so nothing can kill it and it printed SURVIVES on
+  // every run. Registered in RESIDUALS as TC-005 with the condition that makes
+  // it observable again, rather than carried here as a row that measures
+  // nothing. The guard itself stays: it is a precondition on a private helper.
+  ['loadFor           stale hold claims a stranger\'s pin', HOLD_CLAIM,
+    '        if (hold && !hold.buckets.has(bucket)) {\n', 'src/session-tracker.js'],
   // The five-hour level is never read, so no account ever has measurable
   // capacity and cold start becomes permanent.
   ['bandDecision      five-hour never read', FIVE_HOUR_READ,
@@ -291,6 +360,27 @@ const M = [
   // an observation arrived for a stream that never carried one.
   ['recordTokenUsage  empty-merge guard removed', GUARDED_WRITE,
     `    ${REC_STREAM.trim()}\n`],
+
+  // The control. Its replacement is identical to what it finds, so the file is
+  // rewritten byte-for-byte and the suite runs against unmodified source: a
+  // truthful table must call this SURVIVES. It fails when the table has started
+  // reporting failures it did not cause — which is what an already-red suite
+  // does to every row at once, and what this table did before the baseline
+  // check below existed.
+  //
+  // It is a committed fixture rather than something reached for when the table
+  // is doubted. A control that only exists in the sandbox where somebody went
+  // looking is the same class of gap as the one it closes: it certifies the
+  // harness on the run nobody was worried about, and is absent on every run
+  // somebody trusted.
+  //
+  // LAST on purpose. It is the only row whose expected verdict is SURVIVES, so
+  // it is the only one that can show a restore which silently failed earlier in
+  // the run: against a tree still carrying somebody else's mutation, an edit
+  // that changes nothing would start dying. Placed first it would be graded
+  // before there was anything to detect.
+  [`${CONTROL}        identity rewrite, mutates nothing`,
+    'export class SessionTracker', 'export class SessionTracker', 'src/session-tracker.js'],
 ];
 
 const wanted = args.filter(a => !a.startsWith('--') );
@@ -305,19 +395,47 @@ const readOriginal = (file) => {
 // Shared by the baseline below and every mutated row, so the two cannot come to
 // differ about what "failing" means.
 function runSuite() {
-  let out = '';
+  // Output goes to a FILE, not a pipe buffer. Some mutations make the suite
+  // enormously chatty, and against a 64 MiB in-memory buffer whether the run
+  // finished before it filled was a race: measured over three repetitions of
+  // one row, the same mutation on the same tree gave ENOBUFS at 98s / 65 MB
+  // with no failure markers, a clean finish at 12s naming 12 failing tests, and
+  // ENOBUFS again at 107s. The verdict was a coin flip between DIES and a
+  // 65 MB head containing no `✖` at all, which without the ENOBUFS rule below
+  // would have read SURVIVES. A file has no such limit, so the row now reports
+  // what it actually did.
+  const logPath = path.join(os.tmpdir(), `seam-run-${process.pid}-${runSeq++}.log`);
+  const fd = fs.openSync(logPath, 'w');
   let timedOut = false;
   try {
-    out = execFileSync(NODE, ['--test'], { cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 180_000, maxBuffer: 64 * 1024 * 1024 });
+    execFileSync(NODE, ['--test'], { cwd: REPO, stdio: ['ignore', fd, fd], timeout: 180_000 });
   } catch (err) {
-    out = (err.stdout || '') + (err.stderr || '');
     // A suite that never terminates is not a passing suite. Some mutations
     // (dropping the per-request exclusion set) make retry loops unbounded, so
-    // the run has to be killed rather than reporting.
-    // ENOBUFS means it drowned its own log before the timeout could fire.
+    // the run has to be killed rather than reporting. ENOBUFS is kept although
+    // writing to a file cannot raise it: it costs nothing and it is the guard
+    // that stood between the chattiest row and a false green.
     timedOut = err.killed || err.signal != null || err.code === 'ENOBUFS';
+  } finally {
+    fs.closeSync(fd);
   }
-  return { fails: [...new Set([...out.matchAll(/^✖ (.+?) \(/gm)].map(m => m[1]))], timedOut };
+  const out = fs.readFileSync(logPath, 'utf8');
+  fs.unlinkSync(logPath);
+  return {
+    fails: [...new Set([...out.matchAll(/^✖ (.+?) \(/gm)].map(m => m[1]))],
+    timedOut,
+    // DID THE OBSERVATION HAPPEN AT ALL. A run that exits before the reporter
+    // writes its summary produces no ✖ markers, and "no failures found" is
+    // indistinguishable from "nothing was looked at" in the same way an
+    // already-red suite was indistinguishable from a caught mutation. Measured:
+    // a row that DIES reliably when run alone read SURVIVES inside a full table
+    // on a loaded box.
+    //
+    // Graded INDETERMINATE and never CAUGHT. Treating a missing summary as a
+    // catch is the mirror error and it hides real survivors, because a process
+    // that dies for a reason unrelated to the mutation also writes no summary.
+    completed: /^\S* ?tests \d+/m.test(out),
+  };
 }
 
 // THE BASELINE. Every verdict below is "did the suite fail after I mutated",
@@ -327,14 +445,23 @@ function runSuite() {
 // injected failure, an identity rewrite that mutates nothing read DIES and the
 // run exited 0.
 //
-// WHAT THIS DOES NOT COVER, precisely: one green run does not establish that the
-// suite is RELIABLY green. A test that fails intermittently passes here and is
-// then credited to whichever row it happens to fail under, which the
-// subtraction below cannot catch either — the name was not in the baseline set.
-// This closes the already-red door, not the flaky one.
+// WHAT THIS COVERS, and the residual, stated narrowly because the first version
+// of this comment was too pessimistic about its own guard. It closes the
+// already-red door outright, AND the subset of flakes that happen to land in
+// this baseline run — which is not hypothetical: on its second day it caught a
+// load-sensitive CLI test that had passed 859/859 minutes earlier and passes 8
+// of 8 in isolation, and refused to grade rather than crediting that one failure
+// to all 59 rows.
+//
+// The residual is the other subset: a test that stays green HERE and fails
+// inside some row's run is credited to that row, and the subtraction below
+// cannot catch it because the name was never in the baseline set. So one green
+// baseline does not establish that the suite is RELIABLY green; it establishes
+// that it was green once, just now, which is strictly more than nothing and
+// strictly less than reliability.
 const baseline = runSuite();
-if (baseline.timedOut) {
-  console.error('baseline suite did not terminate, so no verdict below would mean anything');
+if (baseline.timedOut || !baseline.completed) {
+  console.error('baseline suite did not run to completion, so no verdict below would mean anything');
   process.exit(2);
 }
 if (baseline.fails.length) {
@@ -360,8 +487,8 @@ for (const [label, find, replace, relativeFile] of M) {
   // right after selection, where a retried attempt would confirm too.
   if (label.endsWith('moved before the retry branches')) {
     mutated = mutated.replace(
-      'accountManager.recordSession(ctx.sessionId, account.index, ctx.model, ctx.advisorModel, ctx.decision);',
-      'accountManager.recordSession(ctx.sessionId, account.index, ctx.model, ctx.advisorModel, ctx.decision);\n  ' + CONFIRM);
+      'accountManager.recordSession(ctx.sessionId, account.index, ctx.model, ctx.advisorModel, ctx.decision, ctx.hold);',
+      'accountManager.recordSession(ctx.sessionId, account.index, ctx.model, ctx.advisorModel, ctx.decision, ctx.hold);\n  ' + CONFIRM);
   }
   // The endSession move: deleted from the finally above, re-inserted inside the
   // try. The happy path still releases the hold, so only a test that drives a
@@ -383,13 +510,20 @@ for (const [label, find, replace, relativeFile] of M) {
   // crediting rows with failures they did not cause.
   const inBaseline = new Set(baseline.fails);
   const fails = run.fails.filter(f => !inBaseline.has(f));
-  const verdict = run.timedOut ? 'RUNS AWAY' : (fails.length ? 'DIES' : 'SURVIVES');
+  const verdict = run.timedOut ? 'RUNS AWAY'
+    : (!run.completed ? 'INDETERMINATE' : (fails.length ? 'DIES' : 'SURVIVES'));
   rows.push([label, verdict, fails]);
 }
 
 for (const [label, verdict, fails] of rows) {
   console.log(`${verdict.padEnd(14)} ${label}`);
-  for (const f of fails.slice(0, 3)) console.log(`               ↳ ${f}`);
+  // Truncated for reading, in full with --full-fails. The truncation is display
+  // only: the collapse analysis below fingerprints the WHOLE set, so two rows
+  // can group on entries this never printed, and a reader comparing the visible
+  // lines is comparing a different thing from the grouping.
+  const shown = fullFails ? fails : fails.slice(0, 3);
+  for (const f of shown) console.log(`               ↳ ${f}`);
+  if (!fullFails && fails.length > 3) console.log(`               ↳ ...and ${fails.length - 3} more (--full-fails)`);
 }
 // Controls are graded against their KNOWN expected verdict, mutations against
 // whether they died. Kept apart in the arithmetic as well as in the check: a
@@ -399,8 +533,23 @@ const controls = rows.filter(r => r[0].startsWith(CONTROL));
 const mutations = rows.filter(r => !r[0].startsWith(CONTROL));
 const survived = mutations.filter(r => r[1] === 'SURVIVES');
 const unanchored = rows.filter(r => r[1] === 'ANCHOR MISSING');
-console.log(`\n${mutations.length - survived.length - unanchored.filter(r => !r[0].startsWith(CONTROL)).length}`
-  + `/${mutations.length} mutations die.`);
+// One clause per verdict, because a single ratio elides them. `54/54 mutations
+// die` was printed over a run that was 53 DIES and one RUNS AWAY: true as
+// phrased, and the phrasing was doing the work. A reader cannot debug a verdict
+// computed from four triggers and printed as one word.
+const tally = new Map();
+for (const [, verdict] of mutations) tally.set(verdict, (tally.get(verdict) || 0) + 1);
+const ungraded = mutations.filter(r => r[1] === 'ANCHOR MISSING' || r[1] === 'INDETERMINATE');
+const parts = [];
+const order = ['DIES', 'SURVIVES', 'RUNS AWAY', 'INDETERMINATE', 'ANCHOR MISSING'];
+const words = {
+  DIES: 'die', SURVIVES: 'SURVIVE', 'RUNS AWAY': 'runs away',
+  INDETERMINATE: 'graded nothing', 'ANCHOR MISSING': 'never applied',
+};
+for (const v of order) if (tally.get(v)) parts.push(`${tally.get(v)} ${words[v]}`);
+if (controls.length) parts.push(`${controls.length} control survives`);
+console.log(`\n${parts.join(', ')}   (${mutations.length - ungraded.length} of `
+  + `${mutations.length} mutations reached a verdict)`);
 
 // The control's expected verdict is the one value in this table known
 // independently of the run, so it is the only check that still works when the
@@ -416,7 +565,6 @@ if (badControls.length) {
   }
   process.exit(2);
 }
-if (controls.length) console.log(`${controls.length} control row(s) survived, as they must.`);
 reportIndistinguishableRows(mutations);
 
 // A mutation whose anchor no longer matches measured NOTHING, and it degrades
@@ -428,6 +576,16 @@ if (unanchored.length) {
     + ' their target file. These measured nothing; the count above does not cover them:');
   for (const [label] of unanchored) console.error(`  - ${label}`);
   console.error('\nRe-anchor each against the current source before trusting this table.');
+  process.exit(1);
+}
+// A row whose run never finished graded nothing. It is not a survivor and not a
+// catch; it has to be run again, so it exits non-zero and says so rather than
+// being averaged into the count above.
+const indeterminate = rows.filter(r => r[1] === 'INDETERMINATE');
+if (indeterminate.length) {
+  console.error(`\n${indeterminate.length} row(s) did not run to completion and were graded NOTHING.`
+    + ' Re-run them; a verdict was not reached:');
+  for (const [label] of indeterminate) console.error(`  - ${label}`);
   process.exit(1);
 }
 if (survived.length) process.exit(1);
@@ -451,15 +609,39 @@ if (survived.length) process.exit(1);
  * table tests both deliberately. The question "are these meant to be the same?"
  * has to be answered by a person, which is why this prints and exits 0.
  */
+// Node reports a FILE as failing alongside the tests inside it, so `✖` matches
+// both `a session whose buckets collapse ...` and `test/rollover-collapse.test.js`.
+// The file-level line carries nothing the test-level lines do not — if a test in
+// a file fails, the file fails — and it is NOT emitted reliably: measured across
+// two runs of the same pair on the same tree, the marker attached to
+// `recordSession arg advisorModel` in one and to `arg decision` in the other,
+// which split a genuine duplicate pair in one run and grouped it in the next.
+// A fingerprint containing it is unstable, so the grouping was too.
+//
+// Dropped from the FINGERPRINT only, never from the verdict: a mutation that
+// makes a file fail to load produces the file line and no test lines, and
+// removing it there would turn a caught mutation into SURVIVES.
+function isFileMarker(f) { return /\.(test|spec)\.[cm]?js$/.test(f.trim()); }
+
 function reportIndistinguishableRows(all) {
   const groups = new Map();
+  const fileOnly = [];
   for (const [label, verdict, fails] of all) {
     // Only a row that died has a meaningful set. A survivor's set is empty by
     // definition, and a runaway's is whatever was captured before it was killed.
     if (verdict !== 'DIES' || !fails.length) continue;
-    const key = [...fails].sort().join('\\u0000');
+    const named = fails.filter(f => !isFileMarker(f));
+    // Died only at file level: no test name to compare, so it cannot be grouped
+    // without every such row colliding with every other on an empty key.
+    if (!named.length) { fileOnly.push(label); continue; }
+    const key = named.sort().join('\\u0000');
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(label);
+  }
+  if (fileOnly.length) {
+    console.log('\nRows that died at FILE level with no failing test named. Not grouped, because');
+    console.log('there is nothing to compare; check what the file did rather than trusting DIES:');
+    for (const label of fileOnly) console.log(`  · ${label}`);
   }
   const collisions = [...groups.values()].filter(g => g.length > 1);
   if (!collisions.length) return;

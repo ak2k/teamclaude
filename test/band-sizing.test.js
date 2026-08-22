@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AccountManager } from '../src/account-manager.js';
-import { decideBand, headroomOf } from '../src/band-decision.js';
+import { decideBand, headroomOf, pressureOf } from '../src/band-decision.js';
 
 // Capacity-based band sizing: how many accounts must run in parallel, rather
 // than how much worse in pressure an account may be.
@@ -253,6 +253,52 @@ test('an unmeasured account sorted behind a covering one is still admitted', () 
     'the unmeasured account was sized out, so its capacity can never become known');
   assert.equal(decision.achieved, 1,
     'the unmeasured account counted toward coverage, which lets it close the band');
+});
+
+test('an account whose PRESSURE is unknown is admitted, and can still be picked', () => {
+  // The other absence. Its five-hour level is known, so the exemption written
+  // against headroom alone does not reach it: it sorts last on pressure, meets
+  // a target the peer already met, and is dropped. With the probe off that
+  // account's weekly is then unknowable forever, because the only way it gets
+  // reported is by being used.
+  const am = managerWith([
+    acct('covers-alone', { quota: { ...weekly(0.05, 10), unified5h: 0 } }),
+    acct('weekly-unknown', { quota: { unified5h: 0.3, unified5hReset: Date.now() + 4 * 3600e3 } }),
+  ]);
+  const snap = am._bandSnapshot(am.accounts, OPUS, Date.now());
+  assert.equal(pressureOf(snap.accounts[1], Date.now()).kind, 'absent',
+    'the second account has a known pressure, so this tests the case already covered');
+  assert.equal(headroomOf(snap.accounts[1], am.switchThreshold).kind, 'known',
+    'its headroom is absent too, which is the case the headroom exemption already handles');
+
+  const decision = decide(am);
+  assert.equal(decision.kind, 'sized');
+  assert.ok(decision.keep.includes(1),
+    'an account with no known weekly was sized out, so its weekly can never be discovered');
+  // Admission is not enough on its own: discovery happens because the pick can
+  // reach it, and an unknown pressure ranks first on the probe bias.
+  assert.equal(am._pickBestAvailable(null, OPUS).name, 'weekly-unknown');
+});
+
+test('an admitted unknown-pressure account contributes its MEASURED headroom to achieved', () => {
+  // Deliberate, and the opposite of the headroom case. Absent headroom adds
+  // nothing because unmeasured capacity is not capacity; here the capacity is
+  // measured and only the pressure is not, so `achieved` would understate what
+  // the admitted set can absorb if it were left out.
+  const am = managerWith([
+    acct('measured', { quota: { ...weekly(0.05, 10), unified5h: 0.5 } }),
+    acct('weekly-unknown', { quota: { unified5h: 0, unified5hReset: Date.now() + 4 * 3600e3 } }),
+  ]);
+  const decision = decide(am);
+  assert.equal(decision.kind, 'sized');
+  assert.deepEqual(decision.keep, [0, 1]);
+  const snap = am._bandSnapshot(am.accounts, OPUS, Date.now());
+  const sum = snap.accounts.reduce((acc, a) => {
+    const h = headroomOf(a, am.switchThreshold);
+    return acc + (h.kind === 'known' ? h.value : 0);
+  }, 0);
+  assert.ok(Math.abs(decision.achieved - sum) < 1e-9,
+    `achieved ${decision.achieved} omits measured capacity the band is carrying (${sum})`);
 });
 
 test('an unmeasured account admitted this way still cannot close the band', () => {

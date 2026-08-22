@@ -651,10 +651,10 @@ export class AccountManager {
   /** Record that a session's request was served by an account (always on, even
    * when distribution is off — the readout is passive). This is what pins a
    * session for future affinity, for the buckets this request actually spent. */
-  recordSession(sessionId, accountIndex, model = null, advisorModel = null, decision = null) {
+  recordSession(sessionId, accountIndex, model = null, advisorModel = null, decision = null, hold = null) {
     if (sessionId) {
       const buckets = this._requestBuckets(model, advisorModel, decision);
-      this.sessionTracker.touch(sessionId, accountIndex, buckets);
+      this.sessionTracker.touch(sessionId, accountIndex, buckets, undefined, hold);
       this._seedPinWindows(sessionId, accountIndex, buckets);
     }
   }
@@ -683,14 +683,21 @@ export class AccountManager {
 
   /** Mark a session request as in flight / finished. Paired around the whole
    * client request (including retries) so a long streaming completion keeps the
-   * session counted as active for its full duration. */
+   * session counted as active for its full duration.
+   *
+   * Returns an opaque HOLD identifying this request, which the caller passes to
+   * `recordSession` (so the pins it spends are counted as live) and back to
+   * `endSession` (so they stop being). It identifies a request because the
+   * session cannot: two concurrent requests share one session id and spend
+   * different pins, which is the whole reason the session-level counter could
+   * not answer this. Losing it is not fatal, see `endRequest`. */
   beginSession(sessionId) {
-    if (sessionId) this.sessionTracker.beginRequest(sessionId);
+    return sessionId ? this.sessionTracker.beginRequest(sessionId) : null;
   }
 
-  endSession(sessionId) {
+  endSession(sessionId, hold = null) {
     if (!sessionId) return;
-    const s = this.sessionTracker.endRequest(sessionId);
+    const s = this.sessionTracker.endRequest(sessionId, hold);
     // The session is quiescent: no attempt is left that could still move it, so
     // where each bucket was last SERVED is now final and any rollover owed on
     // it can be resolved. Settling earlier lets a sibling request that was
@@ -1102,14 +1109,46 @@ export class AccountManager {
   }
 
   /**
-   * The accounts whose pressure is within `tolerance` of the maximum — the set
-   * selection may choose from when expiry routing is on. Band membership rather
-   * than a raw sort keeps the comparison transitive, lets distributeSessions
-   * spread load across near-equal accounts (the #109 protection), and gives
-   * hysteresis for free. Pass-through when the feature is off or nothing is
-   * known. Unknown-pressure accounts stay in (discover their quota by using
-   * them). The maximum always qualifies, so a non-empty input never bands to
-   * empty.
+   * The accounts selection may choose from when expiry routing is on. Sized by
+   * CAPACITY where a five-hour level has been reported — accounts admitted in
+   * descending pressure order until their combined headroom covers
+   * `coverage` — and by the `tolerance` pressure ratio only as the fallback
+   * when no account has reported one, which is the cold-start and probe-off
+   * state. Band membership rather than a raw sort keeps the comparison
+   * transitive, lets distributeSessions spread load across the admitted set
+   * (the #109 protection), and gives hysteresis for free. Pass-through when the
+   * feature is off or nothing is known. An account missing either measurement
+   * stays in, since being used is how it becomes known, and a non-empty input
+   * never bands to empty.
+   *
+   * Membership says an account is worth spending; it does NOT say the admitted
+   * set is near-equal in pressure. Capacity sizing widens deliberately, so a
+   * caller that needs the better of two members must compare pressure itself.
+   *
+   * WHAT THE SET STOPPED GUARANTEEING, and every consumer measured against it.
+   * Under the ratio, every member sat within `tolerance` of the maximum, so
+   * membership carried a BOUND on how much pressure a caller could lose by
+   * picking any member. Capacity sizing removes that bound on purpose, so
+   * membership is a statement about ADMISSION and no longer about ordering.
+   *
+   * Three consumers, which is every call site of `_bandedCandidates`:
+   *
+   *   `_pickLeastLoaded`      takes it as a SET and ranks within it (decidePick)
+   *   `_pickBestAvailable`    takes it as a SET and ranks within it (pressureRank)
+   *   `_switchOnSessionReset` uses membership as a VETO, over a choice it now
+   *                           ranks by pressure then reset — it ranked on the
+   *                           reset timestamp alone until that was fixed, which
+   *                           is what made the veto load-bearing
+   *
+   * That is the whole distinction: ranking within the set never depended on
+   * what the set bounded, so both of those are sound either way. The veto is
+   * only as strong as the property the set still encodes, so it stopped being
+   * sound the moment the band went heterogeneous — which is why that function
+   * now ranks pressure itself instead of letting membership stand in for it.
+   *
+   * The rule for a new consumer: if you are using membership to mean "near the
+   * best pressure", it does not mean that. Rank pressure, or state why
+   * admission alone is the property you need.
    */
   _topPressureBand(candidates, model = null) {
     // One clock for the whole band: pressure rises continuously as a window
@@ -1583,8 +1622,12 @@ export class AccountManager {
     // if it is unknown we are still probing it, so leave it alone.
     if (!current || current.quota.unified7dReset == null) return;
 
-    let best = null;
-    let bestWeekly = current.quota.unified7dReset;
+    // Only accounts whose weekly expires sooner than the current one's are
+    // candidates at all: that is the "and weekly expires sooner" half of what
+    // this function is for. Filtering and ranking were one comparison before,
+    // and separating them is what lets the ranking below change without moving
+    // the trigger.
+    const eligible = [];
     for (const acc of candidates) {
       if (acc.index === this.currentIndex) continue;
       if (!this._isAvailable(acc)) continue; // enough session & weekly quota left
@@ -1592,22 +1635,45 @@ export class AccountManager {
       if ((acc.priority || 0) > (current.priority || 0)) continue;
       const weekly = acc.quota.unified7dReset;
       if (weekly == null) continue; // need a known weekly to compare
-      if (weekly < bestWeekly) {
-        bestWeekly = weekly;
-        best = acc;
-      }
+      if (weekly < current.quota.unified7dReset) eligible.push(acc);
+    }
+    if (!eligible.length) return;
+
+    // One clock for every account compared here, the current one included:
+    // pressure rises continuously, so scoring the incumbent at a different
+    // instant from its challengers decides a near-tie on the gap between two
+    // Date.now() reads.
+    const now = Date.now();
+    const field = eligible.concat(current);
+    const ranks = this._pickPressures(field, null, now).map(pressureRank);
+    const rankOf = new Map(field.map((a, i) => [a.index, ranks[i]]));
+
+    let best = null;
+    for (const acc of eligible) {
+      if (!best) { best = acc; continue; }
+      const mine = rankOf.get(acc.index);
+      const theirs = rankOf.get(best.index);
+      // Highest pressure, then soonest reset — the same order the pick uses, so
+      // the two cannot disagree about which of two accounts is worth more.
+      if (mine < theirs
+        || (mine === theirs && acc.quota.unified7dReset < best.quota.unified7dReset)) best = acc;
     }
 
-    if (best) {
-      // This is a third writer of currentIndex, and it ranks on reset time alone
-      // — the metric expiry pressure exists to correct. Left unbanded it can park
-      // `current` on a nearly-drained account merely because that window rolls
-      // soon, and since drain never preempts, nothing would move it off again.
-      if (this.expiryRouting.enabled && !this._bandedCandidates().includes(best)) return;
-      this._setCurrent(best);
-      this._beginRamp(best);
-      console.log(`[TeamClaude] Account "${best.name}" session quota reset and weekly expires sooner — switching to it`);
-    }
+    // This is a writer of currentIndex that used to rank on reset time alone —
+    // the metric expiry pressure exists to correct. TWO guards, because they are
+    // different properties and neither implies the other. Band membership says
+    // the account is worth spending at all; it was a usable proxy for pressure
+    // only while the band WAS the tolerance ratio, and capacity sizing widens it
+    // deliberately. The rank comparison says this switch does not leave a
+    // strictly better account behind, which membership never claimed.
+    if (this.expiryRouting.enabled && !this._bandedCandidates().includes(best)) return;
+    // Strictly worse than what we are on: stay. Equal keeps the reset tiebreak
+    // that got us here, and with expiry routing off every rank is absent and
+    // equal, so this cannot fire at all.
+    if (rankOf.get(best.index) > rankOf.get(current.index)) return;
+    this._setCurrent(best);
+    this._beginRamp(best);
+    console.log(`[TeamClaude] Account "${best.name}" session quota reset and weekly expires sooner — switching to it`);
   }
 
   _isNearQuota(account, model = null) {
@@ -1847,9 +1913,10 @@ export class AccountManager {
    * scope (the session) whose lifecycle is not the account's. Keeping them apart
    * means nothing that reads the account totals changes behaviour here.
    *
-   * Nothing steers on any of this yet. It is the measurement that load-weighted
-   * distribution and cache-aware decisions would need, recorded first so those
-   * can be argued against numbers.
+   * The per-session context recorded here is what the pick's load term ranks
+   * on, through `SessionTracker.loadFor`. The cumulative totals beside it steer
+   * nothing: they are the measurement a cache-aware migration policy would
+   * need, and no such policy exists here.
    */
   recordTokenUsage(accountIndex, sessionId, model, usage) {
     if (!usage) return;

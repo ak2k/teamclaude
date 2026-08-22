@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { AccountManager } from '../src/account-manager.js';
 import { createProxyServer } from '../src/server.js';
-import { SESSION_KNOWN_TTL_MS } from '../src/session-tracker.js';
+import { SESSION_KNOWN_TTL_MS, SessionTracker } from '../src/session-tracker.js';
 import { setUpstreamProxy, resolveUpstreamProxy, resetUpstreamProxy } from '../src/upstream-proxy.js';
 
 // Session-aware routing is decided across three separate calls the server makes
@@ -69,9 +69,9 @@ function scriptedUpstream(reply = () => ({ status: 200 })) {
 // the band because a fixture is always built before it is scored, so the
 // elapsed time between is non-negative. Stable, but on the line: changing the
 // tolerance default or the pressure formula moves these tests as a group.
-function fleet(specs, { expiryRouting = { enabled: true } } = {}) {
+function fleet(specs, { expiryRouting = { enabled: true }, sessionTracker } = {}) {
   const am = new AccountManager(specs.map(s => apikey(s.name)), 0.98,
-    { distributeSessions: true, expiryRouting });
+    { distributeSessions: true, expiryRouting, sessionTracker });
   const now = Date.now();
   specs.forEach((s, i) => {
     const q = am.accounts[i].quota;
@@ -226,6 +226,57 @@ test('a session is held in flight for the duration of its request', async () => 
   assert.deepEqual(observed, { inFlight: 1 },
     'the session was not counted as in flight while its request was upstream');
   assert.equal(am.sessionTracker.sessions.get('sess-1').inFlight, 0, 'the hold was never released');
+});
+
+// The hold has to reach `recordSession` from the server, not just exist in the
+// tracker's API. Severing `ctx.hold` at that one call site survived the whole
+// suite until this test: every other case for per-pin holds drives the tracker
+// directly, so the WIRING was the part nothing held.
+test('a live stream keeps its account counted while a sibling request runs elsewhere', async () => {
+  let clock = Date.now();
+  const tracker = new SessionTracker({ activeTtlMs: 50, now: () => clock });
+  const am = fleet([
+    { name: 'a', used: 0.2, resetH: 50, fableUsed: 0.9, fableResetH: 50 },
+    { name: 'b', used: 0.9, resetH: 50, fableUsed: 0.05, fableResetH: 50 },
+  ], { sessionTracker: tracker });
+
+  let release;
+  const held = new Promise(r => { release = r; });
+  let opusSeen = false;
+  const upstream = { server: null, hits: [] };
+  upstream.server = http.createServer(async (req, res) => {
+    await new Promise(done => { req.resume(); req.on('end', done); });
+    const account = (req.headers['x-api-key'] || '').replace(/^k-/, '');
+    upstream.hits.push({ account });
+    if (account === 'a' && !opusSeen) { opusSeen = true; await held; }  // the long stream
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{}');
+  });
+
+  let observed = null;
+  await withProxy(am, upstream, async (send) => {
+    let slow;
+    try {
+      slow = send({ model: OPUS, messages: [] }, SID);          // pins Opus to 'a', holds
+      const deadline = Date.now() + 5000;
+      while (!opusSeen) {
+        assert.ok(Date.now() < deadline, `the Opus request never reached 'a': ${JSON.stringify(upstream.hits)}`);
+        await new Promise(r => setTimeout(r, 5));
+      }
+      assert.equal(await send({ model: FABLE, messages: [] }, SID), 200);  // Fable goes to 'b'
+      // Push both pins well past the active window. Only a hold can keep the
+      // still-streaming account counted now.
+      clock += 60_000;
+      observed = { a: tracker.activeCountFor(0, clock), b: tracker.activeCountFor(1, clock) };
+    } finally {
+      release();
+      await slow?.catch(() => {});
+    }
+  });
+
+  assert.equal(observed.a, 1,
+    'the account serving a live stream read as idle once its pin aged out');
+  assert.equal(observed.b, 0, 'the finished Fable request kept holding its account');
 });
 
 // Two requests for one session overlap during a rollover. The one served off

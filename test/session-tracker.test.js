@@ -92,14 +92,14 @@ test('a session stays known but goes inactive past the active window', () => {
 test('an in-flight request keeps a session active well past the active window', () => {
   const { clock, now } = fixedClock();
   const st = new SessionTracker({ now });
-  st.beginRequest('s1', clock.t);
-  st.touch('s1', 1, [SHARED], clock.t); // routed to account 1
+  const hold = st.beginRequest('s1', clock.t);
+  st.touch('s1', 1, [SHARED], clock.t, hold); // routed to account 1
   // A 5-minute completion — far longer than the 2-min active window.
   clock.t += SESSION_ACTIVE_TTL_MS * 3;
   assert.equal(st.stats(clock.t).active, 1, 'still active while in flight');
   assert.equal(st.activeCountFor(1, clock.t), 1, 'still counts as load on its account');
   // Request finishes; recency now governs and it stays active a bit longer.
-  st.endRequest('s1', clock.t);
+  st.endRequest('s1', null, clock.t);
   assert.equal(st.stats(clock.t).active, 1);
   // Then idles out of the active window.
   clock.t += SESSION_ACTIVE_TTL_MS + 1;
@@ -115,7 +115,7 @@ test('an in-flight session is never expired, even past the 1h known window', () 
   assert.equal(st.pinnedAccount('s1', SHARED, clock.t), 0, 'pin survives while in flight');
   assert.equal(st.stats(clock.t).known, 1);
   // Only after it finishes and idles out does it get forgotten.
-  st.endRequest('s1', clock.t);
+  st.endRequest('s1', null, clock.t);
   clock.t += SESSION_KNOWN_TTL_MS + 1;
   assert.equal(st.pinnedAccount('s1', SHARED, clock.t), null);
 });
@@ -123,13 +123,17 @@ test('an in-flight session is never expired, even past the 1h known window', () 
 test('concurrent requests on one session balance in/out via inFlight', () => {
   const { clock, now } = fixedClock();
   const st = new SessionTracker({ now });
-  st.beginRequest('s1', clock.t);
-  st.beginRequest('s1', clock.t);
-  st.touch('s1', 2, [SHARED], clock.t);
+  // Both requests spend the same bucket, so each takes its own hold on it —
+  // which is what makes the count balance rather than the first release
+  // dropping a pin the second is still spending.
+  const h1 = st.beginRequest('s1', clock.t);
+  const h2 = st.beginRequest('s1', clock.t);
+  st.touch('s1', 2, [SHARED], clock.t, h1);
+  st.touch('s1', 2, [SHARED], clock.t, h2);
   clock.t += SESSION_ACTIVE_TTL_MS + 1;
-  st.endRequest('s1', clock.t); // one still in flight
+  st.endRequest('s1', h1, clock.t); // one still in flight
   assert.equal(st.activeCountFor(2, clock.t), 1);
-  st.endRequest('s1', clock.t); // now idle
+  st.endRequest('s1', h2, clock.t); // now idle
   clock.t += SESSION_ACTIVE_TTL_MS + 1;
   assert.equal(st.activeCountFor(2, clock.t), 0);
 });
@@ -179,8 +183,8 @@ test('a long stream still counts as load on the account it is spending', () => {
   const st = new SessionTracker({ now });
   st.touch('s1', 1, [FABLE], clock.t);
   clock.t += SESSION_ACTIVE_TTL_MS * 2;
-  st.beginRequest('s1', clock.t);
-  st.touch('s1', 0, [SHARED], clock.t);
+  const hold = st.beginRequest('s1', clock.t);
+  st.touch('s1', 0, [SHARED], clock.t, hold);
   clock.t += SESSION_ACTIVE_TTL_MS * 3;                // a 6-minute completion
   assert.equal(st.activeCountFor(0, clock.t), 1, 'the account serving the live request lost its load');
   assert.equal(st.activeCountFor(1, clock.t), 0);
@@ -279,7 +283,7 @@ test('a finished request re-orders its session ahead of older idle ones', () => 
   clock.t += 1;
   st.touch('idle-new', 0, [SHARED], clock.t);
   clock.t += 1;
-  st.endRequest('stream', clock.t); // the stream is now the most recent activity
+  st.endRequest('stream', null, clock.t); // the stream is now the most recent activity
   clock.t += 1;
   st.touch('fresh', 0, [SHARED], clock.t);
   assert.equal(st.pinnedAccount('stream', SHARED, clock.t), 2, 'the just-finished stream was evicted first');
@@ -315,8 +319,8 @@ test('the in-flight hold never goes below zero', () => {
   const { clock, now } = fixedClock();
   const st = new SessionTracker({ now });
   st.beginRequest('s1', clock.t);
-  st.endRequest('s1', clock.t);
-  st.endRequest('s1', clock.t);           // an unpaired release
+  st.endRequest('s1', null, clock.t);
+  st.endRequest('s1', null, clock.t);           // an unpaired release
   assert.equal(st.sessions.get('s1').inFlight, 0, 'the hold went negative');
   clock.t += SESSION_KNOWN_TTL_MS + 1;
   st.sweep(clock.t);
@@ -367,7 +371,7 @@ test('releasing the in-flight hold refreshes the session\'s recency', () => {
   const st = new SessionTracker({ now });
   st.beginRequest('s1', clock.t);
   clock.t += SESSION_ACTIVE_TTL_MS + 1;   // a long completion
-  st.endRequest('s1', clock.t);
+  st.endRequest('s1', null, clock.t);
   assert.equal(st.stats(clock.t).active, 1, 'a session that just finished a request reads as idle');
 });
 

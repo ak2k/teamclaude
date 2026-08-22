@@ -67,11 +67,12 @@ const SESSION_EVICT_PROBE = 16;
 // session's cache costs; summing it would answer a question nobody asks. The
 // sums, read against `firstSeen` and `lastSeen`, give the session's burn rate.
 //
-// Nothing reads either of them yet. The reason to expect them to be the useful
-// pair is an argument from cost structure, not a measurement: what a session is
-// worth moving off a loaded account should scale with the load it sheds and
-// against the cache that move destroys. That is a HYPOTHESIS, and the data to
-// test it did not exist before this. Recording it is how it gets tested.
+// `context` and `reports` are what `loadFor` ranks accounts on; the cumulative
+// sums are not read by any decision. The reason to expect the burn-rate pair to
+// be the useful one for MIGRATION — what a session is worth moving off a loaded
+// account should scale with the load it sheds and against the cache that move
+// destroys — remains an argument from cost structure rather than a measurement.
+// No migration policy exists here to test it.
 //
 // `reports` counts the usage objects that contributed, so a consumer can tell
 // "no tokens because the session is idle" from "no tokens because nothing was
@@ -110,6 +111,9 @@ export class SessionTracker {
     this.maxSessions = maxSessions ?? SESSION_MAX;
     this._now = now || (() => Date.now());
     this._lastSweep = 0;
+    // Monotonic per-record identity. Never reused, so a hold issued against a
+    // record that has since been evicted can never match its replacement.
+    this._recordSeq = 0;
     // Records dropped to keep the map under the cap, since start. Deliberately
     // NOT counting the TTL expiries around it: forgetting an idle session is
     // the design working, while the cap firing means the bound is binding and
@@ -123,7 +127,7 @@ export class SessionTracker {
   // for a family this request did not touch is none of this request's business.
   // Throttled sweep keeps the map bounded even in a headless server that never
   // renders status.
-  touch(sessionId, accountIndex = null, buckets = null, now = this._now()) {
+  touch(sessionId, accountIndex = null, buckets = null, now = this._now(), hold = null) {
     if (!sessionId) return null;
     const s = this._ensure(sessionId, now);
     s.lastSeen = now;
@@ -136,7 +140,23 @@ export class SessionTracker {
     // the status payload as a `"-1"` key in both perBucket and perAccount, which
     // is a live account nobody can find.
     if (accountIndex != null && accountIndex >= 0 && buckets) {
-      for (const bucket of buckets) s.pins.set(bucket, { idx: accountIndex, at: now });
+      for (const bucket of buckets) {
+        s.pins.set(bucket, { idx: accountIndex, at: now });
+        // The request that is placing this pin is the one spending it, so it
+        // takes a hold until it ends. Claimed here rather than at
+        // `beginRequest` because which buckets a request spends is not known
+        // until selection has run and this is the call that says so. Claimed at
+        // most once per bucket per request: a retry that re-pins the same
+        // bucket is the same request still spending it.
+        // Same ownership test as the release. Without it the window admits a
+        // phantom claim on the way IN as well as a bad release on the way out:
+        // a request whose record was evicted mid-flight would add a hold count
+        // to whatever record now answers to its id.
+        if (hold && hold.rid === s.rid && !hold.buckets.has(bucket)) {
+          hold.buckets.add(bucket);
+          s.pinHolds.set(bucket, (s.pinHolds.get(bucket) || 0) + 1);
+        }
+      }
     }
     if (now - this._lastSweep > SWEEP_INTERVAL_MS) this.sweep(now);
     return s;
@@ -151,7 +171,27 @@ export class SessionTracker {
     const s = this._ensure(sessionId, now);
     s.inFlight += 1;
     s.lastSeen = now;
-    return s;
+    // The per-pin hold this request will fill in once selection tells it which
+    // buckets it is spending. Returned so the caller can hand it back at
+    // `endRequest`; a caller that does not is covered by the drain below.
+    const hold = { rid: s.rid, buckets: new Set() };
+    s.holds.add(hold);
+    return hold;
+  }
+
+  // Release one request's per-pin holds. Idempotent: a hold already released,
+  // or one belonging to another session, is a no-op rather than an
+  // under-count.
+  _releaseHold(s, hold) {
+    // Ownership again, because this is reachable from the drain as well as from
+    // `endRequest` and a guard at one entrance is not a guard.
+    if (!hold || hold.rid !== s.rid || !s.holds.delete(hold)) return;
+    for (const bucket of hold.buckets) {
+      const n = s.pinHolds.get(bucket) || 0;
+      if (n <= 1) s.pinHolds.delete(bucket);
+      else s.pinHolds.set(bucket, n - 1);
+    }
+    hold.buckets.clear();
   }
 
   // Mark a request as finished (refreshes recency; releases the in-flight hold)
@@ -160,10 +200,42 @@ export class SessionTracker {
   // last ACTIVITY. Without this a just-finished long stream sits where it was
   // when it STARTED — at the front — and is evicted ahead of sessions that have
   // been idle far longer.
-  endRequest(sessionId, now = this._now()) {
+  // `hold` before `now`, deliberately: `now` is a test affordance and the hold
+  // is what callers actually pass. With the order reversed a hold handed to the
+  // second parameter was silently taken as the clock, which set `lastSeen` to an
+  // object and made every subsequent `now - lastSeen` NaN — so the session read
+  // as inactive and the mistake looked like a load-accounting bug.
+  endRequest(sessionId, hold = null, now = this._now()) {
+    // A clock passed where the hold goes is the mistake this reorder exists to
+    // prevent, and a silent no-op on it would be the same class of bug wearing
+    // the new signature. Programming error, so it says so.
+    if (hold != null && typeof hold !== 'object') {
+      throw new TypeError(`endRequest(sessionId, hold, now): hold must be the object beginRequest returned, got ${typeof hold}`);
+    }
     const s = sessionId && this.sessions.get(sessionId);
     if (!s) return null;
+    // A HOLD HAS AUTHORITY ONLY OVER THE RECORD THAT ISSUED IT. A record can be
+    // evicted while its request is still in flight, and a later request under
+    // the same id builds a NEW record; when the original finally ends, its hold
+    // names a record that no longer exists. Acting on it here would decrement a
+    // stranger's in-flight count, release a pin it never claimed, and — once
+    // that count hit zero — drain the live replacement's holds, reading its
+    // 50000-token stream as idle. The replacement is not this request's to
+    // finish, so a foreign hold does nothing at all. That is also why it cannot
+    // leak: the record it belonged to is gone, and gone records hold nothing.
+    if (hold && hold.rid !== s.rid) return null;
     s.inFlight = Math.max(0, s.inFlight - 1);
+    this._releaseHold(s, hold);
+    // THE PAIRING GUARANTEE. A hold that never comes back would leave a pin
+    // counted as loaded forever, where the pre-existing `Math.max(0, ...)`
+    // above merely floors an integer. So the count is not trusted to pairing
+    // alone: no outstanding request means no held pin, by definition, and any
+    // hold still standing at zero was lost by a caller that did not return it.
+    // Draining here makes a leak self-correcting at the end of the session's
+    // last request rather than permanent.
+    if (s.inFlight === 0) {
+      for (const h of [...s.holds]) this._releaseHold(s, h);
+    }
     s.lastSeen = now;
     this.sessions.delete(sessionId);
     this.sessions.set(sessionId, s);
@@ -235,6 +307,17 @@ export class SessionTracker {
     const s = {
       pins: new Map(), windows: null, firstSeen: now, lastSeen: now, count: 0, inFlight: 0,
       tokens: new Map(),
+      // Per-pin outstanding requests, ADDED beside `inFlight` rather than
+      // replacing it. The two answer different questions and only one reader
+      // wants this one: `holds` is the live request records, `pinHolds` is
+      // bucket -> how many of them are spending that bucket.
+      holds: new Set(), pinHolds: new Map(),
+      // Identity of THIS record, stamped into every hold it issues. A session id
+      // does not identify a record: eviction and idle-expiry both replace the
+      // record while the id lives on, and an in-flight request outlives its own
+      // record in exactly those cases. A counter rather than the record object,
+      // so a hold cannot keep an evicted record alive by referring to it.
+      rid: ++this._recordSeq,
     };
     this.sessions.set(sessionId, s);
     return s;
@@ -328,35 +411,44 @@ export class SessionTracker {
     }
   }
 
-  // The instant of the pin a still-streaming request is spending, or -Infinity
-  // when nothing is in flight. Hoisted out of the per-pin test below so that
-  // asking about one pin at a time does not rescan every pin to find it.
-  _newestPinAt(s) {
-    let newest = -Infinity;
-    if (s.inFlight > 0) for (const pin of s.pins.values()) newest = Math.max(newest, pin.at);
-    return newest;
-  }
-
   // Does THIS pin count as load on `accountIndex` right now? A pin counts while
   // the bucket it belongs to was served within the active window — a session
   // that took one diverted Fable request an hour ago is not load on that account
   // for the rest of the hour, and counting it there skews the spreading signal
   // the whole feature exists to provide. A request in flight keeps the pin it is
-  // spending counted however long it streams, which is the freshest one: a
-  // 5-minute completion must not drop out of "active".
+  // spending counted however long it streams: a 5-minute completion must not
+  // drop out of "active".
   //
   // Per PIN rather than per session, because the two questions have different
   // answers: a session is load on every account it is currently spending, while
   // each bucket's tokens were spent on exactly one of them.
-  _pinCounts(pin, accountIndex, now, newest) {
+  //
+  // WHY A HELD COUNT AND NOT THE NEWEST PIN. The in-flight arm used to be
+  // `pin.at === newest`, reading the session-level `inFlight` counter and then
+  // guessing that the outstanding request was spending the most recently placed
+  // pin. That is true for one request and false for two: with an Opus stream
+  // live on one account and a later Fable request on another, only the Fable pin
+  // matched, and the account carrying a live 100000-token context read as idle
+  // on every term. The guess also fails the ordinary shape of a short request
+  // starting after a long one and finishing first. `pinHolds` counts the
+  // outstanding requests actually spending each bucket, so nothing is inferred.
+  //
+  // WHAT THIS DOES NOT COVER: concurrency within ONE family. Pins are keyed by
+  // bucket, so two concurrent requests on the same family share a pin and the
+  // second RE-PINS it — the first account's pin is destroyed rather than aged
+  // out, and a hold cannot rescue a pin that no longer exists. A live stream can
+  // therefore still read as zero load when a later request on the SAME family is
+  // served elsewhere. Closing that means a pin per request rather than per
+  // bucket, which is a different change. The claim here is cross-family
+  // concurrency, which is the shape an Opus stream beside a Fable request takes.
+  _pinCounts(s, bucket, pin, accountIndex, now) {
     if (pin.idx !== accountIndex) return false;
-    return now - pin.at <= this.activeTtlMs || pin.at === newest;
+    return now - pin.at <= this.activeTtlMs || (s.pinHolds.get(bucket) || 0) > 0;
   }
 
   _pinsInclude(s, accountIndex, now) {
-    const newest = this._newestPinAt(s);
-    for (const pin of s.pins.values()) {
-      if (this._pinCounts(pin, accountIndex, now, newest)) return true;
+    for (const [bucket, pin] of s.pins) {
+      if (this._pinCounts(s, bucket, pin, accountIndex, now)) return true;
     }
     return false;
   }
@@ -430,10 +522,9 @@ export class SessionTracker {
     let reports = 0;
     for (const s of this.sessions.values()) {
       if (!this._isActive(s, now)) continue;
-      const newest = this._newestPinAt(s);
       let counted = false;
       for (const [bucket, pin] of s.pins) {
-        if (!this._pinCounts(pin, accountIndex, now, newest)) continue;
+        if (!this._pinCounts(s, bucket, pin, accountIndex, now)) continue;
         counted = true;
         const t = s.tokens?.get(bucket);
         if (!t) continue;

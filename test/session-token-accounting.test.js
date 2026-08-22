@@ -314,6 +314,162 @@ test('the consolidated walk agrees with the count it replaced, on every account'
   }
 });
 
+// ---------------------------------------------------------------------------
+// PER-PIN IN-FLIGHT ACCOUNTING. The in-flight exemption used to read the
+// session-level counter and then guess that the outstanding request was
+// spending the most recently placed pin. True for one request, false for two.
+// These two tests are a pair on purpose: the first is the case that must now
+// count, the second is the case that must still NOT, so the first is not bought
+// by making every pin of a live session count forever.
+// ---------------------------------------------------------------------------
+
+test('two concurrent requests on one session each hold their own account', () => {
+  const now = 1_000_000;
+  let clock = now;
+  const t = new SessionTracker({ activeTtlMs: 60_000, now: () => clock });
+
+  const holdA = t.beginRequest(SID, clock);
+  t.touch(SID, 0, [OPUS_BUCKET], clock, holdA);
+  t.recordTokens(SID, OPUS_BUCKET, startUsage({ cache_read_input_tokens: 100000 }), clock);
+
+  // Far past activeTtlMs, so only the in-flight arm can keep account 0 counted.
+  clock += 10 * 60_000;
+  const holdB = t.beginRequest(SID, clock);
+  t.touch(SID, 1, [FABLE_BUCKET], clock, holdB);
+  t.recordTokens(SID, FABLE_BUCKET, startUsage({ cache_read_input_tokens: 7000 }), clock);
+
+  assert.equal(t.sessions.get(SID).inFlight, 2, 'the fixture does not have two requests in flight');
+  assert.ok(clock - t.sessions.get(SID).pins.get(OPUS_BUCKET).at > 60_000,
+    'the older pin is still inside the active window, so freshness would carry it anyway');
+
+  assert.equal(t.activeCountFor(0, clock), 1, 'the account carrying a live stream read as idle');
+  assert.ok(t.loadFor(0, clock).context > 100000,
+    'a live 100000-token context was not counted as load on the account serving it');
+  assert.equal(t.activeCountFor(1, clock), 1);
+});
+
+test('a pin nobody is spending still ages out, even while the session is alive', () => {
+  const now = 1_000_000;
+  let clock = now;
+  const t = new SessionTracker({ activeTtlMs: 60_000, now: () => clock });
+
+  const holdA = t.beginRequest(SID, clock);
+  t.touch(SID, 0, [OPUS_BUCKET], clock, holdA);
+  t.recordTokens(SID, OPUS_BUCKET, startUsage({ cache_read_input_tokens: 100000 }), clock);
+  t.endRequest(SID, holdA, clock);           // the Opus stream finishes
+
+  // A second request keeps the SESSION alive on another account. Account 0's pin
+  // is now stale and nothing is spending it.
+  clock += 10 * 60_000;
+  const holdB = t.beginRequest(SID, clock);
+  t.touch(SID, 1, [FABLE_BUCKET], clock, holdB);
+
+  assert.ok(t.sessions.get(SID).inFlight > 0, 'the session is not live, so this proves nothing');
+  assert.equal(t.activeCountFor(0, clock), 0,
+    'an hour-cold pin counted as load because some OTHER request was in flight');
+  assert.equal(t.loadFor(0, clock).context, 0);
+  assert.equal(t.activeCountFor(1, clock), 1);
+});
+
+test('one request ending releases its own pin while a sibling is still in flight', () => {
+  const now = 1_000_000;
+  let clock = now;
+  const t = new SessionTracker({ activeTtlMs: 60_000, now: () => clock });
+
+  const holdA = t.beginRequest(SID, clock);
+  t.touch(SID, 0, [OPUS_BUCKET], clock, holdA);
+  const holdB = t.beginRequest(SID, clock);
+  t.touch(SID, 1, [FABLE_BUCKET], clock, holdB);
+
+  t.endRequest(SID, holdA, clock);           // the Opus request finishes
+  clock += 10 * 60_000;                      // its pin is now well past the window
+
+  // The drain at zero cannot be what releases this: the Fable request is still
+  // outstanding, so `inFlight` never reaches 0. Only the explicit release can,
+  // which is what makes this the test that distinguishes the two paths -- the
+  // seam row severing the explicit release SURVIVED the whole suite until it
+  // existed, because every other case let the drain cover it.
+  assert.equal(t.sessions.get(SID).inFlight, 1, 'the drain would fire, so this proves nothing');
+  assert.equal(t.activeCountFor(0, clock), 0,
+    'a finished request kept holding its pin because only the drain releases holds');
+  assert.equal(t.activeCountFor(1, clock), 1, 'the sibling still in flight lost its own hold');
+});
+
+// A session id does not identify a RECORD. Eviction and idle-expiry both
+// replace the record while the id lives on, and a request in flight outlives
+// its own record in exactly those cases. Its hold then names something gone.
+test('a hold from an evicted record has no authority over its replacement', () => {
+  const now = 1_000_000;
+  const t = new SessionTracker({ activeTtlMs: 60_000, maxSessions: 1, now: () => now });
+
+  const h1 = t.beginRequest(SID, now);
+  t.touch(SID, 0, [OPUS_BUCKET], now, h1);
+  t.recordTokens(SID, OPUS_BUCKET, startUsage({ cache_read_input_tokens: 100000 }), now);
+
+  // A cap of one makes the eviction deterministic: admitting any other session
+  // evicts this record even though its request is still in flight.
+  t.beginRequest('other', now);
+  t.touch('other', 1, [OPUS_BUCKET], now);
+  assert.ok(!t.sessions.has(SID), 'the record was not evicted, so this tests nothing');
+
+  // A new request under the same id builds a NEW record with its own hold.
+  const h2 = t.beginRequest(SID, now);
+  t.touch(SID, 0, [OPUS_BUCKET], now, h2);
+  t.recordTokens(SID, OPUS_BUCKET, startUsage({ cache_read_input_tokens: 50000 }), now);
+  assert.notEqual(h1.rid, h2.rid, 'the two holds share an identity, so ownership cannot be tested');
+  const before = t.loadFor(0, now);
+  assert.equal(before.sessions, 1);
+
+  // The ORIGINAL request finishes and releases a hold on a record that is gone.
+  t.endRequest(SID, h1, now);
+
+  const after = t.loadFor(0, now);
+  assert.equal(after.sessions, 1, 'a foreign hold ended the replacement\'s live request');
+  assert.equal(after.context, before.context, 'a foreign hold drained the replacement\'s load');
+  assert.equal(t.sessions.get(SID).inFlight, 1, 'a foreign hold decremented a stranger\'s in-flight count');
+});
+
+test('a hold from an evicted record cannot claim a pin on its replacement either', () => {
+  const now = 1_000_000;
+  const t = new SessionTracker({ activeTtlMs: 60_000, maxSessions: 1, now: () => now });
+
+  const h1 = t.beginRequest(SID, now);
+  t.beginRequest('other', now);
+  t.touch('other', 1, [OPUS_BUCKET], now);
+  assert.ok(!t.sessions.has(SID), 'the record was not evicted, so this tests nothing');
+
+  t.beginRequest(SID, now);                       // rebuilds the record
+  // The evicted request now pins, carrying a hold the new record never issued.
+  t.touch(SID, 0, [OPUS_BUCKET], now, h1);
+  assert.equal(t.sessions.get(SID).pinHolds.size, 0,
+    'a foreign hold claimed a pin on a record that never issued it');
+});
+
+test('passing a clock where the hold goes is refused, not silently ignored', () => {
+  const t = new SessionTracker({ now: () => 1_000_000 });
+  t.beginRequest(SID, 1_000_000);
+  assert.throws(() => t.endRequest(SID, 1_000_000), /hold must be the object/,
+    'a number in the hold slot was accepted, which is how it used to corrupt lastSeen');
+});
+
+test('a hold lost by its caller is drained when the session goes quiet', () => {
+  const now = 1_000_000;
+  let clock = now;
+  const t = new SessionTracker({ activeTtlMs: 60_000, now: () => clock });
+
+  const hold = t.beginRequest(SID, clock);
+  t.touch(SID, 0, [OPUS_BUCKET], clock, hold);
+  // The caller loses the token and ends the request without it, which is the
+  // shape an unpaired release takes. Left standing, the pin would be counted as
+  // loaded for as long as the record survives.
+  t.endRequest(SID, null, clock);
+
+  clock += 10 * 60_000;
+  assert.equal(t.sessions.get(SID).inFlight, 0);
+  assert.equal(t.activeCountFor(0, clock), 0, 'a lost hold kept a stale pin counted forever');
+  assert.equal(t.sessions.get(SID).pinHolds.size, 0, 'the hold was never drained');
+});
+
 test('a bucket whose pin has gone stale stops counting, and takes its context with it', () => {
   const now = 1_000_000;
   const t = new SessionTracker({ now: () => now, activeTtlMs: 60_000 });
