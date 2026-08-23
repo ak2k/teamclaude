@@ -28,6 +28,26 @@
 //     indistinguishable from "nothing was looked at". Rows require a summary
 //     line and grade INDETERMINATE without one — never CAUGHT, since a process
 //     dying for an unrelated reason also writes no summary.
+//   - UNPARSEABLE MUTATION. A replacement that leaves invalid syntax is not a
+//     tested mutation: every importer fails to load and the row DIES on the fact
+//     that JavaScript has a grammar. Measured on `beginSession call deleted`
+//     before it was re-anchored — 32 entries, every one an unparseable file, not
+//     one a named test, harness exit 0. The mutated file is now syntax-checked
+//     BEFORE the suite runs and grades INVALID, which is ungraded and fails the
+//     run. Checked rather than inferred from the output: the marker-counting
+//     alternative already has a known counterexample in this file's own
+//     file-level section, which missed that row because one named test survived
+//     among the failures it hid.
+//   - A SECOND DEFINITION OF "THE SUITE". The command comes from the project's
+//     `scripts.test`, not from a copy here. A hardcoded `node --test` agreed
+//     with `npm test` until it did not: the project sets `--test-timeout`, this
+//     did not, and a slow-but-passing test would clear the baseline and fail CI.
+//
+// TWO CONTROL ROWS carry the only verdicts known before a run: an identity
+// rewrite that must SURVIVE, and an unparseable edit that must be refused as
+// INVALID. They check what this table can still SAY. Ordinary rows are graded by
+// what the code does; if the harness loses the ability to emit a verdict, only a
+// row whose expected verdict is that one can reveal it.
 //
 // The shape is always the same: green because nothing was checked, not because
 // nothing was wrong. That is the same failure this table exists to catch in the
@@ -99,6 +119,74 @@ if (dirty && !force) {
   process.exit(2);
 }
 
+// The suite command comes from the project, not from here. Read once, up front,
+// so a malformed package.json fails before any file is mutated rather than
+// midway through a table with rows already restored and rows not yet run.
+const PKG = `${REPO}/package.json`;
+if (!fs.existsSync(PKG)) {
+  console.error(`no ${PKG} — cannot learn how this project runs its tests`);
+  process.exit(2);
+}
+const TEST_COMMAND = (() => {
+  let pkg;
+  try {
+    pkg = JSON.parse(fs.readFileSync(PKG, 'utf8'));
+  } catch (err) {
+    console.error(`${PKG} is not valid JSON, so the test command cannot be read: ${err.message}`);
+    process.exit(2);
+  }
+  const script = pkg.scripts?.test;
+  if (typeof script !== 'string' || !script.trim()) {
+    console.error(`${PKG} defines no "scripts.test", so there is no project definition of a test run`
+      + ' for this harness to share. Add one, or this table grades against a second definition.');
+    process.exit(2);
+  }
+  return script.trim();
+})();
+
+// The harness's own runaway guard, and it must OUTLAST the project's per-test
+// timeout or a slow-but-passing test is killed here and graded as a runaway
+// while `npm test` reports it green. Asserted rather than assumed, because the
+// two numbers live in different files and only one of them is in this repo's
+// review surface.
+const PROCESS_TIMEOUT_MS = 180_000;
+{
+  // FAILING TO READ THE TIMEOUT IS A REFUSAL, NOT A PASS. The first version of
+  // this guard tested `match && value >= wall`, so a command it could not parse
+  // left `match` null, the condition false, and the harness proceeded without a
+  // word — scoring "I could not find the number" as "the number is fine". That
+  // is the same absence-shaped failure as the INDETERMINATE grade one screen
+  // down, in the guard written to prevent its cousin.
+  //
+  // The token is captured whole rather than as `(\d+)`, because a digit-prefix
+  // match scores a partial parse as a successful one: `--test-timeout=2m` would
+  // capture `2`, compare 2 against 180000, and pass.
+  const all = [...TEST_COMMAND.matchAll(/--test-timeout(?:=|\s+)(\S+)/g)];
+  if (!all.length) {
+    console.error(`cannot find a --test-timeout in the project's test command, so this harness cannot`
+      + ' verify that its own process wall outlasts it. Without that, a test the project would let'
+      + ' finish can be killed here and graded RUNS AWAY while `npm test` calls it green.\n'
+      + `  scripts.test: ${TEST_COMMAND}\n`
+      + '  Add an explicit --test-timeout=<ms> there, or lower PROCESS_TIMEOUT_MS to a value you have'
+      + ' checked by hand.');
+    process.exit(2);
+  }
+  // node applies the last occurrence, so this compares the one that will govern.
+  const raw = all[all.length - 1][1];
+  if (!/^\d+$/.test(raw)) {
+    console.error(`the project's per-test timeout is "${raw}", which this harness cannot read as a`
+      + ' number of milliseconds, so the precondition below is unverifiable rather than satisfied.\n'
+      + `  scripts.test: ${TEST_COMMAND}`);
+    process.exit(2);
+  }
+  if (Number(raw) >= PROCESS_TIMEOUT_MS) {
+    console.error(`the project's per-test timeout (${raw}ms) is not shorter than this harness's`
+      + ` process timeout (${PROCESS_TIMEOUT_MS}ms), so a test the project would allow to finish would be`
+      + ' killed here and graded RUNS AWAY. Raise PROCESS_TIMEOUT_MS above it.');
+    process.exit(2);
+  }
+}
+
 const SELECT = 'accountManager.getActiveAccount(ctx.tried, ctx.model, ctx.advisorModel, ctx.sessionId, ctx.decision)';
 const RECORD = 'accountManager.recordSession(ctx.sessionId, account.index, ctx.model, ctx.advisorModel, ctx.decision, ctx.hold);';
 const CONFIRM = 'accountManager.confirmRouted(ctx.sessionId, account.index, ctx.model, ctx.advisorModel, ctx.decision);';
@@ -165,6 +253,24 @@ const M = [
     'accountManager.recordSession(ctx.sessionId, accountManager.currentIndex, ctx.model, ctx.advisorModel, ctx.decision, ctx.hold);'],
   ['recordSession     arg model', RECORD,
     'accountManager.recordSession(ctx.sessionId, account.index, null, ctx.advisorModel, ctx.decision, ctx.hold);'],
+  // THESE TWO COLLAPSE, and it is legitimate. `_requestBuckets` pins the advisor
+  // family only when `advisorModel && decision?.advisorServed` — a conjunction —
+  // so nulling either conjunct removes the same bucket. Exercised rather than
+  // reasoned, across all three states the conjunction can be in:
+  //
+  //   advisorServed true    unmutated ["unified7d","unified7dFable"]
+  //                         arg advisorModel -> null ["unified7d"]
+  //                         arg decision     -> null ["unified7d"]
+  //   advisorServed false   all three ["unified7d"]
+  //   no advisor at all     all three ["unified7d"]
+  //
+  // Identical in every case, so the suite cannot tell them apart because there
+  // is nothing to tell apart: one intervention, two spellings.
+  //
+  // The tripwire: they must separate if the advisor family is ever pinned on a
+  // path that does not consult `decision.advisorServed` — that would make the
+  // conjunction two independent conditions. If that lands and these still
+  // collapse, the new path is untested.
   ['recordSession     arg advisorModel', RECORD,
     'accountManager.recordSession(ctx.sessionId, account.index, ctx.model, null, ctx.decision, ctx.hold);'],
   // Explicitly null rather than truncating the list: dropping `decision` off the
@@ -195,6 +301,23 @@ const M = [
   // one a file that failed to parse, and not one a named test. A row can be
   // green-looking, applied, and still be testing the language rather than the
   // code.
+  // THESE TWO COLLAPSE, and the group is new because re-anchoring both rows onto
+  // the whole statement is what made them comparable. `beginSession` short
+  // circuits on a falsy id — `sessionId ? beginRequest(sessionId) : null` — so
+  // passing null never reaches the tracker and is observably identical to not
+  // calling it at all. Exercised rather than reasoned:
+  //
+  //   unmutated              tracked=true  inFlight=1  hold={rid:1,...}
+  //   arg sessionId -> null  tracked=false             hold=null
+  //   call deleted           tracked=false             hold=undefined
+  //
+  // `null` against `undefined` is a difference in the local only: both are
+  // falsy, and `recordSession` and `endSession` both default the parameter and
+  // guard on truthiness. One intervention, two spellings.
+  //
+  // The tripwire: they must separate if `beginSession` ever does work BEFORE its
+  // falsy check — a log line, a counter, anything observable — because then not
+  // calling it and calling it with null stop being the same act.
   ['beginSession      call deleted', BEGIN_SESSION, ''],
   ['beginSession      arg sessionId', BEGIN_SESSION,
     '      ctx.hold = accountManager.beginSession(null);\n'],
@@ -381,6 +504,23 @@ const M = [
   // before there was anything to detect.
   [`${CONTROL}        identity rewrite, mutates nothing`,
     'export class SessionTracker', 'export class SessionTracker', 'src/session-tracker.js'],
+  // The second control, and the other half of the pair. NOOP proves the table
+  // can still emit SURVIVES; this proves it can still emit INVALID — that a
+  // mutation which does not parse is refused rather than graded on the resulting
+  // wall of import failures. Both are the only rows whose verdict is known
+  // before the run, so they are the only rows that say anything about the
+  // harness rather than about the code.
+  [`${CONTROL}        unparseable, must be refused not graded`,
+    'export class SessionTracker', 'export class SessionTracker {{{', 'src/session-tracker.js'],
+];
+
+// What each control must grade as. A control that grades anything else means the
+// harness has lost the ability to produce that verdict, which no ordinary row
+// can reveal: rows are graded by what the code does, controls by what the table
+// can still say.
+const CONTROL_EXPECTATIONS = [
+  { match: 'identity rewrite', expect: 'SURVIVES' },
+  { match: 'unparseable', expect: 'INVALID' },
 ];
 
 const wanted = args.filter(a => !a.startsWith('--') );
@@ -391,6 +531,42 @@ const readOriginal = (file) => {
   if (!originals.has(file)) originals.set(file, fs.readFileSync(file, 'utf8'));
   return originals.get(file);
 };
+// Does the file parse? `node --check` on the same interpreter that will run the
+// suite, so the grammar asked about is the grammar that would execute. The
+// package is `"type": "module"`, and --check parses `.js` under it as ESM.
+//
+// Returns null when it parses, or the reason when it does not. The reason is
+// carried rather than discarded because INVALID FAILS THE RUN: a stop sign that
+// does not say why forces the next reader to re-derive what this already
+// computed and threw away, which is the same waste as the fail-sets truncated to
+// three before --full-fails existed.
+//
+// SCOPE, and its tripwire. This checks the MUTATED TARGET only. A replacement
+// that leaves the target parseable while breaking what another module imports
+// from it would not be caught here, and would grade DIES on the resulting import
+// failures. Not reachable with the current rows — every replacement is a
+// same-shape substitution, an argument or a statement swapped for one of the
+// same kind. **It goes live the moment a row is added whose replacement is not
+// that**, and closing it then needs an IMPORT SMOKE TEST rather than a wider
+// `node --check`, because the residual class is a file that parses and fails on
+// import. Do not reach for a bigger parse check and conclude it cannot be done.
+//
+// Half-detected today, and both halves are worth knowing: such a row would die
+// on file-level markers with no named test, so the file-only section below WOULD
+// surface it — except in the variant where one named test survives among the
+// failures the display hides, which is exactly how the `beginSession` row
+// escaped. Partially detected with a known hole, not undetected.
+function syntaxCheck(file) {
+  try {
+    execFileSync(NODE, ['--check', file], { stdio: ['ignore', 'ignore', 'pipe'] });
+    return null;
+  } catch (err) {
+    const out = (err.stderr || '').toString();
+    const named = /^\w*(?:Syntax|Reference|Type)Error: .*$/m.exec(out);
+    return (named ? named[0] : out.split('\n').find(l => l.trim()) || 'did not parse').trim();
+  }
+}
+
 // One suite run, returning the failing test names and whether it terminated.
 // Shared by the baseline below and every mutated row, so the two cannot come to
 // differ about what "failing" means.
@@ -408,7 +584,23 @@ function runSuite() {
   const fd = fs.openSync(logPath, 'w');
   let timedOut = false;
   try {
-    execFileSync(NODE, ['--test'], { cwd: REPO, stdio: ['ignore', fd, fd], timeout: 180_000 });
+    // THE PROJECT'S OWN TEST COMMAND, read from package.json rather than
+    // reimplemented. A hardcoded `node --test` is a second definition of "the
+    // suite passed" that agrees with the first until it does not: the project
+    // runs `--test-timeout=120000`, the harness ran no per-test timeout at all,
+    // and a 130-second test would pass this baseline and fail CI. A copy of the
+    // command is the same defect one release later, so the script is the source.
+    //
+    // `node` in that script must resolve to the interpreter running this
+    // harness, not whatever is first on PATH, so the table is measured on the
+    // developer's runtime. Prepending its directory keeps both properties:
+    // the project's exact command, this process's runtime.
+    execFileSync('/bin/sh', ['-c', TEST_COMMAND], {
+      cwd: REPO,
+      stdio: ['ignore', fd, fd],
+      timeout: PROCESS_TIMEOUT_MS,
+      env: { ...process.env, PATH: `${path.dirname(NODE)}:${process.env.PATH || ''}` },
+    });
   } catch (err) {
     // A suite that never terminates is not a passing suite. Some mutations
     // (dropping the per-request exclusion set) make retry loops unbounded, so
@@ -498,10 +690,32 @@ for (const [label, find, replace, relativeFile] of M) {
   }
   fs.writeFileSync(target, mutated);
   let run;
+  let syntaxError = null;
   try {
-    run = runSuite();
+    // A MUTATION THAT DOES NOT PARSE HAS NOT BEEN TESTED. It is neither caught
+    // nor survived: every file importing the broken module fails to load, the
+    // suite reports a wall of failures, and the row grades DIES on the fact that
+    // JavaScript has a grammar. Measured on the `beginSession call deleted` row
+    // before it was re-anchored: 32 entries, every one an unparseable file and
+    // not one a named test, and the harness exited 0.
+    //
+    // CHECKED, NOT INFERRED FROM THE OUTPUT. The alternative was to classify by
+    // whether the failures look file-level, and this file already carries a
+    // section that does a version of that — which missed exactly this row,
+    // because it fires only when NO named test failed and one had survived among
+    // the 29 the display hid. That is a heuristic over output with a known
+    // counterexample. `node --check` is a decision about the bytes: deterministic,
+    // no counting, and it makes the class impossible rather than detectable.
+    // It also costs milliseconds and runs BEFORE the suite, so a broken row stops
+    // in a tenth of a second instead of after a full run.
+    syntaxError = syntaxCheck(target);
+    run = syntaxError ? null : runSuite();
   } finally {
     fs.writeFileSync(target, original);
+  }
+  if (syntaxError) {
+    rows.push([label, 'INVALID', [syntaxError]]);
+    continue;
   }
   // Anything already failing at the baseline is not this row's doing. The
   // baseline is empty by the check above, so this subtraction is belt to that
@@ -539,29 +753,40 @@ const unanchored = rows.filter(r => r[1] === 'ANCHOR MISSING');
 // computed from four triggers and printed as one word.
 const tally = new Map();
 for (const [, verdict] of mutations) tally.set(verdict, (tally.get(verdict) || 0) + 1);
-const ungraded = mutations.filter(r => r[1] === 'ANCHOR MISSING' || r[1] === 'INDETERMINATE');
+const ungraded = mutations.filter(r => r[1] === 'ANCHOR MISSING' || r[1] === 'INDETERMINATE' || r[1] === 'INVALID');
 const parts = [];
-const order = ['DIES', 'SURVIVES', 'RUNS AWAY', 'INDETERMINATE', 'ANCHOR MISSING'];
+const order = ['DIES', 'SURVIVES', 'RUNS AWAY', 'INVALID', 'INDETERMINATE', 'ANCHOR MISSING'];
 const words = {
   DIES: 'die', SURVIVES: 'SURVIVE', 'RUNS AWAY': 'runs away',
-  INDETERMINATE: 'graded nothing', 'ANCHOR MISSING': 'never applied',
+  INVALID: 'DID NOT PARSE', INDETERMINATE: 'graded nothing', 'ANCHOR MISSING': 'never applied',
 };
 for (const v of order) if (tally.get(v)) parts.push(`${tally.get(v)} ${words[v]}`);
-if (controls.length) parts.push(`${controls.length} control survives`);
+// Factual, not a verdict. An earlier version printed "N controls as expected"
+// unconditionally, so a run where a control graded WRONG announced them as
+// expected one line above the error saying they were not — the summary
+// asserting the very thing the check below exists to decide.
+if (controls.length) parts.push(`controls: ${controls.map(r => r[1]).join(', ')}`);
 console.log(`\n${parts.join(', ')}   (${mutations.length - ungraded.length} of `
   + `${mutations.length} mutations reached a verdict)`);
 
-// The control's expected verdict is the one value in this table known
-// independently of the run, so it is the only check that still works when the
-// checking logic is wrong. A control that DIES means the table is attributing
-// failures to a mutation that changed nothing.
-const badControls = controls.filter(r => r[1] !== 'SURVIVES');
+// Control verdicts are the only values in this table known independently of the
+// run, so they are the only checks that still work when the checking logic is
+// wrong. Each is graded against its OWN expectation: the identity rewrite must
+// survive (or the table is attributing failures to a mutation that changed
+// nothing), and the unparseable one must be refused (or the table has gone back
+// to grading syntax errors as caught mutations).
+const badControls = [];
+for (const row of controls) {
+  const rule = CONTROL_EXPECTATIONS.find(r => row[0].includes(r.match));
+  if (!rule) { badControls.push([row[0], row[1], row[2], 'no expectation registered']); continue; }
+  if (row[1] !== rule.expect) badControls.push([row[0], row[1], row[2], `expected ${rule.expect}`]);
+}
 if (badControls.length) {
-  console.error(`\n${badControls.length} control row(s) did not survive. A row that mutates NOTHING`
-    + ' must not be graded as caught; every verdict above is suspect:');
-  for (const [label, verdict, fails] of badControls) {
-    console.error(`  - ${label}: ${verdict}`);
-    for (const f of fails.slice(0, 3)) console.error(`      ↳ ${f}`);
+  console.error(`\n${badControls.length} control row(s) graded wrong. Controls check what this table can`
+    + ' still SAY, not what the code does, so every verdict above is suspect:');
+  for (const [label, verdict, fails, why] of badControls) {
+    console.error(`  - ${label}: got ${verdict}, ${why}`);
+    for (const f of (fails || []).slice(0, 3)) console.error(`      ↳ ${f}`);
   }
   process.exit(2);
 }
@@ -581,7 +806,19 @@ if (unanchored.length) {
 // A row whose run never finished graded nothing. It is not a survivor and not a
 // catch; it has to be run again, so it exits non-zero and says so rather than
 // being averaged into the count above.
-const indeterminate = rows.filter(r => r[1] === 'INDETERMINATE');
+// A mutation that did not parse was never tested. Not caught, not survived:
+// ungraded, and the run says so rather than counting it.
+const invalid = mutations.filter(r => r[1] === 'INVALID');
+if (invalid.length) {
+  console.error(`\n${invalid.length} row(s) produced source that does not parse, so they were NEVER RUN.`
+    + ' A syntax error is not a caught mutation; re-anchor them against the current source:');
+  for (const [label, , why] of invalid) {
+    console.error(`  - ${label}`);
+    if (why?.[0]) console.error(`      ${why[0]}`);
+  }
+  process.exit(1);
+}
+const indeterminate = mutations.filter(r => r[1] === 'INDETERMINATE');
 if (indeterminate.length) {
   console.error(`\n${indeterminate.length} row(s) did not run to completion and were graded NOTHING.`
     + ' Re-run them; a verdict was not reached:');

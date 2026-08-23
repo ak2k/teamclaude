@@ -46,16 +46,43 @@ finish. Dropping the per-request exclusion set turns failover into an unbounded
 retry loop: the suite spins instead of failing. A run that has to be killed is a
 caught mutation, not a passing one — but only if the harness says so.
 
-*And the detection has a window, which makes its verdict load-dependent.*
-Runaway is recognised as `killed || signal || ENOBUFS` against a 180s wall and a
-64 MB buffer, so a runaway that neither floods nor exceeds that window inside it
-reads as **SURVIVES**. The failure is a false negative: it errs toward *looking
-healthy*, which is the direction nobody double-checks. This is not theoretical —
-on a box at load average 33, the exclusion-set row read SURVIVES three times in
-a row, on the tip and again at base, and was written up as a pre-existing
-survivor. Interleaved runs across both trees with strays killed between each
-read RUNS AWAY 3/3 and 3/3; driving the mutation directly produced 5.8 million
-lines before it was killed. The runaway is real and the detector is what failed.
+**The mechanism was measured and it is not what this section assumed.** The
+paragraph above described an unbounded loop hitting a wall clock. Three
+instrumented repetitions of the exclusion-set row, same tree, same machine, on
+every field the verdict reads:
+
+```
+rep 1  ENOBUFS    98,211ms  65,135,482 bytes  fails-matched=0   -> RUNS AWAY
+rep 2  (no code)  12,622ms   7,810,845 bytes  fails-matched=12  -> DIES
+rep 3  ENOBUFS   107,484ms  65,135,443 bytes  fails-matched=0   -> RUNS AWAY
+```
+
+`killed=undefined` and `signal=null` in all three: **the 180s timeout never
+fired, in any observation.** Nothing was unbounded and nothing was killed. Rep 2
+finished in twelve seconds naming twelve failing tests. What actually happened is
+that the mutation makes the suite enormously chatty, and whether it out-ran a
+64 MiB pipe buffer before finishing was a race — won a third of the time. Losing
+it produced a 65 MB head containing no failure markers at all, which without the
+`ENOBUFS` rule would have read **SURVIVES** on the most important seam argument
+in the table.
+
+**The verdict was a coin flip, and the earlier load-average story was a
+correlation.** Load makes losing the race likelier; it is not the mechanism.
+
+Fixed by writing the child's output to a **file** rather than a pipe buffer,
+which has no such limit. The row now grades DIES deterministically with its
+twelve named tests. `RUNS AWAY` survives as a verdict for a genuine timeout and
+**currently has no members**. The `ENOBUFS` branch is kept although a file
+cannot raise it: it costs nothing and it is what stood between that row and a
+false green.
+
+*The wider lesson, which cost a day:* a verdict computed from four triggers and
+printed as one word cannot be debugged by looking at the word. Three repetitions
+with the fields printed settled in eight minutes what argument had not settled in
+a day. **In every flooded run the row also contributed zero named tests**, so its
+fingerprint was empty — and an empty fail-set is invisible to the duplicate
+detector, the one check aimed at coverage claims. It was carried as verified
+coverage *and* exempted from the check that would have questioned it.
 
 **Rule: check load and clear strays before trusting any verdict from this table,
 and treat a lone SURVIVES on a busy machine as unmeasured rather than
@@ -95,6 +122,19 @@ that wall of failures as a caught mutation. One row had reported a kill on every
 run since it was written. Run `node --check` on each mutant and grade a
 non-parsing one as broken.
 
+**Now implemented**, and worth reading as a worked example of choosing a check
+over a heuristic. The alternative was to classify by whether the failures look
+file-level, and this harness already had a section doing a version of that — and
+it missed the very row that motivated it, because it fires only when NO named
+test failed, and one had survived among the failures the display truncated away.
+That is a heuristic over output with a known counterexample. `node --check` is a
+decision about the bytes: deterministic, no counting, and it runs BEFORE the
+suite, so a broken row stops in a tenth of a second rather than after a full run.
+The verdict is `INVALID`, which is ungraded — neither caught nor survived — and
+fails the run. A committed control row carries a deliberately unparseable edit
+with expected verdict `INVALID`, so the ability to emit it is checked every run
+rather than the next time somebody breaks a file by accident.
+
 *The run stalls.* A missing summary line is not a pass and is not a kill. Grade
 a stalled mutant INDETERMINATE, re-run it, and never score it. Only a deadline
 kill measured against a known baseline is evidence of a runaway, and a loaded
@@ -109,6 +149,46 @@ behaviour names a real kill produces.
 
 A seventh, adjacent: a duplicated row in the mutation table over-reported 23
 mutations as 22 for several runs. Count what you ran, not what you listed.
+
+**A summary line is a claim, and it must be computed from the same data as the
+check below it.** Otherwise it is a second opinion dressed as a heading, and it
+is read first. Three instances in this project inside one week: `59/59 mutations
+die` printed over a run containing a row that had run away; `2 controls as
+expected` printed one line above the error saying one was not; and a freeze line
+calling six residuals recorded when three of them did not exist. Each heading was
+assembled separately from the check it summarised, and each was wrong in the
+reassuring direction. Derive the sentence from the verdicts, or print the
+verdicts and let the reader assemble it.
+
+**An eighth, and it is about the tools you audit with.** A raw control byte in a
+source file makes `grep` treat it as binary and match **nothing, silently** — no
+error, no warning, exit 1 as though the pattern were simply absent. It has landed
+three times in this project, most recently on this harness itself, where a
+fingerprint separator written as a literal NUL rather than the escape `'\u0000'`
+made the tool invisible to the tool being used to audit it. Three greps returned
+empty before anyone ran `file` and saw `data` instead of `UTF-8 text`.
+
+The rule is not "an empty result is a finding about the tool". That is half of
+it, and acting on the wrong half is how it costs a round: **an empty result is
+equally often a finding about your query, and the two are indistinguishable until
+you check both.** Both halves happened here within one hour — a NUL that really
+had broken the file, and a case-sensitive pattern against uppercase text that had
+not. Check the file type *and* the pattern before concluding either. Write
+separators as escape sequences; the point is the escape, not the codepoint.
+
+**And what the green-baseline check does and does not cover.** The harness runs
+the suite once before any mutation and aborts if it is not green, because with a
+test already red every row reads DIES on that one failure and the table reports
+total coverage of code nothing tests. That closes the already-red door outright,
+**and** the subset of flaky tests that happen to fail in the baseline run — which
+is not hypothetical: it caught a load-sensitive CLI test on its second day,
+unprompted, refusing to grade rather than crediting one failure to all 59 rows.
+
+What it leaves: a test that stays green in the baseline and fails inside some
+row's own run is still credited to that row, and the per-row subtraction of the
+baseline set cannot catch it, because that name was never in the baseline set.
+One green baseline establishes that the suite was green once, just now. That is
+strictly more than nothing and strictly less than reliability.
 
 ## The table can lie even when every mechanism works
 
