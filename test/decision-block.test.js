@@ -149,6 +149,89 @@ test('an account the band never saw is named with the reason it was skipped', ()
   assert.match(skipped, /unified5h 0\.990/);
 });
 
+test('a blocked family does not get to be the scope the block reports', () => {
+  // The blocklist is answered at the server with a 400 before selection runs,
+  // so a blocked family is not somewhere the next request can go. Reporting its
+  // band answered "where does traffic land" for traffic that never lands, on
+  // the same screen as the Blocked row saying it is refused.
+  const now = Date.now();
+  const am = sizedFleet(now);
+  for (const [i, o] of [[0, 0.1], [1, 0.3], [2, 0.6]]) {
+    am.accounts[i].quota = {
+      ...am.accounts[i].quota, unified7dFable: o, unified7dFableReset: now + (30 + i * 10) * H,
+    };
+  }
+  const status = { ...am.getStatus(), blockedModels: ['*fable*'] };
+  const fable = status.routing.find(e => e.model && /fable/.test(e.model));
+  assert.ok(fable, 'the premise: a fable scope exists');
+  assert.notEqual(fable.band.kind, 'passthrough',
+    'the premise: it decided something, so it would otherwise win the block');
+
+  const lines = renderStatus(status, { color: false, now }).split('\n');
+  const header = lines.find(l => l.startsWith('Decision'));
+  assert.ok(header, 'no block rendered at all');
+  assert.doesNotMatch(header, /fable/,
+    'the block is scoped to a family the server refuses before selection');
+  assert.match(row(lines, 'Other scopes') || '', /fable[^,]*: blocked/,
+    'the other-scopes line names its band variant, describing a decision about refused traffic');
+});
+
+test('with distribution off the block does not name a destination routing would not choose', () => {
+  // `_selectForSession` is never reached when distributeSessions is false — the
+  // default — so a new session follows the current account. Naming the pick's
+  // load winner reported a destination the router would not choose.
+  const now = Date.now();
+  const am = sizedFleet(now);
+  // Make the current account the LOAD LOSER, so the pick names someone else and
+  // the two answers actually differ. With every account idle they agree and the
+  // assertion says nothing.
+  am.recordSession('s1', 0, 'claude-opus-5');
+  am.recordTokenUsage(0, 's1', 'claude-opus-5', {
+    input_tokens: 0, cache_read_input_tokens: 400_000, cache_creation_input_tokens: 0, output_tokens: 0,
+  });
+  const status = am.getStatus();
+  assert.equal(status.sessions.distribute, false, 'the premise: distribution is off');
+  const entry = status.routing.find(e => e.scope === 'shared');
+  assert.notEqual(entry.pick.account, status.currentAccount,
+    'the premise: the pick names someone other than the current account');
+
+  const line = row(renderStatus(status, { color: false, now }).split('\n'), 'New session');
+  assert.match(line, /follows the current account \(distribution off\)/);
+  assert.doesNotMatch(line, /→/,
+    'an arrow asserts traffic flows to what follows it, and the operand here is a parenthetical');
+});
+
+test('a route scope answers Next request with that route, not the current account', () => {
+  // The current account can be excluded from the very scope being reported —
+  // it appears in that entry's excluded[] as route-excluded — so answering with
+  // it contradicted the block's own evidence three lines up.
+  const now = Date.now();
+  const am = new AccountManager(['a', 'b', 'c'].map(acct), 0.98,
+    { expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 } });
+  for (const i of [0, 1, 2]) {
+    am.accounts[i].quota = {
+      ...am.accounts[i].quota,
+      unified5h: 0.05 + i * 0.1, unified7d: 0.1 + i * 0.1, unified7dReset: now + (20 + i * 10) * H,
+      unified7dFable: 0.1 + i * 0.1, unified7dFableReset: now + (30 + i * 10) * H,
+    };
+  }
+  am.setRoutes([{ name: 'fable-only', match: ['*fable*'], accounts: ['b', 'c'] }]);
+  const status = am.getStatus();
+  const entry = status.routing.find(e => e.route === 'fable-only');
+  assert.equal(status.currentAccount, 'a', 'the premise: the current account is a');
+  assert.ok(entry.band.excluded.some(x => x.account === 'a' && x.reason === 'route-excluded'),
+    'the premise: this scope excluded the current account');
+
+  const lines = renderStatus(status, { color: false, now }).split('\n');
+  assert.match(lines.find(l => l.startsWith('Decision')), /fable/, 'the premise: the block reports that scope');
+  const line = row(lines, 'Next request');
+  assert.doesNotMatch(line, /→ a\b/,
+    'the block points at an account it listed as route-excluded on the same screen');
+  assert.match(line, /\(this route\)/);
+  assert.ok(entry.band.admitted.includes(line.match(/→ (\S+)/)[1]),
+    'the named account is not in the admitted set of the scope it is named under');
+});
+
 test('expiry routing off collapses to one row instead of a block', () => {
   const now = Date.now();
   const am = new AccountManager(['a', 'b'].map(acct), 0.98);

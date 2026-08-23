@@ -1,4 +1,4 @@
-import { findFamilyBlock, modelGlobOverlaps, gatingUtilization } from './model.js';
+import { findFamilyBlock, modelGlobMatches, modelGlobOverlaps, gatingUtilization } from './model.js';
 
 const ESC = '\x1b[';
 const RESET = `${ESC}0m`;
@@ -14,7 +14,7 @@ export function renderStatus(status, { color = process.stdout.isTTY, now = Date.
   lines.push(paint.bold('TeamClaude status'));
   lines.push(`${paint.dim('Active'.padEnd(12))} ${paint.cyan(status.currentAccount || 'none')}`);
   lines.push(`${paint.dim('Switch at'.padEnd(12))} ${formatPercent(status.switchThreshold)}`);
-  const decision = chooseScope(status.routing);
+  const decision = chooseScope(status.routing, blocked);
   // A decision with nothing to say collapses to one row here, beside `Switch
   // at`, rather than rendering an eleven-line block about a rule that is not
   // running. Naming a state costs a phrase; it does not earn a section. That
@@ -43,7 +43,7 @@ export function renderStatus(status, { color = process.stdout.isTTY, now = Date.
   }
   lines.push('');
 
-  for (const line of decisionLines(decision, status, paint)) lines.push(line);
+  for (const line of decisionLines(decision, status, blocked, paint)) lines.push(line);
 
   for (const line of routingLines(status.routes, blocked, paint)) lines.push(line);
 
@@ -99,14 +99,32 @@ function paintRoute(paint, color, value) {
  * is no reason to show a passthrough route while a sized shared scope has a
  * ladder to publish.
  */
-function chooseScope(routing) {
+function chooseScope(routing, blocked) {
   const entries = Array.isArray(routing) ? routing : [];
   if (!entries.length) return null;
-  const speaks = e => e.band.kind !== 'passthrough';
+  const speaks = e => e.band.kind !== 'passthrough' && !scopeBlocked(e, blocked);
   return entries.find(e => e.scope === 'route' && speaks(e))
     ?? entries.find(speaks)
     ?? entries.find(e => e.scope === 'shared')
+    ?? entries.find(e => !scopeBlocked(e, blocked))
     ?? entries[0];
+}
+
+/**
+ * Whether this scope's family is refused before selection ever runs.
+ *
+ * The blocklist is answered at the server with a 400 (`server.js:668`), so a
+ * blocked family never reaches routing at all. `routing[]` still computes a band
+ * for it — the report is about the fleet, and the fleet's quota is real — but a
+ * scope nothing can be routed to must not win the compact block, or the block
+ * answers "where does the next request go" for traffic that gets a 400, and does
+ * it on the same screen as the `Blocked` row saying so.
+ *
+ * The shared scope has no model and so is never blocked, which is what makes it
+ * a safe fallback.
+ */
+function scopeBlocked(entry, blocked) {
+  return entry.model != null && (blocked || []).some(p => modelGlobMatches(p, entry.model));
 }
 
 /**
@@ -221,7 +239,7 @@ function rankLabel(row) {
  * which is a scan over numbers the decision already emitted rather than a
  * replay of the rule that produced them.
  */
-function decisionLines(entry, status, paint) {
+function decisionLines(entry, status, blocked, paint) {
   if (!entry || entry.band.kind === 'passthrough') return [];
   const out = [];
   const { band, pick } = entry;
@@ -235,8 +253,16 @@ function decisionLines(entry, status, paint) {
   const auto = route?.autocreated ? `  ${paint.dim('(auto)')}` : '';
   out.push(`${paint.bold('Decision')}  ${paint.cyan(scope)}${auto}  ${paint.dim(`[${entry.bucket}]`)}`);
 
+  // WHERE A NEW SESSION GOES depends on whether distribution is on. With it off
+  // — the default — `_selectForSession` is never reached and a new session
+  // follows the current account, so naming the pick's winner here would report a
+  // destination the router would not choose. No arrow either: the right operand
+  // is a parenthetical rather than an account, and `→` asserts traffic flows to
+  // whatever follows it.
   const term = pick.by === 'first' ? 'no term discriminated' : `by ${pick.by}`;
-  if (pick.kind === 'picked') {
+  if (status.sessions?.distribute === false) {
+    out.push(`  ${paint.dim('New session'.padEnd(13))}${paint.dim('follows the current account (distribution off)')}`);
+  } else if (pick.kind === 'picked') {
     const tie = pick.tiedWith.length
       ? `first of ${pick.tiedWith.length + 1} tied on every term, config order`
       : term;
@@ -245,10 +271,18 @@ function decisionLines(entry, status, paint) {
     out.push(`  ${paint.dim('New session'.padEnd(13))}${paint.dim('nothing eligible for this scope')}`);
   }
 
-  const current = status.currentAccount || null;
-  if (current) {
-    const held = band.admitted.includes(current) ? '' : '; not in the admitted set';
-    out.push(`  ${paint.dim('Next request'.padEnd(13))}${paint.dim('→')} ${current} ${paint.dim(`(current${held})`)}`);
+  // WHERE THE NEXT REQUEST GOES is a question about THIS scope's model, so a
+  // route scope answers it with that route's own target — the account a request
+  // for that model would land on now. Answering with the current account
+  // regardless pointed at an account this very scope had listed in `excluded[]`
+  // as `route-excluded`, which is the block contradicting its own evidence.
+  const next = entry.scope === 'route' ? (route?.target ?? null) : (status.currentAccount || null);
+  const label = entry.scope === 'route' ? 'this route' : 'current';
+  if (next) {
+    const held = band.admitted.includes(next) ? '' : '; not in the admitted set';
+    out.push(`  ${paint.dim('Next request'.padEnd(13))}${paint.dim('→')} ${next} ${paint.dim(`(${label}${held})`)}`);
+  } else {
+    out.push(`  ${paint.dim('Next request'.padEnd(13))}${paint.dim('nothing eligible')}`);
   }
 
   out.push(`  ${paint.dim('Band'.padEnd(13))}${bandSummary(band)}`);
@@ -281,7 +315,10 @@ function decisionLines(entry, status, paint) {
     out.push(`  ${paint.dim((i === 0 ? 'Rule' : '').padEnd(13))}${paint.dim(part)}`);
   }
   if (others.length) {
-    const names = others.map(e => `${e.route || 'shared'}: ${e.band.kind}`).join(', ');
+    // A blocked scope reads `blocked`, not its band variant: the variant would
+    // describe a decision about traffic the server refuses before selection.
+    const names = others.map(e =>
+      `${e.route || 'shared'}: ${scopeBlocked(e, blocked) ? 'blocked' : e.band.kind}`).join(', ');
     out.push(`  ${paint.dim('Other scopes'.padEnd(13))}${paint.dim(names)}`);
   }
   out.push('');
