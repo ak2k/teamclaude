@@ -128,6 +128,35 @@ test('capacity figures carry three decimals', () => {
   }
 });
 
+test('the printed contributions add up to the published total', () => {
+  // `+x` claims this row's headroom is inside `achieved`. A lower-tier account
+  // is appended wholesale and never enters the coverage walk, so printing `+`
+  // for it made three rows sum to 2.541 on a fleet whose achieved was 1.796.
+  const now = Date.now();
+  const am = new AccountManager(
+    [acct('a'), acct('b'), { name: 'lower', type: 'apikey', apiKey: 'k-lower', priority: 1 }], 0.98,
+    { expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 } });
+  am.accounts.forEach((x, i) => {
+    x.quota = {
+      ...x.quota, unified5h: 0.05 + i * 0.1, unified5hReset: now + 2 * H,
+      unified7d: 0.1 + i * 0.1, unified7dReset: now + (20 + i * 10) * H,
+    };
+  });
+  const status = am.getStatus();
+  const entry = status.routing.find(e => e.scope === 'shared');
+  assert.ok(entry.band.ladder.some(r => r.reason === 'lower-tier' && r.headroom.kind === 'known'),
+    'the premise: a lower-tier row with a known headroom is in the ladder');
+
+  const lines = renderStatus(status, { color: false, now }).split('\n');
+  const contributions = lines.filter(l => /\+\d/.test(l)).map(l => Number(l.match(/\+([\d.]+)/)[1]));
+  assert.ok(contributions.length >= 2, 'no contributions printed, so nothing is being checked');
+  const sum = contributions.reduce((a, b) => a + b, 0);
+  assert.ok(Math.abs(sum - entry.band.achieved) < 5e-4,
+    `printed contributions sum to ${sum.toFixed(3)} against an achieved of ${entry.band.achieved.toFixed(3)}`);
+  assert.match(lines.find(l => /\blower\b/.test(l) && /p-/.test(l)), /p-\s+0\.\d{3}\s+lower/,
+    'the lower-tier row claims a contribution the coverage total never took');
+});
+
 test('a held account prints its capacity without a plus sign', () => {
   const now = Date.now();
   const lines = render(sizedFleet(now), now);
@@ -195,10 +224,76 @@ test('with distribution off the block does not name a destination routing would 
   assert.notEqual(entry.pick.account, status.currentAccount,
     'the premise: the pick names someone other than the current account');
 
+  // The block must name the account the ROUTER returns, not restate a rule.
+  // Saying "follows the current account" was true of the rule and false of the
+  // fleet whenever the current account was disabled or otherwise ineligible.
+  const entry2 = status.routing.find(e => e.scope === 'shared');
   const line = row(renderStatus(status, { color: false, now }).split('\n'), 'New session');
-  assert.match(line, /follows the current account \(distribution off\)/);
-  assert.doesNotMatch(line, /→/,
-    'an arrow asserts traffic flows to what follows it, and the operand here is a parenthetical');
+  assert.match(line, new RegExp(`→ ${entry2.target}\\b`),
+    'the row does not name what the routing preview returns');
+  assert.match(line, /distribution off; not load-ranked/,
+    'the row credits load ranking on a path where load did not rank anything');
+});
+
+test('a route pin is what the block names, even with distribution on', () => {
+  // `_selectRoute` skips the session path entirely when a pin is set, so the
+  // pick describes a ranking that never runs. With distribution OFF the block
+  // would name the target anyway; only distribution ON separates the two, which
+  // is why this asserts the flag it depends on.
+  const now = Date.now();
+  const am = new AccountManager(['a', 'b', 'c'].map(acct), 0.98, {
+    expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 },
+    routes: [{ name: 'fable', match: ['*fable*'] }],
+    distributeSessions: true,
+  });
+  am.accounts.forEach((x, i) => {
+    x.quota = {
+      ...x.quota, unified5h: 0.05 + i * 0.1, unified5hReset: now + 2 * H,
+      unified7d: 0.1 + i * 0.1, unified7dReset: now + (20 + i * 10) * H,
+      unified7dFable: 0.1 + i * 0.1, unified7dFableReset: now + (30 + i * 10) * H,
+    };
+  });
+  assert.equal(am.distributeSessions, true, 'the premise: distribution is on');
+  assert.equal(am.setRoutePin('fable', 2).ok, true, 'the premise: the pin was accepted');
+  const status = am.getStatus();
+  const entry = status.routing.find(e => e.route === 'fable');
+  assert.notEqual(entry.pick.account, 'c',
+    'the premise: load ranking would choose someone else, so the two answers differ');
+
+  const line = row(renderStatus(status, { color: false, now }).split('\n'), 'New session');
+  assert.match(line, /→ c\b/, 'the block names the load winner over a pin routing will honour');
+  assert.match(line, /route pin/, 'the block credits a term when a pin decided');
+});
+
+test('a block for one of two same-named routes shows its own globs', () => {
+  // Route names are not unique, so a renderer joining the entry back to routes[]
+  // by name labels this decision with another route's globs. The fable route is
+  // restricted to one account so it passes through and the block reports the
+  // sonnet route — whose label a name-join would get wrong.
+  const now = Date.now();
+  const am = new AccountManager(['a', 'b', 'c'].map(acct), 0.98, {
+    expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 },
+    routes: [
+      { name: 'dup', match: ['*fable*'], accounts: ['b'] },
+      { name: 'dup', match: ['*sonnet*'], accounts: ['b', 'c'] },
+    ],
+  });
+  am.accounts.forEach((x, i) => {
+    x.quota = {
+      ...x.quota, unified5h: 0.05 + i * 0.1, unified5hReset: now + 2 * H,
+      unified7d: 0.1 + i * 0.1, unified7dReset: now + (20 + i * 10) * H,
+      unified7dFable: 0.1 + i * 0.1, unified7dFableReset: now + (30 + i * 10) * H,
+      unified7dSonnet: 0.1 + i * 0.1, unified7dSonnetReset: now + (25 + i * 10) * H,
+    };
+  });
+  const status = am.getStatus();
+  const fableEntry = status.routing.find(e => e.bucket === 'unified7dFable');
+  assert.equal(fableEntry.band.kind, 'passthrough',
+    'the premise: the fable scope decides nothing, so the block reports the sonnet one');
+
+  const header = renderStatus(status, { color: false, now }).split('\n').find(l => l.startsWith('Decision'));
+  assert.match(header, /\*sonnet\*/, 'the block is labelled with the other same-named route\'s globs');
+  assert.doesNotMatch(header, /\*fable\*/);
 });
 
 test('a route scope answers Next request with that route, not the current account', () => {
@@ -227,7 +322,8 @@ test('a route scope answers Next request with that route, not the current accoun
   const line = row(lines, 'Next request');
   assert.doesNotMatch(line, /→ a\b/,
     'the block points at an account it listed as route-excluded on the same screen');
-  assert.match(line, /\(this route\)/);
+  assert.match(line, /\(would serve now\)/,
+    'the row labels another account as the current one');
   assert.ok(entry.band.admitted.includes(line.match(/→ (\S+)/)[1]),
     'the named account is not in the admitted set of the scope it is named under');
 });
@@ -301,11 +397,21 @@ test('the caption is the rule that is running, with the configured target in it'
   q(1, { unified5h: 0.15, unified7d: 0.3, unified7dReset: now + 40 * H });
   q(2, { unified5h: 0.3, unified7d: 0.6, unified7dReset: now + 500 * H });
   const lines = render(am, now);
-  const caption = lines.slice(lines.findIndex(l => l.trim().startsWith('Rule')), 100)
-    .slice(0, 2).map(l => l.trim().replace(/^Rule\s+/, '')).join(' ');
+  // Collect every wrapped continuation rather than a fixed number of lines: the
+  // caption's length changes when its wording does, and a fixed slice silently
+  // truncates the sentence it is asserting about.
+  const start = lines.findIndex(l => l.trim().startsWith('Rule'));
+  const caption = [lines[start], ...lines.slice(start + 1)
+    .filter((l, i, all) => all.slice(0, i + 1).every(x => /^ {15}\S/.test(x)))]
+    .map(l => l.trim().replace(/^Rule\s+/, '')).join(' ');
 
   assert.match(caption, /2\.0 accounts of 5h headroom/,
     'the caption carries a literal target, so a reconfigured one is described wrongly');
+  // The ordering claim is qualified by priority, because only the best tier is
+  // ranked: unqualified, the sentence is falsified by a lower-priority account
+  // with more expiring quota, which the band puts last.
+  assert.match(caption, /within the best priority tier/,
+    'the caption claims an unqualified ordering the band only follows within a tier');
   // `headroom` names the five-hour bucket everywhere else in the payload, so
   // the weekly numerator must not borrow the word.
   assert.match(caption, /unspent weekly quota per hour/);
@@ -318,10 +424,11 @@ test('the caption a reader sees is the caption the gate grades', () => {
   // the gate, rather than only being caught by a tool somebody has to remember.
   assert.equal(
     ruleCaption({ kind: 'sized', target: 1 }),
-    'most unspent weekly quota per hour before it resets goes first, '
-      + 'until 1.0 accounts of 5h headroom are covered');
+    'within the best priority tier, most unspent weekly quota per hour '
+      + 'before it resets goes first, until 1.0 accounts of 5h headroom are covered');
   assert.equal(ruleCaption({ kind: 'banded' }),
-    'within the tolerance ratio of the best unspent-weekly-per-hour');
+    'within the best priority tier, everything within the tolerance ratio '
+      + 'of the best unspent-weekly-per-hour');
   assert.equal(ruleCaption({ kind: 'passthrough' }), null,
     'a decision that ran no rule has a rule caption');
 });

@@ -1605,11 +1605,28 @@ export class AccountManager {
    * carries an advisor; it is what the next plain request meets.
    */
   _routingReport(now = Date.now()) {
-    const scopes = [{ scope: 'shared', route: null, model: null }];
+    const scopes = [{ scope: 'shared', route: null, model: null, match: [], autocreated: false }];
     for (const route of this.getRoutes()) {
-      scopes.push({ scope: 'route', route: route.name, model: route.sample });
+      // ONE ENTRY PER FAMILY, not per route. A route matching two globs has two
+      // governing buckets and therefore two different bands and two different
+      // picks; publishing one entry for it presented the first family's answer
+      // as the answer for every family the route matches. Each entry now names
+      // the single glob whose model its figures were computed for.
+      const globs = route.autocreated ? [{ glob: route.match[0], model: route.sample }]
+        : route.match.map(glob => ({ glob, model: glob.replace(/\*/g, '') || 'model' }));
+      for (const { glob, model } of globs) {
+        scopes.push({
+          scope: 'route', route: route.name, model,
+          // Carried rather than looked up by name later. Route names are not
+          // unique — two routes may share one — so a consumer joining an entry
+          // back to `routes[]` by name attaches this decision to another
+          // route's globs and another route's target.
+          match: [glob],
+          autocreated: route.autocreated,
+        });
+      }
     }
-    return scopes.map(({ scope, route, model }) => {
+    return scopes.map(({ scope, route, model, match, autocreated }) => {
       // ONE availability evaluation per account, split two ways. The candidates
       // are what the band sees and the rest are `excluded[]` with the reason
       // that removed them, so the two lists cannot disagree about an account and
@@ -1630,6 +1647,22 @@ export class AccountManager {
         scope,
         route,
         model,
+        match,
+        autocreated,
+        // WHERE A REQUEST IN THIS SCOPE WOULD ACTUALLY LAND, from the same
+        // preview the route table uses: the manual pin first, then the current
+        // account if it is still eligible, then priority preemption, then best
+        // available. Published because the alternative is a consumer deriving a
+        // destination from `currentAccount` and a rule it believes routing
+        // follows — which reported a disabled account as where new sessions go,
+        // and ignored a manual route pin entirely.
+        target: this._routeTarget(model),
+        // Whether a MANUAL ROUTE PIN binds this scope. `_selectRoute` skips the
+        // session-distribution path entirely when one is set (`:421`, "which
+        // must still win"), so a pin overrides load ranking for new sessions
+        // whether or not distribution is on. Without this field a consumer
+        // cannot tell that the pick it is reading is not what routing will do.
+        pinnedTo: (m => (m ? m.name : null))(this._pinnedAccountForModel(model)),
         // The FAMILY this entry is about. An account that does not meter that
         // family is measured on the shared bucket instead, which is a per-account
         // fallback and so appears on the row rather than here — reading this key

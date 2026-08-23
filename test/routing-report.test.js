@@ -17,10 +17,11 @@ import { AccountManager } from '../src/account-manager.js';
 const acct = name => ({ name, type: 'apikey', apiKey: `k-${name}` });
 const H = 3600e3;
 
-function fleet({ accounts = ['a', 'b', 'c', 'd'], expiryRouting, routes } = {}) {
+function fleet({ accounts = ['a', 'b', 'c', 'd'], expiryRouting, routes, distributeSessions } = {}) {
   return new AccountManager(accounts.map(acct), 0.98, {
     expiryRouting: expiryRouting ?? { enabled: true, coverage: 1, tolerance: 1.5 },
     routes,
+    distributeSessions,
   });
 }
 
@@ -249,6 +250,89 @@ test('a tie broken by config order is reported as a tie, not as a term', () => {
   assert.deepEqual(entry.pick.tiedWith, ['b'],
     'the account the winner did not beat is not named, so position reads as a decision');
   assert.equal(entry.pick.runnerUp, 'b');
+});
+
+test('each entry names the family its own figures were computed for', () => {
+  // A route matching two globs has two governing buckets, so two different
+  // bands and two different picks. Publishing one entry for it presented the
+  // first family's answer as the answer for both.
+  const now = Date.now();
+  const am = fleet({ accounts: ['a', 'b', 'c'], routes: [{ name: 'families', match: ['*fable*', '*sonnet*'] }] });
+  for (const i of [0, 1, 2]) {
+    quota(am, i, {
+      unified5h: 0.05 + i * 0.1, unified7d: 0.1 + i * 0.1, unified7dReset: now + (20 + i * 10) * H,
+      unified7dFable: 0.1 + i * 0.1, unified7dFableReset: now + (30 + i * 10) * H,
+      unified7dSonnet: 0.5 + i * 0.1, unified7dSonnetReset: now + (25 + i * 10) * H,
+    });
+  }
+  const entries = am.getStatus().routing.filter(e => e.route === 'families');
+
+  assert.equal(entries.length, 2, 'a two-glob route published one answer for two families');
+  assert.deepEqual(entries.map(e => e.bucket).sort(), ['unified7dFable', 'unified7dSonnet']);
+  for (const e of entries) {
+    assert.equal(e.match.length, 1, 'an entry claims globs its figures do not cover');
+    assert.ok(e.bucket.toLowerCase().includes(e.match[0].replace(/\*/g, '')),
+      `${e.match[0]} is published against ${e.bucket}`);
+  }
+});
+
+test('two routes sharing a name each carry their own metadata and target', () => {
+  // Route names are not unique. A consumer joining an entry back to routes[] by
+  // name attaches this decision to another route's globs and another route's
+  // target, so the entry carries its own.
+  const now = Date.now();
+  const am = fleet({
+    accounts: ['a', 'b', 'c'],
+    routes: [
+      { name: 'dup', match: ['*fable*'], accounts: ['b'] },
+      { name: 'dup', match: ['*sonnet*'], accounts: ['c'] },
+    ],
+  });
+  for (const i of [0, 1, 2]) {
+    quota(am, i, {
+      unified5h: 0.05 + i * 0.1, unified7d: 0.1 + i * 0.1, unified7dReset: now + (20 + i * 10) * H,
+      unified7dFable: 0.1 + i * 0.1, unified7dFableReset: now + (30 + i * 10) * H,
+      unified7dSonnet: 0.1 + i * 0.1, unified7dSonnetReset: now + (25 + i * 10) * H,
+    });
+  }
+  const entries = am.getStatus().routing.filter(e => e.route === 'dup');
+
+  assert.equal(entries.length, 2, 'the premise: both same-named routes are reported');
+  const fable = entries.find(e => e.bucket === 'unified7dFable');
+  const sonnet = entries.find(e => e.bucket === 'unified7dSonnet');
+  assert.deepEqual(fable.match, ['*fable*']);
+  assert.deepEqual(sonnet.match, ['*sonnet*']);
+  assert.equal(fable.target, 'b', 'the fable entry carries the other route\'s target');
+  assert.equal(sonnet.target, 'c', 'the sonnet entry carries the other route\'s target');
+});
+
+test('a manual route pin is what the entry reports, not the load winner', () => {
+  // `_selectRoute` skips the session-distribution path entirely when a pin is
+  // set, so a pin beats load ranking whether or not distribution is on. An
+  // entry reporting only the pick would name an account routing will not use.
+  const now = Date.now();
+  for (const distributeSessions of [false, true]) {
+    const am = fleet({
+      accounts: ['a', 'b', 'c'],
+      routes: [{ name: 'fable', match: ['*fable*'] }],
+      distributeSessions,
+    });
+    for (const i of [0, 1, 2]) {
+      quota(am, i, {
+        unified5h: 0.05 + i * 0.1, unified7d: 0.1 + i * 0.1, unified7dReset: now + (20 + i * 10) * H,
+        unified7dFable: 0.1 + i * 0.1, unified7dFableReset: now + (30 + i * 10) * H,
+      });
+    }
+    assert.equal(am.distributeSessions, distributeSessions,
+      'the premise: the fixture actually applied the distribution flag');
+    assert.equal(am.setRoutePin('fable', 2).ok, true, 'the premise: the pin was accepted');
+    const entry = am.getStatus().routing.find(e => e.route === 'fable');
+
+    assert.equal(entry.pinnedTo, 'c', `distribute=${distributeSessions}: the pin is not reported`);
+    assert.equal(entry.target, 'c', `distribute=${distributeSessions}: the target ignores the pin`);
+    assert.notEqual(entry.pick.account, 'c',
+      'the premise: the load ranking would have chosen someone else, so the two answers differ');
+  }
 });
 
 test('the report names accounts and never a session id', () => {

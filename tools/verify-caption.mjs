@@ -119,12 +119,20 @@ const CAPTIONS = [
     // describes the real order in misleading English. A human reading the
     // `Rule` line is the only check on that, and this comment exists so the
     // next person knows it is theirs to make rather than the gate's.
-    pinned: 'most unspent weekly quota per hour before it resets goes first, '
-      + 'until 1.0 accounts of 5h headroom are covered',
+    pinned: 'within the best priority tier, most unspent weekly quota per hour '
+      + 'before it resets goes first, until 1.0 accounts of 5h headroom are covered',
     // Per HOUR where the code computes per second: the two differ by 3600, a
     // positive constant, so they cannot order two accounts differently. Written
     // as the caption says it rather than as the code says it, because the reading
     // is what is on trial.
+    //
+    // The tier qualifier in the sentence has no counterpart here, and that is
+    // correct rather than an omission: this scores the accounts it is handed,
+    // and it is handed the top priority tier, because that is the only set the
+    // band ranks. The sentence gained the qualifier because it was overclaiming
+    // — unqualified, it said the highest-pressure account goes first, which a
+    // priority-1 account with 330x the pressure of the top tier falsifies while
+    // this gate stays green. The reading was always the narrower, truer one.
     score: (a, now) => {
       if (a.utilization == null || !Number.isFinite(a.utilization) || a.resetAt == null) return null;
       const hours = (a.resetAt - now) / 3600000;

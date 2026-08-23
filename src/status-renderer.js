@@ -175,10 +175,12 @@ function selectionSummary(entry) {
 export function ruleCaption(band) {
   switch (band.kind) {
     case 'sized':
-      return 'most unspent weekly quota per hour before it resets goes first, '
-        + `until ${formatTarget(band.target)} accounts of 5h headroom are covered`;
+      return 'within the best priority tier, most unspent weekly quota per hour '
+        + `before it resets goes first, until ${formatTarget(band.target)} accounts `
+        + 'of 5h headroom are covered';
     case 'banded':
-      return 'within the tolerance ratio of the best unspent-weekly-per-hour';
+      return 'within the best priority tier, everything within the tolerance ratio '
+        + 'of the best unspent-weekly-per-hour';
     default:
       return null;
   }
@@ -244,24 +246,39 @@ function decisionLines(entry, status, blocked, paint) {
   const out = [];
   const { band, pick } = entry;
   const others = (status.routing || []).filter(e => e !== entry);
-  // The scope in the route's own vocabulary: the globs it matches, and the
-  // `(auto)` tag the routing table already uses for a family that is metered
-  // separately with no configured route. A reader who has seen `*fable* (auto)`
-  // two sections down should meet the same name here.
-  const route = (status.routes || []).find(r => r.name === entry.route);
-  const scope = route ? route.match.join(' ') : 'shared weekly';
-  const auto = route?.autocreated ? `  ${paint.dim('(auto)')}` : '';
+  // The scope in the route's own vocabulary, read from the ENTRY rather than
+  // looked up in `routes[]` by name. Route names are not unique, and a join by
+  // name attached this decision to another route's globs and another route's
+  // target. The entry names the single glob its own figures were computed for.
+  const scope = entry.scope === 'route' ? entry.match.join(' ') : 'shared weekly';
+  const auto = entry.autocreated ? `  ${paint.dim('(auto)')}` : '';
   out.push(`${paint.bold('Decision')}  ${paint.cyan(scope)}${auto}  ${paint.dim(`[${entry.bucket}]`)}`);
 
-  // WHERE A NEW SESSION GOES depends on whether distribution is on. With it off
-  // — the default — `_selectForSession` is never reached and a new session
-  // follows the current account, so naming the pick's winner here would report a
-  // destination the router would not choose. No arrow either: the right operand
-  // is a parenthetical rather than an account, and `→` asserts traffic flows to
-  // whatever follows it.
+  // BOTH DESTINATION ROWS REPORT WHAT THE PATH RETURNS. Neither describes a
+  // rule, because a rule stated in the block is a claim the block cannot check:
+  // "follows the current account" asserted that new sessions go to an account
+  // that was disabled and would never have been served, and it was true of the
+  // rule and false of the fleet.
+  //
+  // `entry.target` is the routing preview for this scope's model — pin, then a
+  // still-eligible current account, then priority preemption, then best
+  // available. It is what a request arriving now actually meets.
   const term = pick.by === 'first' ? 'no term discriminated' : `by ${pick.by}`;
-  if (status.sessions?.distribute === false) {
-    out.push(`  ${paint.dim('New session'.padEnd(13))}${paint.dim('follows the current account (distribution off)')}`);
+  const distributing = status.sessions?.distribute !== false;
+  // The pick only describes where a new session goes when the session path is
+  // the one that runs. It is skipped when distribution is off, and skipped
+  // again when a manual route pin is set for this scope — a pin wins over load
+  // ranking whether or not distribution is on. In both cases the router sends a
+  // new session to the same place it sends anything else.
+  if (!distributing || entry.pinnedTo) {
+    const why = entry.pinnedTo ? `route pin${distributing ? '' : '; distribution off'}`
+      : 'distribution off; not load-ranked';
+    if (entry.target) {
+      out.push(`  ${paint.dim('New session'.padEnd(13))}${paint.dim('→')} ${entry.target} `
+        + `${paint.dim(`(${why})`)}`);
+    } else {
+      out.push(`  ${paint.dim('New session'.padEnd(13))}${paint.dim('nothing eligible')}`);
+    }
   } else if (pick.kind === 'picked') {
     const tie = pick.tiedWith.length
       ? `first of ${pick.tiedWith.length + 1} tied on every term, config order`
@@ -271,16 +288,10 @@ function decisionLines(entry, status, blocked, paint) {
     out.push(`  ${paint.dim('New session'.padEnd(13))}${paint.dim('nothing eligible for this scope')}`);
   }
 
-  // WHERE THE NEXT REQUEST GOES is a question about THIS scope's model, so a
-  // route scope answers it with that route's own target — the account a request
-  // for that model would land on now. Answering with the current account
-  // regardless pointed at an account this very scope had listed in `excluded[]`
-  // as `route-excluded`, which is the block contradicting its own evidence.
-  const next = entry.scope === 'route' ? (route?.target ?? null) : (status.currentAccount || null);
-  const label = entry.scope === 'route' ? 'this route' : 'current';
-  if (next) {
-    const held = band.admitted.includes(next) ? '' : '; not in the admitted set';
-    out.push(`  ${paint.dim('Next request'.padEnd(13))}${paint.dim('→')} ${next} ${paint.dim(`(${label}${held})`)}`);
+  if (entry.target) {
+    const held = band.admitted.includes(entry.target) ? '' : '; not in the admitted set';
+    const label = entry.target === status.currentAccount ? 'current' : 'would serve now';
+    out.push(`  ${paint.dim('Next request'.padEnd(13))}${paint.dim('→')} ${entry.target} ${paint.dim(`(${label}${held})`)}`);
   } else {
     out.push(`  ${paint.dim('Next request'.padEnd(13))}${paint.dim('nothing eligible')}`);
   }
@@ -381,8 +392,16 @@ function metAtRank(band) {
 function ladderRow(row, paint) {
   const rank = rankLabel(row).padEnd(4);
   let capacity;
+  // `+` means THIS ROW'S HEADROOM IS IN `achieved`, which is exactly the rows
+  // whose `cumulative` is non-null: the walk passed through them and moved the
+  // running total. Keying it on `admitted` instead printed a contribution for
+  // rows the coverage sum never included — a lower-tier account, appended
+  // wholesale and never ranked, showed `+0.745` on a fleet whose `achieved` was
+  // 1.796, so the three printed contributions summed to 2.541. Under the ratio
+  // rule there is no coverage total at all, so no row contributes there either.
+  const contributed = row.cumulative != null && row.headroom.kind === 'known';
   if (row.headroom.kind === 'absent') capacity = paint.dim('exempt'.padEnd(7));
-  else if (row.admitted) capacity = `+${formatCapacity(row.headroom.value)}`.padEnd(7);
+  else if (contributed) capacity = `+${formatCapacity(row.headroom.value)}`.padEnd(7);
   else capacity = ` ${formatCapacity(row.headroom.value)}`.padEnd(7);
   const note = row.pressure.kind === 'absent' ? paint.dim(`  (${row.pressure.reason})`) : '';
   return `${paint.dim(rank)}${capacity} ${row.account}${note}`;
