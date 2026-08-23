@@ -1,4 +1,4 @@
-import { findFamilyBlock, modelGlobMatches, modelGlobOverlaps, gatingUtilization } from './model.js';
+import { blockedState, familyModel, modelsForGlob, gatingUtilization } from './model.js';
 
 const ESC = '\x1b[';
 const RESET = `${ESC}0m`;
@@ -102,16 +102,21 @@ function paintRoute(paint, color, value) {
 function chooseScope(routing, blocked) {
   const entries = Array.isArray(routing) ? routing : [];
   if (!entries.length) return null;
-  const speaks = e => e.band.kind !== 'passthrough' && !scopeBlocked(e, blocked);
-  return entries.find(e => e.scope === 'route' && speaks(e))
+  const speaks = e => e.band.kind !== 'passthrough' && scopeState(e, blocked) !== 'blocked';
+  // A scope the blocklist only reaches PART of still carries traffic, so it can
+  // win the block — but never over one it does not reach at all, since the
+  // clear scope's destination is the answer for every request in it.
+  const clear = e => scopeState(e, blocked) === 'clear';
+  return entries.find(e => e.scope === 'route' && speaks(e) && clear(e))
+    ?? entries.find(e => e.scope === 'route' && speaks(e))
     ?? entries.find(speaks)
     ?? entries.find(e => e.scope === 'shared')
-    ?? entries.find(e => !scopeBlocked(e, blocked))
+    ?? entries.find(e => scopeState(e, blocked) !== 'blocked')
     ?? entries[0];
 }
 
 /**
- * Whether this scope's family is refused before selection ever runs.
+ * What the blocklist does to this scope: `blocked`, `partial` or `clear`.
  *
  * The blocklist is answered at the server with a 400 (`server.js:668`), so a
  * blocked family never reaches routing at all. `routing[]` still computes a band
@@ -120,11 +125,18 @@ function chooseScope(routing, blocked) {
  * answers "where does the next request go" for traffic that gets a 400, and does
  * it on the same screen as the `Blocked` row saying so.
  *
+ * Answered by `blockedState`, which is also what the Routing line and the
+ * per-account Models row ask. They used to ask three different questions and
+ * disagree out loud: a concrete `claude-fable-4` rendered a live Fable decision
+ * above a Routing line calling that route blocked and a Models row calling the
+ * family blocked.
+ *
  * The shared scope has no model and so is never blocked, which is what makes it
  * a safe fallback.
  */
-function scopeBlocked(entry, blocked) {
-  return entry.model != null && (blocked || []).some(p => modelGlobMatches(p, entry.model));
+function scopeState(entry, blocked) {
+  if (entry.model == null) return 'clear';
+  return blockedState(blocked, { models: [entry.model], globs: entry.match || [] });
 }
 
 /**
@@ -370,9 +382,14 @@ function decisionLines(entry, status, blocked, paint) {
   }
   if (others.length) {
     // A blocked scope reads `blocked`, not its band variant: the variant would
-    // describe a decision about traffic the server refuses before selection.
-    const names = others.map(e =>
-      `${e.route || 'shared'}: ${scopeBlocked(e, blocked) ? 'blocked' : e.band.kind}`).join(', ');
+    // describe a decision about traffic the server refuses before selection. A
+    // partly blocked one keeps its variant — traffic still flows through it —
+    // and says so.
+    const names = others.map((e) => {
+      const state = scopeState(e, blocked);
+      if (state === 'blocked') return `${e.route || 'shared'}: blocked`;
+      return `${e.route || 'shared'}: ${e.band.kind}${state === 'partial' ? ', partly blocked' : ''}`;
+    }).join(', ');
     out.push(`  ${paint.dim('Other scopes'.padEnd(13))}${paint.dim(names)}`);
   }
   out.push('');
@@ -470,19 +487,24 @@ function routingLines(routes, blocked, paint) {
   for (const route of routes) {
     const globs = route.match || [];
     const match = globs.join(', ');
-    // A route every one of whose globs is blocked can carry no traffic at all —
-    // say so, rather than listing eligible accounts it will never reach.
-    const routeBlocked = globs.length > 0
-      && globs.every(g => blocked.some(p => modelGlobOverlaps(p, g)));
-    const accounts = routeBlocked
+    // A route every one of whose models is blocked can carry no traffic at all —
+    // say so, rather than listing eligible accounts it will never reach. Asked
+    // of `blockedState`, the same classification the Decision block and the
+    // Models row use, so this line cannot call a route dead while the block
+    // above it reports where that route's next request goes.
+    const state = globs.length
+      ? blockedState(blocked, { models: globs.flatMap(modelsForGlob), globs })
+      : 'clear';
+    const accounts = state === 'blocked'
       ? paint.red('blocked')
       : (route.accounts || [])
         .map(a => (a.eligible ? paint.green(a.name) : paint.red(a.name))).join(' ') || paint.gray('(none)');
+    const partly = state === 'partial' ? paint.dim(' (partly blocked)') : '';
     const tag = route.autocreated ? paint.dim(' (auto)') : route.bucket ? paint.dim(` [${route.bucket}]`) : '';
     const pin = route.pinned ? paint.dim(` [pinned: ${route.pinned}]`) : '';
     // padEnd on the raw text, color after, so ANSI codes don't throw off alignment.
     const label = paintRoute(paint, route.color, match.padEnd(16));
-    lines.push(`  ${label} ${paint.dim('→')} ${accounts}${tag}${pin}`);
+    lines.push(`  ${label} ${paint.dim('→')} ${accounts}${partly}${tag}${pin}`);
   }
   lines.push('');
   return lines;
@@ -553,8 +575,13 @@ function modelRoutingLine(account, threshold, blocked, now, paint) {
   const cell = (label, bucketKey, reset) => {
     // The blocklist outranks quota: a blocked family cannot be served however
     // much headroom the account has, so it must not read ✓. Reporting quota
-    // alone is what made a fully-blocked model look available.
-    if (findFamilyBlock(blocked, label)) {
+    // alone is what made a fully-blocked model look available. Classified by
+    // the same `blockedState` the Decision block and the Routing line ask, so a
+    // single blocked id cannot read as the whole family here while the block
+    // above reports that family's next destination.
+    const familyState = blockedState(blocked,
+      { models: [familyModel(label)], globs: [`*${label.toLowerCase()}*`] });
+    if (familyState === 'blocked') {
       return `${label} ${paint.red('⊘')}${paint.dim(' blocked')}`;
     }
     // The GATE's value, not this bucket's. Family spend meters into the shared
@@ -582,7 +609,11 @@ function modelRoutingLine(account, threshold, blocked, now, paint) {
     // name a time that is not when this clears.
     const resetTs = over.length && over.every(Boolean) ? Math.max(...over) : null;
     const when = weeklyOver && resetTs && resetTs > now ? paint.dim(` ${formatDuration(resetTs - now)}`) : '';
-    return `${label} ${mark}${when}`;
+    // Some of this family's ids are blocked and some are not, so neither ⊘ nor a
+    // bare quota mark is the truth. The mark still answers the quota question;
+    // the tag answers the blocklist's.
+    const partly = familyState === 'partial' ? paint.dim(' partly blocked') : '';
+    return `${label} ${mark}${when}${partly}`;
   };
 
   const cells = [cell('Opus', 'unified7d', q.unified7dReset)];

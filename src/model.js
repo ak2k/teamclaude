@@ -93,24 +93,48 @@ export function modelGlobOverlaps(a, b) {
   return ca.includes(cb) || cb.includes(ca);
 }
 
-// The `blockedModels` pattern that takes a model FAMILY out of service, or null.
+// The models a route glob answers for: the family representatives it can carry,
+// or its own literal core when it names no family this proxy meters separately.
+// One definition, because the routing report expands a glob into scopes with it
+// and the status view classifies the same glob against the blocklist with it —
+// two rules there would put a scope on screen that the line under it calls
+// dead.
+export function modelsForGlob(glob) {
+  const family = familyModelsMatching(glob);
+  return family.length ? family : [String(glob ?? '').replace(/\*/g, '') || 'model'];
+}
+
+// The representative model id for a family name (`Fable`, `opus`), or null.
+export function familyModel(family) {
+  const key = String(family ?? '').toLowerCase();
+  return FAMILY_MODELS.find(m => modelFamily(m) === key) || null;
+}
+
+// WHAT THE BLOCKLIST DOES to a thing that carries models — a routing scope, a
+// route, a family row. Three answers, because two of them were being reported
+// as one and by three different rules: `blocked` when every model it can carry
+// is matched, `partial` when the blocklist reaches some of them, `clear` when
+// it reaches none.
 //
-// The blocklist is written against concrete model ids (`*fable*`,
-// `claude-fable-5`) but the status view reasons in families (`Fable`), so a
-// direct glob match is not enough: `claude-fable-5` never matches the literal
-// string `Fable`. Both spellings are checked so the two natural ways to block a
-// family light up the same row — the glob (via modelGlobMatches, which also
-// makes a bare `*` block everything) and a concrete id (via substring).
+// ONE CLASSIFICATION FOR ONE SCREEN. The Decision block matched the blocklist
+// against a scope's model, the Routing line overlapped it against the glob, and
+// the per-account Models row matched a family NAME, so a concrete id like
+// `claude-fable-4` rendered a live Fable decision above a Routing line calling
+// the same route blocked. Which of the three was right is not the interesting
+// part: a reader cannot act on a screen that contradicts itself.
 //
-// Deliberately advisory: this drives display only. The authoritative gate is the
-// per-request check in server.js, which matches the real model id. A pattern
-// that names no family (say `claude-3-*`) simply lights up no row, and the
-// header list still shows it verbatim.
-export function findFamilyBlock(patterns, family) {
-  if (!Array.isArray(patterns) || !family) return null;
-  const key = String(family).toLowerCase();
-  return patterns.find(p => typeof p === 'string'
-    && (modelGlobMatches(p, key) || p.toLowerCase().includes(key))) || null;
+// `models` are concrete ids and decide the FULL answer; `globs` decide only
+// whether the blocklist touches this thing at all, since glob intersection is
+// not decidable in general (see modelGlobOverlaps). Deliberately advisory, as
+// before: the authoritative gate is the per-request check in server.js.
+export function blockedState(patterns, { models = [], globs = [] } = {}) {
+  const list = (Array.isArray(patterns) ? patterns : []).filter(p => typeof p === 'string' && p);
+  const ids = models.filter(m => typeof m === 'string' && m);
+  if (!list.length) return 'clear';
+  const hits = ids.filter(m => list.some(p => modelGlobMatches(p, m)));
+  if (ids.length && hits.length === ids.length) return 'blocked';
+  if (hits.length) return 'partial';
+  return globs.some(g => list.some(p => modelGlobOverlaps(p, g))) ? 'partial' : 'clear';
 }
 
 // Streaming, byte-exact locator for a TOP-LEVEL string field of a JSON object,

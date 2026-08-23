@@ -240,6 +240,77 @@ test('a blocked family does not get to be the scope the block reports', () => {
     'the other-scopes line names its band variant, describing a decision about refused traffic');
 });
 
+// ONE SCREEN, ONE CLASSIFICATION. The Decision block, the Routing line and the
+// per-account Models row each answered the blocklist their own way — a scope's
+// model, a glob overlap, a family name — so a concrete id rendered a live Fable
+// decision above a Routing line calling that route blocked and a Models row
+// calling the family blocked. The three are held to each other here rather than
+// to a fixed string, because which of them is right is not what an operator
+// cannot act on: a screen contradicting itself is.
+test('every section agrees about what the blocklist does to a family', () => {
+  const now = Date.now();
+  const build = () => {
+    const am = sizedFleet(now);
+    for (const [i, o] of [[0, 0.1], [1, 0.3], [2, 0.6]]) {
+      am.accounts[i].quota = {
+        ...am.accounts[i].quota, unified7dFable: o, unified7dFableReset: now + (30 + i * 10) * H,
+      };
+    }
+    return am;
+  };
+
+  // Three blocklists reaching the Fable route three different ways, and one
+  // reaching it not at all. `claude-fable-5` is the id the report publishes as
+  // the family's representative and `claude-fable-4` is deliberately not: a
+  // fixture using only the representative agrees with any of the three rules by
+  // coincidence, which is how this survived one fix already.
+  const CASES = [
+    ['*fable*', 'blocked'],
+    ['claude-fable-5', 'blocked'],
+    ['claude-fable-4', 'partly'],
+    ['*opus*', 'clear'],
+  ];
+  const seen = new Set();
+
+  for (const [pattern, expected] of CASES) {
+    const status = { ...build().getStatus(), blockedModels: [pattern] };
+    const fableScope = status.routing.find(e => e.model && /fable/.test(e.model));
+    assert.ok(fableScope, `${pattern}: the premise: a fable scope exists to be classified`);
+    assert.notEqual(fableScope.band.kind, 'passthrough',
+      `${pattern}: the premise: it decided something, so it would otherwise win the block`);
+
+    const lines = renderStatus(status, { color: false, now }).split('\n');
+    const header = lines.find(l => l.startsWith('Decision')) || '';
+    const others = row(lines, 'Other scopes') || '';
+    const routing = lines.find(l => l.trim().startsWith('*fable*')) || '';
+    const models = row(lines, 'Models') || '';
+    assert.ok(routing, `${pattern}: no Routing line for the fable route`);
+    assert.ok(models, `${pattern}: no Models row, so the family cell is not being compared`);
+    seen.add(expected);
+
+    if (expected === 'blocked') {
+      assert.doesNotMatch(header, /fable/, `${pattern}: the block reports a scope the server refuses`);
+      assert.match(others, /fable[^,]*: blocked/, `${pattern}: the other-scopes line does not say blocked`);
+      assert.match(routing, /→ blocked/, `${pattern}: the routing line still lists accounts`);
+      assert.match(models, /Fable ⊘ blocked/, `${pattern}: the family cell disagrees with the routing line`);
+    } else if (expected === 'partly') {
+      // Traffic still flows, so the destination rows are real and must be shown.
+      assert.match(header, /fable/, `${pattern}: a route that still carries traffic lost its block`);
+      assert.match(routing, /partly blocked/, `${pattern}: the routing line calls a partial block total`);
+      assert.doesNotMatch(routing, /→ blocked/, `${pattern}: the route is not fully blocked`);
+      assert.match(models, /Fable [^⊘]*partly blocked/,
+        `${pattern}: the family cell calls a single blocked id the whole family`);
+    } else {
+      assert.match(header, /fable/, `${pattern}: an untouched route lost its block`);
+      assert.doesNotMatch(routing, /blocked/, `${pattern}: the routing line blocks an untouched route`);
+      assert.doesNotMatch(models, /Fable [^ ]* partly blocked/,
+        `${pattern}: the family cell reports a block that does not reach it`);
+    }
+  }
+
+  assert.equal(seen.size, 3, 'the cases collapsed to fewer than three states, so they grade less than they read');
+});
+
 test('with distribution off the block does not name a destination routing would not choose', () => {
   // `_selectForSession` is never reached when distributeSessions is false — the
   // default — so a new session follows the current account. Naming the pick's

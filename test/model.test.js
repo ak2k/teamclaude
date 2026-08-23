@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { findFamilyBlock, isFableModel, modelGlobOverlaps, parseRequestModel, TopLevelFieldFinder } from '../src/model.js';
+import { blockedState, familyModel, isFableModel, modelGlobOverlaps, modelsForGlob, parseRequestModel, TopLevelFieldFinder } from '../src/model.js';
 
 test('isFableModel matches the Fable family only', () => {
   assert.equal(isFableModel('claude-fable-5'), true);
@@ -54,15 +54,45 @@ test('TopLevelFieldFinder marks done (absent) once the root object closes', () =
   assert.equal(finder.done, true); // root closed without the field → stop early
 });
 
-test('findFamilyBlock matches a family by glob, by concrete id, and by catch-all', () => {
-  assert.equal(findFamilyBlock(['*fable*'], 'Fable'), '*fable*');
-  assert.equal(findFamilyBlock(['claude-fable-5'], 'Fable'), 'claude-fable-5');
-  assert.equal(findFamilyBlock(['*'], 'Fable'), '*');
-  assert.equal(findFamilyBlock(['*opus*'], 'Fable'), null);
-  assert.equal(findFamilyBlock([], 'Fable'), null);
-  assert.equal(findFamilyBlock(['*fable*'], ''), null);
-  assert.equal(findFamilyBlock(null, 'Fable'), null);
-  assert.equal(findFamilyBlock([null, 42, '*fable*'], 'Fable'), '*fable*');
+// One classification for the whole screen. The three answers matter: a family
+// every id of which is blocked, one the blocklist merely reaches, and one it
+// does not touch are three different things to tell an operator, and reporting
+// the middle one as either of the others is how the Decision block came to
+// render a live destination above a Routing line calling the same route dead.
+test('blockedState separates a family fully blocked from one only partly blocked', () => {
+  const fable = { models: [familyModel('Fable')], globs: ['*fable*'] };
+  assert.equal(blockedState(['*fable*'], fable), 'blocked');
+  assert.equal(blockedState(['claude-fable-5'], fable), 'blocked',
+    'the id the family is represented by blocks it');
+  assert.equal(blockedState(['*'], fable), 'blocked', 'the catch-all blocks every family');
+  assert.equal(blockedState(['claude-fable-4'], fable), 'partial',
+    'a single id that is not the representative takes the whole family out of service');
+  assert.equal(blockedState(['*opus*'], fable), 'clear');
+  assert.equal(blockedState([], fable), 'clear');
+  assert.equal(blockedState(null, fable), 'clear');
+  assert.equal(blockedState([null, 42, '*fable*'], fable), 'blocked',
+    'a malformed entry beside a real one changes the answer');
+});
+
+test('blockedState is answered on models, and on globs only for the partial case', () => {
+  // A glob is never enough to call something fully blocked: glob intersection
+  // is not decidable, so `blocked` is reserved for concrete ids that match.
+  assert.equal(blockedState(['*fable*'], { models: [], globs: ['*fable*'] }), 'partial');
+  assert.equal(blockedState(['*fable*'], { models: ['claude-fable-5'], globs: ['*fable*'] }), 'blocked');
+  // Every model of a many-family scope must be matched, or it still carries some.
+  const both = { models: ['claude-opus-4-5', 'claude-fable-5'], globs: ['claude-*'] };
+  assert.equal(blockedState(['*fable*'], both), 'partial');
+  assert.equal(blockedState(['claude-*'], both), 'blocked');
+});
+
+test('modelsForGlob answers with real model ids, and never with the glob', () => {
+  assert.deepEqual(modelsForGlob('*fable*'), ['claude-fable-5']);
+  assert.deepEqual(modelsForGlob('claude-*'),
+    ['claude-opus-4-5', 'claude-sonnet-4-6', 'claude-fable-5']);
+  // A glob naming no metered family is one scope on the shared bucket, which is
+  // its literal core — the one case where the stripped string is the answer.
+  assert.deepEqual(modelsForGlob('gpt-*'), ['gpt-']);
+  assert.deepEqual(modelsForGlob('*'), ['claude-opus-4-5', 'claude-sonnet-4-6', 'claude-fable-5']);
 });
 
 test('modelGlobOverlaps compares literal cores in both directions', () => {
