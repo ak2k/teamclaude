@@ -14,6 +14,16 @@ export function renderStatus(status, { color = process.stdout.isTTY, now = Date.
   lines.push(paint.bold('TeamClaude status'));
   lines.push(`${paint.dim('Active'.padEnd(12))} ${paint.cyan(status.currentAccount || 'none')}`);
   lines.push(`${paint.dim('Switch at'.padEnd(12))} ${formatPercent(status.switchThreshold)}`);
+  const decision = chooseScope(status.routing);
+  // A decision with nothing to say collapses to one row here, beside `Switch
+  // at`, rather than rendering an eleven-line block about a rule that is not
+  // running. Naming a state costs a phrase; it does not earn a section. That
+  // matters most for the stock fleet, where expiry routing is off by default
+  // and the full block would be a caption for a rule that never ran, a list of
+  // ranks the code never computed, and two destination rows restating `Active`.
+  if (decision && decision.band.kind === 'passthrough') {
+    lines.push(`${paint.dim('Selection'.padEnd(12))} ${selectionSummary(decision)}`);
+  }
   // Only when something is blocked: a always-visible "Blocked" row would be
   // noise for the common case, but its ABSENCE is what made a blocked model
   // read as available — the per-account Models row reports quota headroom and
@@ -32,6 +42,8 @@ export function renderStatus(status, { color = process.stdout.isTTY, now = Date.
     lines.push(`${paint.dim('Server'.padEnd(12))} ${formatServerSummary(status.server, now)}`);
   }
   lines.push('');
+
+  for (const line of decisionLines(decision, status, paint)) lines.push(line);
 
   for (const line of routingLines(status.routes, blocked, paint)) lines.push(line);
 
@@ -71,6 +83,254 @@ const ROUTE_COLORS = ['red', 'green', 'yellow', 'blue', 'magenta', 'cyan'];
 function paintRoute(paint, color, value) {
   const fn = ROUTE_COLORS.includes(String(color || '').toLowerCase()) ? paint[color.toLowerCase()] : paint.cyan;
   return fn(value);
+}
+
+/**
+ * The scope whose decision the compact block reports.
+ *
+ * `routing[]` carries one entry per scope and the block is one block, so one
+ * has to be chosen and the choice has to be stated rather than fall out of an
+ * array index. A route scope is preferred over `shared` because it is the more
+ * specific answer: its band ranks on the family's own weekly window, which is
+ * the figure a reader chasing a family's routing is after. Among routes the
+ * first is taken, and the block names the ones it is not showing.
+ *
+ * A scope whose band decided nothing is not preferred over one that did: there
+ * is no reason to show a passthrough route while a sized shared scope has a
+ * ladder to publish.
+ */
+function chooseScope(routing) {
+  const entries = Array.isArray(routing) ? routing : [];
+  if (!entries.length) return null;
+  const speaks = e => e.band.kind !== 'passthrough';
+  return entries.find(e => e.scope === 'route' && speaks(e))
+    ?? entries.find(speaks)
+    ?? entries.find(e => e.scope === 'shared')
+    ?? entries[0];
+}
+
+/**
+ * The one-row form, for a decision that ranked nothing.
+ *
+ * Each passthrough reason gets its own words because they are different states:
+ * a feature that is off, a fleet with one account, a fleet with none, and a
+ * fleet nobody has reported a quota window for yet. `single-candidate` covers
+ * the last two — `decideBand` guards `accounts.length <= 1`, so an EMPTY
+ * candidate set arrives here too, and a caption that assumed one candidate
+ * would assert an eligible account on a fully throttled fleet, which is the
+ * state where the operator most needs the truth.
+ */
+function selectionSummary(entry) {
+  const n = entry.band.candidates;
+  switch (entry.band.reason) {
+    case 'disabled':
+      return `load-ranked · expiry routing off · ${n} account${n === 1 ? '' : 's'} eligible`;
+    case 'no-known-pressure':
+      return `load-ranked · no quota window reported yet · ${n} eligible`;
+    case 'single-candidate':
+      return n === 0 ? 'no eligible account right now' : 'one eligible account; nothing to choose between';
+    default:
+      return `load-ranked · ${n} eligible`;
+  }
+}
+
+/**
+ * The rule the band is running, in one sentence.
+ *
+ * Exported because `tools/verify-caption.mjs` grades this exact string against
+ * the decision it describes: the sentence that prints and the sentence that is
+ * checked have to be the same object, or the gate guards a caption nobody sees.
+ *
+ * The three `banded` reasons share a caption because the rule that is RUNNING
+ * is the same ratio rule in all three; only the reason it is running differs,
+ * and that belongs in the `Band` row where the state is reported.
+ *
+ * The coverage figure is interpolated from the decision rather than written
+ * into the sentence, so it cannot go stale against a reconfigured target.
+ *
+ * NOUNS: the ordering numerator is unspent weekly quota, and `headroom` is
+ * reserved for the five-hour bucket, which is what `headroomOf`, the ladder's
+ * headroom column and `--json` all mean by the word. Calling the weekly
+ * numerator headroom would send a reader who learned the word here to the wrong
+ * bucket in the payload.
+ */
+export function ruleCaption(band) {
+  switch (band.kind) {
+    case 'sized':
+      return 'most unspent weekly quota per hour before it resets goes first, '
+        + `until ${formatTarget(band.target)} accounts of 5h headroom are covered`;
+    case 'banded':
+      return 'within the tolerance ratio of the best unspent-weekly-per-hour';
+    default:
+      return null;
+  }
+}
+
+/** Three decimals wherever a capacity figure appears. `achieved >= coverage` is
+ * evaluated raw, so a coarser display can show a target reached while admission
+ * continues: 0.4976 + 0.4976 + 0.51 sums to 1.5052 but reads `+0.50 +0.50
+ * +0.51` at two decimals, and the reader sees a third account admitted after
+ * the target was apparently met. */
+function formatCapacity(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(3) : '—';
+}
+
+/** The configured target, which is a knob rather than a sum. Three decimals
+ * exist to stop a rounded TOTAL from contradicting the admission it describes;
+ * the target is never summed, so `1.0` reads better than `1.000` and cannot
+ * mislead. Trailing zeros past the first are dropped for the same reason. */
+function formatTarget(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
+  return Number.isInteger(value) ? value.toFixed(1) : String(value);
+}
+
+/** Greedy wrap on whitespace. Never splits a word, so a long account name or a
+ * bucket key stays greppable in the output. */
+function wrapCaption(text, width) {
+  const out = [];
+  let line = '';
+  for (const word of String(text).split(' ')) {
+    if (line && `${line} ${word}`.length > width) {
+      out.push(line);
+      line = word;
+    } else {
+      line = line ? `${line} ${word}` : word;
+    }
+  }
+  if (line) out.push(line);
+  return out;
+}
+
+/** The rank a row prints, or `p-` where the band computed no order: absent
+ * pressure under sizing, every row under the ratio rule, every lower-tier row.
+ * A number there asserts an ordering that was never performed. */
+function rankLabel(row) {
+  return row.rank == null ? 'p-' : `p${row.rank}`;
+}
+
+/**
+ * The compact Decision block: the answer first, then the summary, then the
+ * evidence, then the rule.
+ *
+ * `New session` and `Next request` open it because they are the question
+ * `status` is run to ask; the ladder is evidence for them, and the caption is
+ * read once and never again.
+ *
+ * Everything here is read from `routing[]`. The only arithmetic is finding the
+ * rank at which the published running total first reached the published target,
+ * which is a scan over numbers the decision already emitted rather than a
+ * replay of the rule that produced them.
+ */
+function decisionLines(entry, status, paint) {
+  if (!entry || entry.band.kind === 'passthrough') return [];
+  const out = [];
+  const { band, pick } = entry;
+  const others = (status.routing || []).filter(e => e !== entry);
+  // The scope in the route's own vocabulary: the globs it matches, and the
+  // `(auto)` tag the routing table already uses for a family that is metered
+  // separately with no configured route. A reader who has seen `*fable* (auto)`
+  // two sections down should meet the same name here.
+  const route = (status.routes || []).find(r => r.name === entry.route);
+  const scope = route ? route.match.join(' ') : 'shared weekly';
+  const auto = route?.autocreated ? `  ${paint.dim('(auto)')}` : '';
+  out.push(`${paint.bold('Decision')}  ${paint.cyan(scope)}${auto}  ${paint.dim(`[${entry.bucket}]`)}`);
+
+  const term = pick.by === 'first' ? 'no term discriminated' : `by ${pick.by}`;
+  if (pick.kind === 'picked') {
+    const tie = pick.tiedWith.length
+      ? `first of ${pick.tiedWith.length + 1} tied on every term, config order`
+      : term;
+    out.push(`  ${paint.dim('New session'.padEnd(13))}${paint.dim('→')} ${pick.account} ${paint.dim(`(${tie})`)}`);
+  } else {
+    out.push(`  ${paint.dim('New session'.padEnd(13))}${paint.dim('nothing eligible for this scope')}`);
+  }
+
+  const current = status.currentAccount || null;
+  if (current) {
+    const held = band.admitted.includes(current) ? '' : '; not in the admitted set';
+    out.push(`  ${paint.dim('Next request'.padEnd(13))}${paint.dim('→')} ${current} ${paint.dim(`(current${held})`)}`);
+  }
+
+  out.push(`  ${paint.dim('Band'.padEnd(13))}${bandSummary(band)}`);
+
+  const admitted = band.ladder.filter(r => r.admitted);
+  const spare = band.ladder.filter(r => !r.admitted);
+  for (const [i, row] of admitted.entries()) {
+    const label = i === 0 ? 'Admit'.padEnd(13) : ' '.repeat(13);
+    out.push(`  ${paint.dim(label)}${ladderRow(row, paint)}`);
+  }
+  if (spare.length) {
+    const met = metAt(band);
+    const why = met ? `not needed; covered at p${met}` : 'not needed';
+    out.push(`  ${paint.dim('Spare'.padEnd(13))}${paint.dim(why)}`);
+    for (const row of spare) out.push(`  ${' '.repeat(13)}${ladderRow(row, paint)}`);
+  }
+  if (band.excluded.length) {
+    // Accounts the band never saw. Without this row they are absent from both
+    // lists and the block silently describes a smaller fleet than the one the
+    // reader is looking at.
+    const first = band.excluded[0];
+    out.push(`  ${paint.dim('Skipped'.padEnd(13))}${excludedRow(first, paint)}`);
+    for (const row of band.excluded.slice(1)) out.push(`  ${' '.repeat(13)}${excludedRow(row, paint)}`);
+  }
+  // Wrapped at the label column rather than left to the terminal, which would
+  // break it at whatever column the window happens to be and re-flow the whole
+  // block on a resize.
+  for (const [i, part] of wrapCaption(ruleCaption(band), 62).entries()) {
+    out.push(`  ${paint.dim((i === 0 ? 'Rule' : '').padEnd(13))}${paint.dim(part)}`);
+  }
+  if (others.length) {
+    const names = others.map(e => `${e.route || 'shared'}: ${e.band.kind}`).join(', ');
+    out.push(`  ${paint.dim('Other scopes'.padEnd(13))}${paint.dim(names)}`);
+  }
+  out.push('');
+  return out;
+}
+
+/** `sized · 1.837x the 1.000 target · met at p2 · 2 of 4 candidates`. The `x`
+ * is load-bearing: `1.837 of 1.0` implies a portion, and 1.837 is not a portion
+ * of 1.0, so the phrase reads as the same N-of-M alarm the figure is not. */
+function bandSummary(band) {
+  const of = `${band.admitted.length} of ${band.candidates} candidate${band.candidates === 1 ? '' : 's'}`;
+  if (band.kind === 'sized') {
+    const met = metAt(band);
+    const where = met ? ` · met at p${met}` : ' · target not met';
+    return `sized · ${formatCapacity(band.achieved)}x the ${formatTarget(band.target)} target${where} · ${of}`;
+  }
+  return `ratio rule · floor ${band.floor.toExponential(3)} · ${of} (${band.reason})`;
+}
+
+/** The rank at which the published running total first reached the published
+ * target, or null when it never did. A scan over emitted numbers, not a replay
+ * of the admission loop that emitted them. */
+function metAt(band) {
+  if (band.kind !== 'sized' || band.target == null) return null;
+  for (const row of band.ladder) {
+    if (row.cumulative != null && row.cumulative >= band.target) return row.rank;
+  }
+  return null;
+}
+
+/** `p1  +0.959  name`, or a bare figure where measured capacity was not added,
+ * or a word where there was no measurement to add. */
+function ladderRow(row, paint) {
+  const rank = rankLabel(row).padEnd(4);
+  let capacity;
+  if (row.headroom.kind === 'absent') capacity = paint.dim('exempt'.padEnd(7));
+  else if (row.admitted) capacity = `+${formatCapacity(row.headroom.value)}`.padEnd(7);
+  else capacity = ` ${formatCapacity(row.headroom.value)}`.padEnd(7);
+  const note = row.pressure.kind === 'absent' ? paint.dim(`  (${row.pressure.reason})`) : '';
+  return `${paint.dim(rank)}${capacity} ${row.account}${note}`;
+}
+
+/** An account the band never saw, and the measurement that removed it. */
+function excludedRow(row, paint) {
+  const detail = typeof row.detail === 'number' && row.bucket
+    ? ` ${row.bucket} ${formatCapacity(row.detail)}`
+    : '';
+  // padEnd, not a fixed slice: the longest reason is wider than the column, and
+  // truncating it would run the code into the account name.
+  return `${paint.dim(`${row.reason} `.padEnd(20))}${row.account}${paint.dim(detail)}`;
 }
 
 // The routing table: one line per route (configured first, then auto-detected),

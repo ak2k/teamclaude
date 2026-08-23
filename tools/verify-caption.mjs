@@ -6,11 +6,13 @@
 //                                 [--caption=<id>] [--list]
 //
 // The compact status block prints a `Rule` line under the band ladder, and that
-// line makes two falsifiable claims: an ORDERING ("most weekly headroom per
-// remaining hour goes first") and a STOP ("until 1.0 accounts of 5h capacity are
-// covered"). A caption that no longer matches `decideBand` is worse than no
-// caption: it describes an admission sequence that did not happen, beside the
-// numbers that did, and nothing else in the suite would notice.
+// line makes two falsifiable claims: an ORDERING ("most unspent weekly quota per
+// hour before it resets goes first") and a STOP ("until 1.0 accounts of 5h
+// headroom are covered"). The sentence itself comes from `ruleCaption`, so the
+// string graded here is the string that prints; grading a copy would leave the
+// printed one ungoverned. A caption that no longer matches `decideBand` is worse
+// than no caption: it describes an admission sequence that did not happen,
+// beside the numbers that did, and nothing else in the suite would notice.
 //
 // ── why this recomputes the ordering on purpose ──────────────────────────────
 //
@@ -50,6 +52,7 @@
 import fs from 'node:fs';
 import { AccountManager } from '../src/account-manager.js';
 import { decideBand, pressureOf, headroomOf } from '../src/band-decision.js';
+import { ruleCaption } from '../src/status-renderer.js';
 
 const argv = process.argv.slice(2);
 /** Last-wins is a silent way to obey an argument nobody meant; refuse instead. */
@@ -74,16 +77,21 @@ function refuse(message) {
  * the design session falsified it against a live sample, so a run where it fails
  * to differ is a run that could not have caught the original defect either.
  *
- * @typedef {{ id: string, shipped: boolean, text: string, coverage: number|null,
+ * @typedef {{ id: string, shipped: boolean, pinned: string,
  *             score: (a: any, now: number) => number|null }} Caption
  * @type {Caption[]}
  */
 const CAPTIONS = [
   {
-    id: 'weekly-headroom-per-hour',
+    id: 'unspent-weekly-per-hour',
     shipped: true,
-    coverage: 1.0,
-    text: 'most weekly headroom per remaining hour goes first, until 1.0 accounts of 5h capacity are covered',
+    // The sentence this reading was written against, pinned. The text that
+    // PRINTS comes from `ruleCaption` and is graded below; this string is the
+    // tripwire for the one thing a gate cannot check by itself — someone
+    // rewording the caption without asking whether the reading still reads it.
+    // Reword the renderer and this run refuses until the reading is revisited.
+    pinned: 'most unspent weekly quota per hour before it resets goes first, '
+      + 'until 1.0 accounts of 5h headroom are covered',
     // Per HOUR where the code computes per second: the two differ by 3600, a
     // positive constant, so they cannot order two accounts differently. Written
     // as the caption says it rather than as the code says it, because the reading
@@ -97,21 +105,19 @@ const CAPTIONS = [
   {
     id: 'soonest-expiring',
     shipped: false,
-    coverage: null,
-    text: 'the soonest-expiring account goes first',
+    pinned: 'the soonest-expiring account goes first',
     score: (a, now) => (a.resetAt == null ? null : -(a.resetAt - now)),
   },
   {
     id: 'least-used-weekly',
     shipped: false,
-    coverage: null,
-    text: 'the least-used weekly bucket goes first',
+    pinned: 'the least-used weekly bucket goes first',
     score: a => (a.utilization == null || !Number.isFinite(a.utilization) ? null : -a.utilization),
   },
 ];
 
 if (argv.includes('--list')) {
-  for (const c of CAPTIONS) console.log(`${c.shipped ? 'shipped ' : 'control '} ${c.id}\n    "${c.text}"`);
+  for (const c of CAPTIONS) console.log(`${c.shipped ? 'shipped ' : 'control '} ${c.id}\n    "${c.pinned}"`);
   process.exit(0);
 }
 
@@ -131,6 +137,32 @@ if (!NOW) refuse('--now=<iso> is required: a captured sample is only meaningful 
 
 const now = Date.parse(NOW);
 if (!Number.isFinite(now)) refuse(`--now=${NOW} is not a parseable timestamp`);
+
+/**
+ * What a caption SAYS. For the shipped one that is whatever `ruleCaption`
+ * renders, because grading a copy of the sentence would leave the printed one
+ * ungoverned; for a control it is the pinned string, since no renderer emits it.
+ */
+function textOf(caption) {
+  return caption.shipped ? ruleCaption({ kind: 'sized', target: 1 }) : caption.pinned;
+}
+
+// The one thing this gate cannot check for itself: whether the reading below
+// still reads the sentence above. Nothing can verify that an English claim and
+// a scoring function mean the same thing, so the sentence is pinned and a
+// reword stops the run rather than silently grading the new sentence with the
+// old sentence's reading — which would pass, and would mean nothing.
+const shippedText = ruleCaption({ kind: 'sized', target: 1 });
+const pinned = CAPTIONS.find(c => c.shipped).pinned;
+if (shippedText !== pinned) {
+  console.error('verify-caption: the shipped caption has been reworded since this gate was written.');
+  console.error(`  renders: ${shippedText}`);
+  console.error(`  pinned:  ${pinned}`);
+  console.error('  Re-read the new sentence, decide whether the executable reading in CAPTIONS still');
+  console.error('  reads it, and update both together. Grading a new claim with an old reading passes');
+  console.error('  and proves nothing.');
+  process.exit(2);
+}
 
 // The whole process runs at the capture clock, not just the snapshot. Passing
 // `now` into `_bandSnapshot` is not enough: the product reads the wall clock
@@ -269,17 +301,13 @@ for (const caption of CAPTIONS) {
   let verdict;
   if (caption.shipped) verdict = reproduces ? 'REPRODUCES' : 'FALSIFIED';
   else verdict = reproduces ? 'INDISTINGUISHABLE' : 'DIFFERS';
-  // A stale literal in the sentence is a defect the ordering check cannot see:
-  // the rule can be described correctly and the number beside it still be the
-  // previous default.
-  const coverageStale = caption.coverage != null && !sameTotal(caption.coverage, snapshot.coverage);
-  results.push({ caption, got, verdict, coverageStale });
+  results.push({ caption, got, verdict, text: textOf(caption) });
 }
 
 console.log('');
 for (const r of results) {
   console.log(`${r.verdict.padEnd(18)} ${r.caption.id}${r.caption.shipped ? '  (shipped)' : '  (control)'}`);
-  console.log(`                   "${r.caption.text}"`);
+  console.log(`                   "${r.text}"`);
   console.log(`                   admits [${r.got.keep}] achieving ${r.got.achieved.toFixed(3)}` +
     `   vs decision [${decided.keep}] achieving ${decided.achieved.toFixed(3)}`);
   if (r.verdict === 'INDISTINGUISHABLE') {
@@ -287,17 +315,13 @@ for (const r of results) {
     console.log('                   from the shipped caption and produces no evidence for either. Run a scope or a');
     console.log('                   fleet where they separate; the run fails rather than reporting a pass it did not earn.');
   }
-  if (r.coverageStale) {
-    console.log(`                   COVERAGE STALE: the sentence says ${r.caption.coverage}, the config says ${snapshot.coverage}`);
-  }
 }
 
 // One clause per verdict, counted from the verdicts rather than asserted beside
 // them: a summary that states what the check decided, computed from the same
 // data the check used.
 const tally = results.reduce((acc, r) => { acc[r.verdict] = (acc[r.verdict] || 0) + 1; return acc; }, {});
-if (results.some(r => r.coverageStale)) tally['COVERAGE STALE'] = results.filter(r => r.coverageStale).length;
-const failed = results.filter(r => r.verdict === 'FALSIFIED' || r.verdict === 'INDISTINGUISHABLE' || r.coverageStale);
+const failed = results.filter(r => r.verdict === 'FALSIFIED' || r.verdict === 'INDISTINGUISHABLE');
 console.log(`\nsummary    ${Object.entries(tally).map(([k, v]) => `${v} ${k}`).join(', ')}` +
   `  over ${results.length} caption${results.length === 1 ? '' : 's'} on ${tier.length} ranked accounts`);
 if (failed.length) {

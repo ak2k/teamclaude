@@ -35,7 +35,7 @@ test('the shipped caption still describes what decideBand does', () => {
   // The premise: without this line the assertions below could all pass on a run
   // that graded nothing, because the harness aborts before printing verdicts.
   assert.match(out, /harness {4}replaying the CODE's own order reproduces the decision: yes/);
-  assert.match(out, /REPRODUCES {9}weekly-headroom-per-hour/);
+  assert.match(out, /REPRODUCES {9}unspent-weekly-per-hour/);
   assert.equal((out.match(/^DIFFERS/gm) || []).length, 2);
   assert.doesNotMatch(out, /INDISTINGUISHABLE/);
 });
