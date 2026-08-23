@@ -1778,14 +1778,20 @@ export class AccountManager {
    * with this one by identity rather than by name, because route names are not
    * unique — the same reason `pinnedTo` is carried rather than looked up.
    *
-   * A glob naming no metered family (`gpt-*`) falls back to its literal core,
-   * which is the shared bucket and is the right answer for it: there is one
-   * scope, not one per family.
+   * TWO STATES, NOT ONE, and the difference is which of them produced the empty
+   * list. A glob naming no metered family (`gpt-*`) falls back to its literal
+   * core, which resolves to the shared bucket and is the right answer for it:
+   * one scope, not one per family. A glob whose families are ALL owned by an
+   * earlier route is a different thing entirely — it carries nothing, so it
+   * gets no entry. Collapsing the two published a second `*fable*` route with a
+   * Fable bucket and a destination for traffic first-match routing sends
+   * somewhere else every time.
    */
   _scopeModelsFor(glob, route) {
-    const owned = familyModelsMatching(glob)
-      .filter(m => this._routeForModel(m)?.match === route.match);
-    return owned.length ? owned : [glob.replace(/\*/g, '') || 'model'];
+    const named = familyModelsMatching(glob);
+    const owned = named.filter(m => this._routeForModel(m)?.match === route.match);
+    if (owned.length) return owned;
+    return named.length ? [] : [glob.replace(/\*/g, '') || 'model'];
   }
 
   /** The name of the account a request for `model` would land on right now, or

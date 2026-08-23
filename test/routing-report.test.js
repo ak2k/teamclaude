@@ -331,6 +331,22 @@ test('a glob spanning families publishes one entry per family, each with a real 
   }
 });
 
+test('a route whose families are all captured earlier publishes no entry at all', () => {
+  // Two states reached the same empty list and only one of them means "fall
+  // back to the literal": a glob naming NO metered family is a shared-bucket
+  // scope, while a glob whose families another route already owns carries
+  // nothing. Collapsing them published a second `*fable*` route with a Fable
+  // bucket and a destination for traffic first-match routing never sends it.
+  const now = Date.now();
+  const routes = [{ name: 'first', match: ['*fable*'] }, { name: 'second', match: ['*fable*'] }];
+  const report = familyFleet(now, routes).getStatus().routing;
+
+  assert.deepEqual(report.filter(e => e.route === 'first').map(e => e.model), ['claude-fable-5'],
+    'the premise: the first route is the one that receives Fable');
+  assert.deepEqual(report.filter(e => e.route === 'second'), [],
+    'the second route publishes a destination for traffic it can never receive');
+});
+
 test('a glob naming no metered family stays one scope on the shared bucket', () => {
   const now = Date.now();
   const entries = familyFleet(now, [{ name: 'other', match: ['gpt-*'] }])
