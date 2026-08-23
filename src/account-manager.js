@@ -2043,9 +2043,10 @@ export class AccountManager {
         || (mine === theirs && acc.quota.unified7dReset < best.quota.unified7dReset)) best = acc;
     }
 
-    // This is a writer of currentIndex that used to rank on reset time alone —
-    // the metric expiry pressure exists to correct. TWO guards, because they are
-    // different properties and neither implies the other. Band membership says
+    // This choice used to be made on reset time alone — the metric expiry
+    // pressure exists to correct — and it decides a WRITE of currentIndex in
+    // the caller, which is what these guards protect. TWO of them, because they
+    // are different properties and neither implies the other. Band membership says
     // the account is worth spending at all; it was a usable proxy for pressure
     // only while the band WAS the tolerance ratio, and capacity sizing widens it
     // deliberately. The rank comparison says this switch does not leave a
@@ -2751,7 +2752,8 @@ export class AccountManager {
     // destination rows are: after a session reset the prologue moves it before
     // any selection runs, so the live index names an account no request will
     // start from.
-    const observed = this._observedFleet();
+    const now = Date.now();
+    const observed = this._observedFleet(now);
     // The tracker's own share of the owed gauge, reported alongside the session
     // view it is derived from but published under expiryRouting, which is the
     // feature it says something about.
@@ -2782,7 +2784,7 @@ export class AccountManager {
         },
       },
       routes: this.getRoutes(observed),
-      routing: this._routingReport(Date.now(), observed),
+      routing: this._routingReport(now, observed),
       sessions: { ...sessions, distribute: this.distributeSessions },
       accounts: observed.accounts.map(a => {
         const pressure = this._pressureVariant(a);
