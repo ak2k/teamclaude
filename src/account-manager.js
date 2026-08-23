@@ -2760,6 +2760,21 @@ export class AccountManager {
 
   /**
    * Return a status summary of all accounts (safe to expose, no credentials).
+   *
+   * `now` IS A TEST SEAM, NOT A FEATURE. Every field of this payload answers
+   * about one instant, and the way that claim fails is a field reading the wall
+   * clock a microsecond later — too narrow for any test to catch by waiting.
+   * The parameter is how the claim is checked instead of asserted: ask for the
+   * payload at an instant ten minutes gone and a field on the wall clock
+   * answers about a different fleet than the field beside it.
+   *
+   * Two things follow, for whoever reads this next. No shipping caller passes
+   * it, and nothing here validates it, so a caller that hands over a stale
+   * instant gets a confident payload about the past — this is a seam for a
+   * test, not an as-of query. And it earns its surface only while a test drives
+   * it: if `status-payload.test.js`'s one-clock test goes, take this with it
+   * rather than leaving behind a parameter nobody can justify and nobody dares
+   * remove.
    */
   getStatus(now = Date.now()) {
     // ONE PROJECTION FOR THE WHOLE PAYLOAD, and one clock behind it. Every
@@ -2769,13 +2784,6 @@ export class AccountManager {
     // millisecond apart can straddle a window expiry, and a payload whose
     // ladder ranks an account the row beside it calls spent is the pass-4
     // finding one layer out.
-    //
-    // `now` is a parameter so that claim is CHECKABLE rather than asserted: ask
-    // for the payload at an instant, and every field that consults a clock must
-    // answer about that instant. A field that reads the wall clock instead
-    // disagrees with the rest of the payload by however far apart the two reads
-    // are, which is exactly the defect being fixed and is otherwise measured in
-    // microseconds — too narrow for any test to catch, and no less wrong.
     //
     // `currentAccount` is the projected one for the same reason the
     // destination rows are: after a session reset the prologue moves it before
