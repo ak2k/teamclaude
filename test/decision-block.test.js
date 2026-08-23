@@ -460,10 +460,12 @@ test('the caption a reader sees is the caption the gate grades', () => {
   assert.equal(
     ruleCaption({ kind: 'sized', target: 1 }),
     'within the best priority tier, most unspent weekly quota per hour '
-      + 'before it resets goes first, until 1.0 accounts of 5h headroom are covered');
+      + 'before it resets goes first, until 1.0 accounts of 5h headroom are covered; '
+      + 'accounts missing either measurement are admitted regardless');
   assert.equal(ruleCaption({ kind: 'banded' }),
     'within the best priority tier, everything within the tolerance ratio '
-      + 'of the best unspent-weekly-per-hour');
+      + 'of the best unspent-weekly-per-hour; accounts with no pressure reading '
+      + 'are admitted regardless');
   assert.equal(ruleCaption({ kind: 'passthrough' }), null,
     'a decision that ran no rule has a rule caption');
 });

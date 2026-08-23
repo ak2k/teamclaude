@@ -94,6 +94,19 @@ test("the gate shows the caption's priority scope is doing work, not decorating"
     'the tier-scoped and unqualified readings agreed, so the scope is unobservable here');
 });
 
+test('the gate grades the stop clause, including the half that says "regardless"', () => {
+  // "Until N are covered" is only half the rule. The other half — accounts
+  // missing either measurement are admitted regardless — is what lets a ladder
+  // hold one row for `coverage-met` and admit the next, and it was absent from
+  // the caption for four passes while every verdict here stayed green.
+  const { code, out } = gate([`--sample=${SAMPLE}`, '--model=claude-fable-5', `--now=${NOW}`]);
+  assert.equal(code, 0, out);
+  assert.match(out, /stop clause {2}with the exemption \[[\d,]+\] against a strict stop at coverage \[[\d,]+\]/,
+    'the stop clause is ungraded, which is the state it was in when a pass found it wrong');
+  assert.match(out, /stop clause.*DIFFERS, as it must/,
+    'a caption that stopped at coverage and said nothing about unmeasured accounts would grade the same');
+});
+
 test('a sample read without its capture clock is refused, not guessed at', () => {
   const { code, out } = gate([`--sample=${SAMPLE}`, '--model=claude-fable-5']);
   assert.equal(code, 2);

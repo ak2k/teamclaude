@@ -120,7 +120,8 @@ const CAPTIONS = [
     // `Rule` line is the only check on that, and this comment exists so the
     // next person knows it is theirs to make rather than the gate's.
     pinned: 'within the best priority tier, most unspent weekly quota per hour '
-      + 'before it resets goes first, until 1.0 accounts of 5h headroom are covered',
+      + 'before it resets goes first, until 1.0 accounts of 5h headroom are covered; '
+      + 'accounts missing either measurement are admitted regardless',
     // Per HOUR where the code computes per second: the two differ by 3600, a
     // positive constant, so they cannot order two accounts differently. Written
     // as the caption says it rather than as the code says it, because the reading
@@ -297,14 +298,18 @@ const decided = {
  * axis exemption, which is the clause a paraphrase drops first — because the
  * identity check below is what makes this fidelity a measured claim.
  */
-function replay(order) {
+function replay(order, { exempt = true } = {}) {
   const keep = [];
   let achieved = 0;
   let metAt = null;
   order.forEach((acct, i) => {
     const headroom = headroomOf(acct, snapshot.switchThreshold);
     const pressure = pressureOf(acct, snapshot.now);
-    const unmeasured = headroom.kind === 'absent' || pressure.kind === 'absent';
+    // `exempt: false` is the STRICT reading of the caption's stop clause —
+    // admission halts at coverage, full stop. It exists so a control can show
+    // the difference between that and what the band does, which is the whole
+    // content of the exemption half of the sentence.
+    const unmeasured = exempt && (headroom.kind === 'absent' || pressure.kind === 'absent');
     if (!unmeasured && achieved >= snapshot.coverage) return;
     keep.push(acct.index);
     if (headroom.kind === 'known') achieved += headroom.value;
@@ -470,6 +475,60 @@ console.log(`\ncross-tier  demoting [${demotedIndex}] to a lower priority: the b
 if (!scopeIsLoadBearing) {
   console.error('  the tier-scoped and unqualified readings agree on this fleet, so nothing here');
   console.error('  shows the caption\'s priority qualifier is doing any work.');
+  process.exit(1);
+}
+
+// ── STOP-CLAUSE CONTROL ─────────────────────────────────────────────────────
+//
+// The caption says admission runs "until N accounts of 5h headroom are covered"
+// and then that "accounts missing either measurement are admitted regardless".
+// The second half is the load-bearing one and was absent from the sentence for
+// four passes: a fleet with an unmeasured account admits it AFTER coverage is
+// met, so a ladder can hold one row for `coverage-met` and admit the next.
+//
+// This grades that half. The strict reading — stop at coverage, full stop — must
+// admit a SMALLER set than the band does. If the two agree the exemption is
+// invisible on this fleet and the clause is ungraded, which is the state the
+// caption was in until a pass found it.
+//
+// Synthesised, because the committed sample has no unmeasured account: the
+// lowest-ranked account's governing reset is removed, which is what makes its
+// pressure absent and sorts it last.
+const lastRanked = codeOrder[codeOrder.length - 1];
+const exemptSnapshot = {
+  ...snapshot,
+  accounts: snapshot.accounts.map(a => (a.index === lastRanked ? { ...a, resetAt: null } : a)),
+};
+const exemptLadder = explainBand(exemptSnapshot).ladder;
+const exemptRow = exemptLadder.find(r => r.account.index === lastRanked);
+const heldBefore = exemptLadder.findIndex(r => !r.admitted);
+
+// Premise 1: the account must actually be admitted by the exemption.
+if (!exemptRow || !exemptRow.admitted || !String(exemptRow.reason).startsWith('unmeasured-exempt')) {
+  refuse('the stop-clause control could not produce a row admitted by the exemption '
+    + `(reason ${exemptRow ? exemptRow.reason : 'missing'}, admitted ${exemptRow?.admitted}), `
+    + 'so it cannot grade the half of the caption that says so');
+}
+// Premise 2: it must be admitted AFTER coverage was already met, or the strict
+// reading would admit it too and the two would agree for a trivial reason.
+if (heldBefore < 0 || exemptLadder.indexOf(exemptRow) < heldBefore) {
+  refuse('the exempt row is not admitted after a held one on this sample, so the strict '
+    + 'and exempting readings cannot differ and the stop clause stays ungraded');
+}
+
+const exemptTier = exemptSnapshot.accounts.filter(a => a.priority === Math.min(...exemptSnapshot.accounts.map(x => x.priority)));
+const orderedExempt = exemptTier
+  .map((a, i) => ({ a, i, v: pressureScore(a) }))
+  .sort((x, y) => ((y.v == null ? -Infinity : y.v) - (x.v == null ? -Infinity : x.v)) || x.i - y.i)
+  .map(e => e.a);
+const asWritten = replay(orderedExempt).keep;
+const strictStop = replay(orderedExempt, { exempt: false }).keep;
+const exemptionIsObservable = !sameSet(asWritten, strictStop);
+console.log(`\nstop clause  with the exemption [${asWritten}] against a strict stop at coverage `
+  + `[${strictStop}]  ${exemptionIsObservable ? 'DIFFERS, as it must' : 'READS THE SAME'}`);
+if (!exemptionIsObservable) {
+  console.error('  a caption that stopped at coverage and said nothing about unmeasured accounts');
+  console.error('  would grade identically here, so this run does not check that clause at all.');
   process.exit(1);
 }
 

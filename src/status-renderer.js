@@ -177,10 +177,12 @@ export function ruleCaption(band) {
     case 'sized':
       return 'within the best priority tier, most unspent weekly quota per hour '
         + `before it resets goes first, until ${formatTarget(band.target)} accounts `
-        + 'of 5h headroom are covered';
+        + 'of 5h headroom are covered; accounts missing either measurement are '
+        + 'admitted regardless';
     case 'banded':
       return 'within the best priority tier, everything within the tolerance ratio '
-        + 'of the best unspent-weekly-per-hour';
+        + 'of the best unspent-weekly-per-hour; accounts with no pressure reading '
+        + 'are admitted regardless';
     default:
       return null;
   }
