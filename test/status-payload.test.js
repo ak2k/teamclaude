@@ -371,6 +371,74 @@ test('the absence reason never reports the feature flag', () => {
     'the absence reason moved when the feature flag moved');
 });
 
+// ONE STATE PER PAYLOAD. Every section answers about the fleet as the next
+// request will find it, and the sections must not disagree: pass 4's converged
+// finding was a ladder ranking an account on a window the eligibility beside it
+// had already treated as gone. The rows and the report are asserted together
+// here, because either alone can be right while the pair is nonsense.
+test('an expired window is gone from every section of the payload, and from none of the fleet', () => {
+  const now = Date.now();
+  const H = 3600e3;
+  const am = new AccountManager([apikey('healthy'), apikey('expired'), apikey('held')], 0.98,
+    { expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 } });
+  am.accounts[0].quota = { ...am.accounts[0].quota,
+    unified5h: 0.1, unified5hReset: now + 2 * H, unified7d: 0.2, unified7dReset: now + 20 * H };
+  // Spent, on a window whose reset has already passed: live it is 95% used, and
+  // to the next request it is a window nobody has reported yet.
+  am.accounts[1].quota = { ...am.accounts[1].quota,
+    unified5h: 0.2, unified5hReset: now + 2 * H, unified7d: 0.95, unified7dReset: now - H };
+  // Throttled, hold elapsed: the next request reopens it before it does anything
+  // else, so a payload calling it throttled describes a state nothing can meet.
+  am.accounts[2].quota = { ...am.accounts[2].quota,
+    unified5h: 0.3, unified5hReset: now + 2 * H, unified7d: 0.4, unified7dReset: now + 40 * H };
+  am.accounts[2].status = 'throttled';
+  am.accounts[2].rateLimitedUntil = now - 60_000;
+
+  const s = am.getStatus();
+  const [, expired, held] = s.accounts;
+
+  assert.equal(expired.quota.unified7d, null, 'the row publishes a window the request path has already dropped');
+  assert.equal(expired.pressure, null);
+  assert.equal(expired.pressureAbsent, 'no-utilization',
+    'the row scores pressure on the spent figure while eligibility ignores it');
+  assert.equal(held.status, 'active', 'the row calls an account throttled that the next request reopens');
+  assert.equal(held.rateLimitedUntil, null);
+
+  const shared = s.routing.find(e => e.scope === 'shared');
+  const row = shared.band.ladder.find(r => r.account === 'expired');
+  assert.ok(shared.band.ladder.length, 'the premise: this fleet must produce a ladder to compare against');
+  assert.ok(row, 'the expired account is not on the ladder, so the sections are not being compared');
+  assert.deepEqual(row.pressure, { kind: 'absent', reason: 'no-utilization' },
+    'the ladder ranks the expired window that the account row beside it reports as gone');
+
+  // AND NOTHING WAS APPLIED. The clear is a session-reset event's cousin: the
+  // request path owns it, so a status call must leave every field where it was.
+  assert.equal(am.accounts[1].quota.unified7d, 0.95, 'reading the status consumed the expiry');
+  assert.equal(am.accounts[2].status, 'throttled', 'reading the status performed the throttle transition');
+  assert.equal(am.accounts[2].rateLimitedUntil, now - 60_000);
+});
+
+test('the active account is the one the next request starts from, not the one it leaves', () => {
+  const now = Date.now();
+  const H = 3600e3;
+  const am = new AccountManager([apikey('incumbent'), apikey('resetting')], 0.98,
+    { expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 } });
+  am.accounts[0].quota = { ...am.accounts[0].quota,
+    unified5h: 0.2, unified5hReset: now + 2 * H, unified7d: 0.5, unified7dReset: now + 400 * H };
+  // Five-hour window already reset AND a sooner weekly: the prologue
+  // `getActiveAccount` runs before any selection moves the current account onto it.
+  am.accounts[1].quota = { ...am.accounts[1].quota,
+    unified5h: 0.9, unified5hReset: now - 60_000, unified7d: 0.3, unified7dReset: now + 20 * H };
+  am.setCurrentAccount(0);
+
+  const s = am.getStatus();
+  assert.equal(s.currentAccount, 'resetting',
+    'the payload names an account no request will start from');
+  assert.equal(am.currentIndex, 0, 'reading the status moved the current account');
+  assert.equal(s.routing.find(e => e.scope === 'shared').target, 'resetting',
+    'the destination and the active row disagree about where the next request starts');
+});
+
 test('an account publishes how many requests it is carrying right now', async () => {
   const am = new AccountManager([apikey('busy'), apikey('idle')], 0.98);
   // Through admit() rather than by assigning the counter: admit() is what the

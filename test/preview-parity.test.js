@@ -86,6 +86,20 @@ const STATES = [
   ['current account requalifying', am => { am.accounts[0].requalify = true; }],
   ['a strictly higher-priority account is available', am => { am.accounts[2].priority = -1; }],
   ['current account exhausted', am => { am.accounts[0].status = 'exhausted'; }],
+  // THE PROLOGUE, which is not a branch of `_select` at all: `getActiveAccount`
+  // runs `refreshExpiredQuotas` before any selection, and both of its effects
+  // change the answer. Neither appeared here until pass 4 filed them, because
+  // the enumeration this matrix was built from walked `_select` and never
+  // walked its caller.
+  ['a non-current weekly window has already reset, and the fleet must re-rank', am => {
+    am.accounts[0].disabled = true;
+    am.accounts[1].quota = { ...am.accounts[1].quota,
+      unified7d: 0.95, unified7dReset: Date.now() - 60_000 };
+  }],
+  ['a five-hour reset moves the current account before selection runs', am => {
+    am.accounts[1].quota = { ...am.accounts[1].quota,
+      unified5h: 0.9, unified5hReset: Date.now() - 60_000 };
+  }],
 ];
 
 const ROUTED = [
@@ -200,6 +214,74 @@ test('the block names the account a NEW SESSION is served by, which is a differe
     'an arm was skipped, so the set is smaller than it reads');
 });
 
+// THE OTHER DESTINATION ROW, graded the way `New session` is. `parity` above
+// grades `previewRouteIndex`, which is what the row is computed from; this
+// grades the row itself, because a row can be rendered from something else
+// entirely and nothing between the two would notice. Pass 4 named this gap:
+// only one of the two rows had an oracle of its own.
+test('the rendered Next request row names the account a plain request is served by', () => {
+  for (const [label, arrange] of STATES) {
+    const now = Date.now();
+    const observed = baseFleet(now);
+    arrange(observed);
+    const served = baseFleet(now);
+    arrange(served);
+
+    const account = served.getActiveAccount(null, null, null, null, {});
+    const expected = account ? account.name : null;
+    const lines = renderStatus(observed.getStatus(), { color: false, now }).split('\n');
+    const rowText = (lines.find(l => l.trim().startsWith('Next request')) || '');
+    assert.ok(rowText, `${label}: no Next request row rendered, so nothing is being compared`);
+    const shown = (rowText.match(/→ (\S+)/) || [])[1] ?? null;
+    assert.equal(shown, expected,
+      `${label}: the block names ${shown}, a plain request is served by ${expected}`);
+  }
+});
+
+// The LAST RESORT is a fourth way `_select` returns an account: with nothing
+// eligible it reopens the one whose hold has already elapsed rather than
+// failing. It is not one of the three documented absences — those are the
+// probe, session affinity and rollover preemption — and until it was projected
+// the preview answered "nothing can serve this" about the account every request
+// was landing on.
+//
+// This is the one fixture in the file where every account IS unavailable, which
+// is the region the probe lives in, so the probe is stubbed and asserted unused:
+// otherwise a green here could mean the walk fell through to a mutation the
+// preview must never mirror.
+test('the preview names the account the last resort reopens, and not by probing', () => {
+  const now = Date.now();
+  const build = () => {
+    const am = new AccountManager([acct('spent'), acct('offline')], 0.98,
+      { expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 } });
+    am.accounts[0].status = 'exhausted';
+    am.accounts[0].rateLimitedUntil = now - 60_000;
+    am.accounts[0].quota = { ...am.accounts[0].quota,
+      unified5h: 0.99, unified5hReset: now + 2 * H,
+      unified7d: 0.5, unified7dReset: now + 100 * H };
+    am.accounts[1].disabled = true;
+    am.setCurrentAccount(0);
+    return am;
+  };
+
+  const previewed = build();
+  // The premise: ordinary selection must find nothing here, or the last resort
+  // is not what either side is answering with.
+  assert.equal(previewed._pickBestAvailable(null, null, null,
+    { observe: true, fleet: previewed._observedFleet().accounts }), null,
+    'an account was eligible after all, so this fixture never reaches the last resort');
+
+  const served = build();
+  let probes = 0;
+  served._selectProbe = () => { probes += 1; return null; };
+  const account = served.getActiveAccount(null, null, null, null, {});
+
+  const index = previewed.previewRouteIndex(null);
+  assert.equal(index == null ? null : previewed.accounts[index].name,
+    account ? account.name : null);
+  assert.equal(probes, 0, 'the probe served this request, so the last resort is not what was graded');
+});
+
 test('the states that must move the answer do move it', () => {
   // The premise for the matrix above: if `requalify` or a disabled current
   // account stopped changing where a request goes, the parity assertions would
@@ -210,11 +292,39 @@ test('the states that must move the answer do move it', () => {
   const plainGets = plain.getActiveAccount(null, null, null, null, {}).name;
   assert.equal(plainGets, 'current', 'the premise: an untouched fleet stays on the current account');
 
-  for (const label of ['current account disabled', 'current account requalifying']) {
+  for (const label of ['current account disabled', 'current account requalifying',
+    'a non-current weekly window has already reset, and the fleet must re-rank',
+    'a five-hour reset moves the current account before selection runs']) {
     const [, arrange] = STATES.find(s => s[0] === label);
     const am = baseFleet(now);
     arrange(am);
     const moved = am.getActiveAccount(null, null, null, null, {}).name;
     assert.notEqual(moved, plainGets, `${label}: no longer moves the request, so parity here is vacuous`);
   }
+});
+
+// The two prologue arms carry a second premise the others do not: each names a
+// window that must ALREADY have expired at the moment the arm runs. A fixture
+// whose timestamps drifted into the future would still pass parity — both sides
+// would simply agree about an ordinary fleet — and the arm would silently stop
+// being about the prologue at all.
+test('the prologue states are the states they claim to be', () => {
+  const now = Date.now();
+
+  const reranking = baseFleet(now);
+  STATES.find(s => s[0].startsWith('a non-current weekly'))[1](reranking);
+  const weekly = reranking._expiredQuotaView(reranking.accounts[1]);
+  assert.ok(weekly.cleared.includes('weekly'),
+    'the arm no longer expires a weekly window, so it grades an ordinary re-rank');
+  assert.notEqual(reranking.accounts[1].quota.unified7d, null,
+    'and the live quota must still hold the spent figure, or there are not two views to disagree');
+
+  const switching = baseFleet(now);
+  STATES.find(s => s[0].startsWith('a five-hour reset'))[1](switching);
+  assert.ok(switching._expiredQuotaView(switching.accounts[1]).session,
+    'the arm no longer produces a session-reset event, so nothing moves currentIndex');
+  const before = switching.currentIndex;
+  switching.refreshExpiredQuotas();
+  assert.notEqual(switching.currentIndex, before,
+    'the prologue no longer moves the current account here, so the arm grades nothing');
 });

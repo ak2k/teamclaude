@@ -749,18 +749,25 @@ export class AccountManager {
    * request: the exhausted-fleet probe (which mutates and sends traffic), the
    * session-affinity path (there is no session), and rollover preemption (which
    * consumes an event a preview must not spend).
+   *
+   * THE ENUMERATION STARTS AT `getActiveAccount`, NOT AT `_select`. Walking
+   * `_select` alone is how the prologue — `refreshExpiredQuotas`, which clears
+   * expired windows and can move `currentIndex` before any selection runs —
+   * went unprojected for a round: every branch of the walk was mirrored
+   * faithfully against a starting state the request itself would have changed.
    */
-  previewRouteIndex(model) {
+  previewRouteIndex(model, observed = this._observedFleet()) {
     // A PREVIEW, and its only callers are displays: the status report and the
     // TUI. So it observes without writing — asking where a request would go must
-    // not be the thing that decides where the next one does. Availability here
-    // answers against the same post-clear state the request path would see; what
-    // it does not do is perform the clear, which would consume a session-reset
-    // event `refreshExpiredQuotas` owns.
-    const observe = { observe: true };
-    const pinned = this._pinnedAccountForModel(model);
+    // not be the thing that decides where the next one does. Every read below is
+    // of the PROJECTED fleet: the post-prologue state a request would meet,
+    // computed on copies, so nothing here consumes the session-reset event
+    // `refreshExpiredQuotas` owns.
+    const observe = { observe: true, fleet: observed.accounts };
+    const live = this._pinnedAccountForModel(model);
+    const pinned = live ? observed.accounts[live.index] : null;
     if (pinned && this._isAvailable(pinned, model, null, observe)) return pinned.index;
-    const current = this.accounts[this.currentIndex];
+    const current = observed.accounts[observed.currentIndex];
     // REQUALIFICATION re-ranks unconditionally (`_select`, the branch above the
     // availability check), and it is the ordinary startup state rather than an
     // exotic one: accounts are constructed `probing`, and `applyUsageData` sets
@@ -780,12 +787,19 @@ export class AccountManager {
     if (current && this._isAvailable(current, model, null, observe)) {
       // Mirror getActiveAccount's priority preemption: a strictly higher-priority
       // available account wins over a healthy current one; same tier stays put.
-      const better = this.accounts.some(a =>
+      const better = observed.accounts.some(a =>
         this._isAvailable(a, model, null, observe) && (a.priority || 0) < (current.priority || 0));
       if (!better) return current.index;
     }
     const best = this._pickBestAvailable(null, model, null, observe);
-    return best ? best.index : null;
+    if (best) return best.index;
+    // `_selectNext`'s last resort, projected the way requalification is: with
+    // nothing eligible a request does not fail, it reopens the account whose
+    // hold has already elapsed. Naming it costs nothing and is the difference
+    // between "nothing can serve this" and the account every request is landing
+    // on. Chosen here, performed only by `_selectNext`.
+    const reopened = this._resurrectTarget(null, model, null, observe);
+    return reopened ? reopened.index : null;
   }
 
   _isProbeable(account) {
@@ -1231,8 +1245,15 @@ export class AccountManager {
    * candidate set.
    */
   _bandedCandidates(exclude = null, model = null, advisorModel = null, opts = {}) {
+    // `opts.fleet` is the only way the accounts under consideration are ever
+    // something other than the live ones: an observation hands in the projected
+    // fleet (`_observedFleet`) so eligibility, banding, pressure and the pick
+    // all read ONE state. Ranking read `account.quota` while availability
+    // answered against a projection of it, and the two disagreed about which
+    // account a request would get.
+    const fleet = opts.fleet || this.accounts;
     return this._topPressureBand(
-      this.accounts.filter(a => !exclude?.has(a.index) && this._isAvailable(a, model, advisorModel, opts)),
+      fleet.filter(a => !exclude?.has(a.index) && this._isAvailable(a, model, advisorModel, opts)),
       model);
   }
 
@@ -1576,11 +1597,11 @@ export class AccountManager {
    * pick right now. Everything here is derived for display and thrown away — the
    * entries are fresh objects, never the stored (persisted) route definitions.
    */
-  getRoutes() {
+  getRoutes(observed = this._observedFleet()) {
     const out = this.routes.map(r => ({
       name: r.name, match: r.match, bucket: r.bucket, color: r.color || null, autocreated: false,
       pinned: this._pinnedName(r.name),
-      accounts: this._routeAccountsView(r),
+      accounts: this._routeAccountsView(r, observed),
       // The model this route's live figures were computed for. Published
       // because `target` and the routing report are answers ABOUT a model, and
       // a consumer cannot otherwise tell which one was asked about. For a
@@ -1588,14 +1609,14 @@ export class AccountManager {
       // representative rather than a model id; the auto-created entries below
       // carry a real one.
       sample: sampleModelFor(r),
-      target: this._routeTarget(sampleModelFor(r)),
+      target: this._routeTarget(sampleModelFor(r), observed),
     }));
 
     const detected = [];
-    if (this.accounts.some(a => a.quota.unified7dFable != null)) {
+    if (observed.accounts.some(a => a.quota.unified7dFable != null)) {
       detected.push({ name: 'fable', match: ['*fable*'], sample: 'claude-fable-5' });
     }
-    if (this.accounts.some(a => a.quota.unified7dSonnet != null)) {
+    if (observed.accounts.some(a => a.quota.unified7dSonnet != null)) {
       detected.push({ name: 'sonnet', match: ['*sonnet*'], sample: 'claude-sonnet-4-6' });
     }
     for (const d of detected) {
@@ -1603,9 +1624,9 @@ export class AccountManager {
       out.push({
         name: d.name, match: d.match, bucket: null, color: null, autocreated: true,
         pinned: this._pinnedName(d.name),
-        accounts: this.accounts.map(a => ({ name: a.name, eligible: this._isAvailable(a, d.sample, null, { observe: true }) })),
+        accounts: observed.accounts.map(a => ({ name: a.name, eligible: this._isAvailable(a, d.sample, null, { observe: true, fleet: observed.accounts }) })),
         sample: d.sample,
-        target: this._routeTarget(d.sample),
+        target: this._routeTarget(d.sample, observed),
       });
     }
     return out;
@@ -1632,9 +1653,9 @@ export class AccountManager {
    * read as "what happens to the request I am debugging" when that request
    * carries an advisor; it is what the next plain request meets.
    */
-  _routingReport(now = Date.now()) {
+  _routingReport(now = Date.now(), observed = this._observedFleet(now)) {
     const scopes = [{ scope: 'shared', route: null, model: null, match: [], autocreated: false }];
-    for (const route of this.getRoutes()) {
+    for (const route of this.getRoutes(observed)) {
       // ONE ENTRY PER FAMILY, not per route. A route matching two globs has two
       // governing buckets and therefore two different bands and two different
       // picks; publishing one entry for it presented the first family's answer
@@ -1660,7 +1681,7 @@ export class AccountManager {
       // that removed them, so the two lists cannot disagree about an account and
       // `candidates + excluded.length === accounts.length` holds by construction
       // rather than by two filters agreeing.
-      const verdicts = this.accounts.map(account => ({
+      const verdicts = observed.accounts.map(account => ({
         account, why: this._availability(account, model, null, { observe: true }),
       }));
       const candidates = verdicts.filter(v => v.why === null).map(v => v.account);
@@ -1671,7 +1692,7 @@ export class AccountManager {
       const banded = this._applyBand(explained.decision, candidates);
       const pickSnapshot = this._pickSnapshot(banded, model, now);
       const pick = decidePick(pickSnapshot);
-      const nameOf = index => this.accounts[index]?.name ?? null;
+      const nameOf = index => observed.accounts[index]?.name ?? null;
 
       return {
         scope,
@@ -1686,7 +1707,7 @@ export class AccountManager {
         // destination from `currentAccount` and a rule it believes routing
         // follows — which reported a disabled account as where new sessions go,
         // and ignored a manual route pin entirely.
-        target: this._routeTarget(model),
+        target: this._routeTarget(model, observed),
         // Whether a MANUAL ROUTE PIN binds this scope. `_selectRoute` skips the
         // session-distribution path entirely when one is set (`:421`, "which
         // must still win"), so a pin overrides load ranking for new sessions
@@ -1709,7 +1730,7 @@ export class AccountManager {
           ladder: explained.ladder.map(row => ({
             rank: row.rank,
             account: nameOf(row.account.index),
-            bucket: this._governingBucket(this.accounts[row.account.index], model),
+            bucket: this._governingBucket(observed.accounts[row.account.index], model),
             pressure: row.pressure,
             headroom: row.headroom,
             cumulative: row.cumulative,
@@ -1738,9 +1759,9 @@ export class AccountManager {
 
   /** The name of the account a request for `model` would land on right now, or
    * null when nothing can serve it (every candidate disabled, spent or excluded). */
-  _routeTarget(model) {
-    const idx = this.previewRouteIndex(model);
-    return idx == null ? null : (this.accounts[idx]?.name ?? null);
+  _routeTarget(model, observed = this._observedFleet()) {
+    const idx = this.previewRouteIndex(model, observed);
+    return idx == null ? null : (observed.accounts[idx]?.name ?? null);
   }
 
   /** The name of the account this route is manually pinned to, or null. */
@@ -1751,11 +1772,12 @@ export class AccountManager {
 
   /** Accounts a configured route can use (all accounts when it lists none), each
    * with a live eligibility flag for a representative model of the route. */
-  _routeAccountsView(route) {
+  _routeAccountsView(route, observed = this._observedFleet()) {
     const sample = sampleModelFor(route);
     const inRoute = a => !route.accounts.length
       || route.accounts.includes(a.name) || route.accounts.includes(String(a.index));
-    return this.accounts.filter(inRoute).map(a => ({ name: a.name, eligible: this._isAvailable(a, sample, null, { observe: true }) }));
+    return observed.accounts.filter(inRoute)
+      .map(a => ({ name: a.name, eligible: this._isAvailable(a, sample, null, { observe: true, fleet: observed.accounts }) }));
   }
 
   /** A representative model id for a route name (configured or auto fable/sonnet),
@@ -1931,10 +1953,34 @@ export class AccountManager {
    * account's weekly limit and the account still has weekly quota to spend.
    */
   _switchOnSessionReset(candidates) {
-    const current = this.accounts[this.currentIndex];
+    const best = this._sessionResetTarget(candidates);
+    if (!best) return;
+    this._setCurrent(best);
+    this._beginRamp(best);
+    console.log(`[TeamClaude] Account "${best.name}" session quota reset and weekly expires sooner — switching to it`);
+  }
+
+  /**
+   * WHICH account that switch would move to, or null. Reads; never writes.
+   *
+   * Split from the applying half above for the reason `_expiredQuotaView` is
+   * split from `_clearExpiredQuotas`: this runs in `getActiveAccount`'s
+   * PROLOGUE, before any selection, so an observer that does not project it
+   * reports where a request would go from a `currentIndex` the request itself
+   * would have moved first. It reported the incumbent while every request went
+   * to the resetting account.
+   *
+   * `fleet` and `currentIndex` are parameters rather than reads of `this`
+   * because the observed call passes the projected fleet, which is what makes
+   * this ONE implementation of the choice rather than the preview's own copy of
+   * it.
+   */
+  _sessionResetTarget(candidates, { fleet = this.accounts, currentIndex = this.currentIndex, now = Date.now(), observe = false } = {}) {
+    const opts = { fleet, observe };
+    const current = fleet[currentIndex];
     // Need a known weekly reset on the current account to compare against;
     // if it is unknown we are still probing it, so leave it alone.
-    if (!current || current.quota.unified7dReset == null) return;
+    if (!current || current.quota.unified7dReset == null) return null;
 
     // Only accounts whose weekly expires sooner than the current one's are
     // candidates at all: that is the "and weekly expires sooner" half of what
@@ -1943,21 +1989,21 @@ export class AccountManager {
     // the trigger.
     const eligible = [];
     for (const acc of candidates) {
-      if (acc.index === this.currentIndex) continue;
-      if (!this._isAvailable(acc)) continue; // enough session & weekly quota left
+      if (acc.index === currentIndex) continue;
+      if (!this._isAvailable(acc, null, null, opts)) continue; // enough session & weekly quota left
       // Don't demote to a lower-priority (higher value) account on a reset.
       if ((acc.priority || 0) > (current.priority || 0)) continue;
       const weekly = acc.quota.unified7dReset;
       if (weekly == null) continue; // need a known weekly to compare
       if (weekly < current.quota.unified7dReset) eligible.push(acc);
     }
-    if (!eligible.length) return;
+    if (!eligible.length) return null;
 
     // One clock for every account compared here, the current one included:
     // pressure rises continuously, so scoring the incumbent at a different
     // instant from its challengers decides a near-tie on the gap between two
-    // Date.now() reads.
-    const now = Date.now();
+    // Date.now() reads. The observed call passes the instant its whole
+    // projection was taken at, for the same reason.
     const field = eligible.concat(current);
     const ranks = this._pickPressures(field, null, now).map(pressureRank);
     const rankOf = new Map(field.map((a, i) => [a.index, ranks[i]]));
@@ -1980,14 +2026,62 @@ export class AccountManager {
     // only while the band WAS the tolerance ratio, and capacity sizing widens it
     // deliberately. The rank comparison says this switch does not leave a
     // strictly better account behind, which membership never claimed.
-    if (this.expiryRouting.enabled && !this._bandedCandidates().includes(best)) return;
+    if (this.expiryRouting.enabled && !this._bandedCandidates(null, null, null, opts).includes(best)) return null;
     // Strictly worse than what we are on: stay. Equal keeps the reset tiebreak
     // that got us here, and with expiry routing off every rank is absent and
     // equal, so this cannot fire at all.
-    if (rankOf.get(best.index) > rankOf.get(current.index)) return;
-    this._setCurrent(best);
-    this._beginRamp(best);
-    console.log(`[TeamClaude] Account "${best.name}" session quota reset and weekly expires sooner — switching to it`);
+    if (rankOf.get(best.index) > rankOf.get(current.index)) return null;
+    return best;
+  }
+
+  /**
+   * THE FLEET AS THE NEXT REQUEST WILL FIND IT: every expired window cleared,
+   * every elapsed throttle hold reopened, and `currentIndex` moved where the
+   * prologue would move it. Computed on copies; nothing here is applied.
+   *
+   * Every observation — the status payload, the routing report, the route
+   * table, the TUI's destination markers — reads this and nothing else, which
+   * is the property that replaced a per-question `observe` flag over live
+   * state. Two pass-4 findings came from that flag: eligibility answered
+   * post-clear while the band ranked the pre-clear numbers beside it, and the
+   * preview read a `currentIndex` that `refreshExpiredQuotas` moves before any
+   * selection runs. Both are unconstructible against one projected state.
+   *
+   * ONE CLOCK for the whole projection, for the reason the band takes one: a
+   * window that expires between two reads would otherwise be gone from one
+   * answer and present in the next, which is the same split in miniature.
+   *
+   * What it deliberately does NOT project is the two things a request does that
+   * an observer must not: consuming the session-reset event (the clear here is
+   * on a copy, so the event stays owed to `refreshExpiredQuotas`) and seeding a
+   * rollover baseline (`_setCurrent`, which is why the switch below is chosen
+   * and not applied).
+   *
+   * @returns {{ accounts: object[], currentIndex: number }}
+   */
+  _observedFleet(now = Date.now()) {
+    const sessionReset = [];
+    const accounts = this.accounts.map(a => {
+      const { view, session } = this._expiredQuotaView(a, now);
+      const copy = { ...a, quota: view };
+      // The elapsed throttle hold belongs to the same prologue: `_availability`
+      // reopens the account on the next request it is asked about, so an
+      // observation that left it throttled would publish a state no request can
+      // meet — and would rank it out of a band the request path admits.
+      if (copy.status === 'throttled' && copy.rateLimitedUntil && now >= copy.rateLimitedUntil) {
+        copy.status = 'active';
+        copy.rateLimitedUntil = null;
+        copy.throttledAt = null;
+      }
+      if (session) sessionReset.push(copy);
+      return copy;
+    });
+    let currentIndex = this.currentIndex;
+    if (sessionReset.length) {
+      const best = this._sessionResetTarget(sessionReset, { fleet: accounts, currentIndex, now, observe: true });
+      if (best) currentIndex = best.index;
+    }
+    return { accounts, currentIndex };
   }
 
   _isNearQuota(account, model = null) {
@@ -2012,10 +2106,14 @@ export class AccountManager {
    * @returns {{ reason: string, bucket: string|null, detail: number } | null}
    */
   _quotaBar(account, model = null, { observe = false } = {}) {
-    // Observing answers against the SAME post-clear state the request path
-    // would see, without performing the clear — so the answer is identical and
-    // the session-reset event stays unconsumed for whoever owns it.
-    const q = observe ? this._expiredQuotaView(account).view : account.quota;
+    // `observe` means one thing and only one: DO NOT WRITE. It does not also
+    // project, because the account handed in is already the projection when the
+    // caller is an observer (`_observedFleet`). Projecting here as well was the
+    // shape of pass-4's converged finding — this answered post-clear while
+    // `_bandSnapshot`, reading the same account's live quota one call later,
+    // ranked pre-clear. One state per observation, chosen by the caller; a
+    // reader that forgets is then uniformly stale rather than self-contradictory.
+    const q = account.quota;
     if (!observe) this._clearExpiredQuotas(account);
 
     // Shared 5-hour bucket gates every request regardless of model.
@@ -2143,16 +2241,42 @@ export class AccountManager {
       return best;
     }
 
-    // All accounts unavailable — find the one that resets soonest
+    // All accounts unavailable — reopen the one whose window has already passed.
+    const reopened = this._resurrectTarget(exclude, model, advisorModel);
+    if (!reopened) return null;
+    reopened.status = 'active';
+    reopened.rateLimitedUntil = null;
+    this._setCurrent(reopened);
+    this._beginRamp(reopened);
+    console.log(`[TeamClaude] Account "${reopened.name}" reset, switching to it`);
+    return reopened;
+  }
+
+  /**
+   * WHICH account the last resort above would reopen, or null. Reads; never
+   * writes.
+   *
+   * A FOURTH way `_select` returns an account, and the one the preview used to
+   * miss: with nothing eligible, a request does not 429 while an account whose
+   * hold has already elapsed sits there — it reopens that account and is served
+   * by it. Read-only callers ask this and name the account; only `_selectNext`
+   * performs the reopening. Found while fixing the prologue divergence: the
+   * preview said "nothing can serve this" about a fleet every request was being
+   * served by.
+   *
+   * `opts.fleet` is the projected fleet for an observer, as everywhere else.
+   */
+  _resurrectTarget(exclude = null, model = null, advisorModel = null, opts = {}) {
+    const fleet = opts.fleet || this.accounts;
     let soonestAccount = null;
     let soonestTime = Infinity;
 
-    for (const account of this.accounts) {
+    for (const account of fleet) {
       if (exclude?.has(account.index)) continue;
       // Never resurrect a hard-state account: `disabled` is an operator decision
       // and `error` means the token is broken (needs re-login). Selecting either
       // here would send a live request on an account that must not be used and,
-      // below, silently clear its throttle/error state. (Mirrors _isAvailable.)
+      // in the caller, silently clear its throttle/error state. (Mirrors _isAvailable.)
       if (account.disabled || account.status === 'error') continue;
       // A routed/owned model must not fall back to an ineligible account —
       // neither the executor's nor an advisor's.
@@ -2169,16 +2293,7 @@ export class AccountManager {
       }
     }
 
-    if (soonestAccount && soonestTime <= Date.now()) {
-      soonestAccount.status = 'active';
-      soonestAccount.rateLimitedUntil = null;
-      this._setCurrent(soonestAccount);
-      this._beginRamp(soonestAccount);
-      console.log(`[TeamClaude] Account "${soonestAccount.name}" reset, switching to it`);
-      return soonestAccount;
-    }
-
-    return null;
+    return soonestAccount && soonestTime <= Date.now() ? soonestAccount : null;
   }
 
   /**
@@ -2600,14 +2715,27 @@ export class AccountManager {
    * Return a status summary of all accounts (safe to expose, no credentials).
    */
   getStatus() {
+    // ONE PROJECTION FOR THE WHOLE PAYLOAD, and one clock behind it. Every
+    // section — the routes, the routing report, the per-account rows — answers
+    // about the same state: the fleet as the next request will find it. Built
+    // once here rather than per section because two projections taken a
+    // millisecond apart can straddle a window expiry, and a payload whose
+    // ladder ranks an account the row beside it calls spent is the pass-4
+    // finding one layer out.
+    //
+    // `currentAccount` is the projected one for the same reason the
+    // destination rows are: after a session reset the prologue moves it before
+    // any selection runs, so the live index names an account no request will
+    // start from.
+    const observed = this._observedFleet();
     // The tracker's own share of the owed gauge, reported alongside the session
     // view it is derived from but published under expiryRouting, which is the
     // feature it says something about.
     const { pendingRollovers, ...sessions } = this.sessionTracker.stats();
     // One walk per account for the whole payload, not one per field read.
-    const measured = new Map(this.accounts.map(a => [a.index, this.sessionTracker.loadFor(a.index)]));
+    const measured = new Map(observed.accounts.map(a => [a.index, this.sessionTracker.loadFor(a.index)]));
     return {
-      currentAccount: this.accounts[this.currentIndex]?.name,
+      currentAccount: observed.accounts[observed.currentIndex]?.name,
       switchThreshold: this.switchThreshold,
       expiryRouting: {
         ...this.expiryRouting,
@@ -2629,10 +2757,10 @@ export class AccountManager {
           rolloversOwed: pendingRollovers + this._currentSeen.pendingCount(),
         },
       },
-      routes: this.getRoutes(),
-      routing: this._routingReport(),
+      routes: this.getRoutes(observed),
+      routing: this._routingReport(Date.now(), observed),
       sessions: { ...sessions, distribute: this.distributeSessions },
-      accounts: this.accounts.map(a => {
+      accounts: observed.accounts.map(a => {
         const pressure = this._pressureVariant(a);
         return {
           name: a.name,
