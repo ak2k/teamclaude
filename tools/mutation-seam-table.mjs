@@ -200,7 +200,12 @@ const REC_BODY = '      accountManager.recordTokenUsage(accountIndex, sessionId,
 const BAND_APPLY = '    const decision = decideBand(this._bandSnapshot(candidates, model, Date.now()));\n';
 const SIZED_BRANCH = '  const sizing = sizeByCapacity(tier, pressures, snapshot);\n';
 const UNMEASURED_BOTH = '    const unmeasured = entry.headroom.kind === \'absent\' || entry.pressure.kind === \'absent\';\n';
-const COVERAGE_STOP = '    if (!unmeasured && achieved >= snapshot.coverage) continue;\n';
+// Re-anchored when the admission loop began recording its steps: the stop went
+// from a bare `continue` to a block that pushes a held row first. The
+// intervention is unchanged — the guard never fires and every account is
+// admitted — but the anchor had to follow the text, and until it did this row
+// silently measured nothing while the table still counted 63.
+const COVERAGE_STOP = '    if (!unmeasured && achieved >= snapshot.coverage) {\n';
 const RESET_RANK_GUARD = '    if (rankOf.get(best.index) > rankOf.get(current.index)) return;\n';
 const RESET_RANK_ORDER = '      if (mine < theirs\n';
 const HOLD_RELEASE = '    this._releaseHold(s, hold);\n';
@@ -385,7 +390,7 @@ const M = [
   // The coverage stop never fires, so the band admits the whole tier every
   // time. Sizing stops being a size and the widening is unbounded.
   ['bandDecision      coverage never stops admission', COVERAGE_STOP,
-    '    if (false) continue;\n', 'src/band-decision.js'],
+    '    if (false) {\n', 'src/band-decision.js'],
   // The session-reset switch, a writer of `current` that selection never sees.
   // Severing either half restores the reset-timestamp proxy: one stops it
   // preferring the better candidate, the other lets it leave a strictly better
