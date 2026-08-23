@@ -1256,17 +1256,38 @@ export class AccountManager {
     // exact tie on the microseconds between two Date.now() reads. Read once
     // here and handed to the decision, which never reads a clock of its own.
     const decision = decideBand(this._bandSnapshot(candidates, model, Date.now()));
+    return this._applyBand(decision, candidates);
+  }
+
+  /**
+   * A band decision resolved back to candidate objects: the ONE way a decision
+   * becomes a list.
+   *
+   * Selection applies a band and the status report applies the same band, and
+   * until this existed each did it with its own copy of the same three lines.
+   * They agreed, which is the problem — an edit to one would have let the report
+   * describe a candidate set selection never used, and nothing would have said
+   * so, because two implementations that currently agree look exactly like one.
+   *
+   * This does not make them agree; it removes the possibility of disagreement.
+   * There is no test that could prove they cannot drift, because the property is
+   * structural rather than behavioural. What a test can show, and what the one
+   * covering this does show, is that breaking this method breaks BOTH consumers
+   * — which is what having one implementation looks like from the outside.
+   *
+   * Both narrowing variants name the accounts they kept, in the order the caller
+   * must see them; which rule chose them is the decision's business and does not
+   * change how the choice is applied.
+   */
+  _applyBand(decision, candidates) {
     switch (decision.kind) {
       case 'passthrough': return candidates;
-      // Both narrowing variants name the accounts they kept, in the order the
-      // caller must see them; which rule chose them is the decision's business
-      // and does not change how the choice is applied.
       case 'banded':
       case 'sized': {
         const byIndex = new Map(candidates.map(a => [a.index, a]));
         return decision.keep.map(i => byIndex.get(i)).filter(Boolean);
       }
-      default: return assertNever(decision, '_topPressureBand');
+      default: return assertNever(decision, '_applyBand');
     }
   }
 
@@ -1597,13 +1618,10 @@ export class AccountManager {
       const verdicts = this.accounts.map(account => ({ account, why: this._availability(account, model) }));
       const candidates = verdicts.filter(v => v.why === null).map(v => v.account);
       const explained = explainBand(this._bandSnapshot(candidates, model, now));
-      const byIndex = new Map(candidates.map(a => [a.index, a]));
-      // The same projection `_topPressureBand` applies to the same decision:
-      // passthrough keeps the candidate list, the narrowing variants name what
-      // they kept, in the order the caller must see them.
-      const banded = explained.decision.kind === 'passthrough'
-        ? candidates
-        : explained.decision.keep.map(i => byIndex.get(i)).filter(Boolean);
+      // The SAME projection selection applies, not a copy of it. The report
+      // describing a candidate set selection would not have used is the failure
+      // this shares a method to make unconstructible.
+      const banded = this._applyBand(explained.decision, candidates);
       const pickSnapshot = this._pickSnapshot(banded, model, now);
       const pick = decidePick(pickSnapshot);
       const nameOf = index => this.accounts[index]?.name ?? null;

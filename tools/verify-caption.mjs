@@ -108,6 +108,17 @@ const CAPTIONS = [
     // tripwire for the one thing a gate cannot check by itself — someone
     // rewording the caption without asking whether the reading still reads it.
     // Reword the renderer and this run refuses until the reading is revisited.
+    //
+    // WHAT THE PIN STILL CANNOT CATCH, stated where the limit lives: a sentence
+    // and a reading updated TOGETHER into a consistent lie pass, because nothing
+    // can verify that an English claim and a scoring function mean the same
+    // thing. That gap narrowed when the verdict began comparing order — the
+    // reading must now also reproduce the sequence the band actually walked, so
+    // a lie has to be consistent with the CODE as well as with itself, which
+    // rules out any lie about the ordering. What survives is a sentence that
+    // describes the real order in misleading English. A human reading the
+    // `Rule` line is the only check on that, and this comment exists so the
+    // next person knows it is theirs to make rather than the gate's.
     pinned: 'most unspent weekly quota per hour before it resets goes first, '
       + 'until 1.0 accounts of 5h headroom are covered',
     // Per HOUR where the code computes per second: the two differ by 3600, a
