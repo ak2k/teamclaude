@@ -434,6 +434,53 @@ test('a route preview does not consume the event either', () => {
     'the route preview consumed the session-reset event while answering a display');
 });
 
+test('a requalifying current account is reported as the account traffic leaves', () => {
+  // `_select` re-ranks unconditionally when the current account carries
+  // `requalify`, and the preview had no such branch — so the block named the
+  // account the next request would leave.
+  //
+  // Not an exotic flag: accounts are constructed `probing`, and `applyUsageData`
+  // sets `requalify` the moment a weekly window is learned, which the prober
+  // does to every account. A freshly started fleet carries it everywhere until a
+  // plain request consumes it, and an idle fleet is when someone runs `status`.
+  //
+  // THE FIXTURE HAS THE CURRENT ACCOUNT ADMITTED, deliberately. The other shape
+  // — current account held out of the band — puts `; not in the admitted set` on
+  // the row, and a fix keying off that qualifier would go green while this shape
+  // stayed broken. Here nothing on the line hints at anything.
+  const now = Date.now();
+  const build = () => {
+    const am = fleet({ accounts: ['a', 'b', 'c'] });
+    quota(am, 0, { unified5h: 0.08, unified5hReset: now + 2 * H, unified7d: 0.15, unified7dReset: now + 25 * H });
+    quota(am, 1, { unified5h: 0.05, unified5hReset: now + 2 * H, unified7d: 0.1, unified7dReset: now + 20 * H });
+    // Its five-hour window has already reset. Nothing in this test is about that
+    // account, but the requalify branch walks every account to re-rank, so a
+    // projection that forgot to observe would clear it here — and the flag being
+    // read is not the only thing an observer can consume.
+    quota(am, 2, { unified5h: 0.9, unified5hReset: now - 60_000, unified7d: 0.9, unified7dReset: now + 500 * H });
+    am.setCurrentAccount(0);
+    am.accounts[0].requalify = true;
+    return am;
+  };
+
+  const observed = build();
+  const entry = observed.getStatus().routing.find(e => e.scope === 'shared');
+  assert.ok(entry.band.admitted.includes('a'),
+    'the premise: the current account IS admitted, so no qualifier hints at the divergence');
+
+  // What a request actually gets, on a fresh manager with the same fixture.
+  const served = build().getActiveAccount(null, null, null, null, {});
+  assert.equal(served.name, 'b', 'the premise: requalification moves the request off the current account');
+  assert.equal(entry.target, served.name,
+    'the block names the account the next request leaves rather than the one it reaches');
+
+  // And the observer still does not consume the flag it read.
+  assert.equal(observed.accounts[0].requalify, true,
+    'reading the status consumed the requalification the request path owns');
+  assert.equal(observed.accounts[2].quota.unified5h, 0.9,
+    'the re-rank walked every account and cleared an expired window while observing');
+});
+
 test('the report names accounts and never a session id', () => {
   const now = Date.now();
   const am = ladderFleet(now);

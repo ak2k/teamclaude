@@ -761,6 +761,22 @@ export class AccountManager {
     const pinned = this._pinnedAccountForModel(model);
     if (pinned && this._isAvailable(pinned, model, null, observe)) return pinned.index;
     const current = this.accounts[this.currentIndex];
+    // REQUALIFICATION re-ranks unconditionally (`_select`, the branch above the
+    // availability check), and it is the ordinary startup state rather than an
+    // exotic one: accounts are constructed `probing`, and `applyUsageData` sets
+    // `requalify` the moment a weekly window is learned, which the prober does
+    // to every account. So a freshly started fleet carries it on every account
+    // until a plain request consumes it — and an idle fleet is exactly when
+    // someone runs `status`.
+    //
+    // Projected, never performed. `_selectNext` re-ranks by clearing the flag
+    // and calling `_setCurrent`; the preview reaches the same answer through
+    // `_pickBestAvailable` and leaves both alone, which is the same split as
+    // `_expiredQuotaView` and for the same reason.
+    if (current && current.requalify) {
+      const next = this._pickBestAvailable(null, model, null, observe);
+      if (next) return next.index;
+    }
     if (current && this._isAvailable(current, model, null, observe)) {
       // Mirror getActiveAccount's priority preemption: a strictly higher-priority
       // available account wins over a healthy current one; same tier stays put.
