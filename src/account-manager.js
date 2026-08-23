@@ -763,7 +763,7 @@ export class AccountManager {
     // of the PROJECTED fleet: the post-prologue state a request would meet,
     // computed on copies, so nothing here consumes the session-reset event
     // `refreshExpiredQuotas` owns.
-    const observe = { observe: true, fleet: observed.accounts };
+    const observe = this._observeOpts(observed);
     const live = this._pinnedAccountForModel(model);
     const pinned = live ? observed.accounts[live.index] : null;
     if (pinned && this._isAvailable(pinned, model, null, observe)) return pinned.index;
@@ -1013,13 +1013,15 @@ export class AccountManager {
    *
    * @returns {{ reason: string, bucket: string|null, detail: number|null } | null}
    */
-  _availability(account, model = null, advisorModel = null, { observe = false } = {}) {
+  _availability(account, model = null, advisorModel = null, { observe = false, now = Date.now() } = {}) {
     // Manually disabled accounts are skipped entirely until re-enabled.
     if (account.disabled) return { reason: 'disabled', bucket: null, detail: null };
 
-    // Check rate limit expiry
+    // Check rate limit expiry. `now` is the observation's instant when there is
+    // one, so a hold that elapses between the projection and this call cannot
+    // read as live to one and elapsed to the other.
     if (account.status === 'throttled' && account.rateLimitedUntil) {
-      if (Date.now() < account.rateLimitedUntil) {
+      if (now < account.rateLimitedUntil) {
         return { reason: 'throttled', bucket: null, detail: account.rateLimitedUntil };
       }
       // Past the hold: the account IS available. Writing that back is a state
@@ -1254,7 +1256,7 @@ export class AccountManager {
     const fleet = opts.fleet || this.accounts;
     return this._topPressureBand(
       fleet.filter(a => !exclude?.has(a.index) && this._isAvailable(a, model, advisorModel, opts)),
-      model);
+      model, opts.now);
   }
 
   /**
@@ -1299,12 +1301,13 @@ export class AccountManager {
    * best pressure", it does not mean that. Rank pressure, or state why
    * admission alone is the property you need.
    */
-  _topPressureBand(candidates, model = null) {
+  _topPressureBand(candidates, model = null, now = Date.now()) {
     // One clock for the whole band: pressure rises continuously as a window
     // nears its reset, so scoring accounts at different instants would break an
     // exact tie on the microseconds between two Date.now() reads. Read once
-    // here and handed to the decision, which never reads a clock of its own.
-    const decision = decideBand(this._bandSnapshot(candidates, model, Date.now()));
+    // here — or handed in by an observation, whose instant this must share —
+    // and passed to the decision, which never reads a clock of its own.
+    const decision = decideBand(this._bandSnapshot(candidates, model, now));
     return this._applyBand(decision, candidates);
   }
 
@@ -1624,7 +1627,7 @@ export class AccountManager {
       out.push({
         name: d.name, match: d.match, bucket: null, color: null, autocreated: true,
         pinned: this._pinnedName(d.name),
-        accounts: observed.accounts.map(a => ({ name: a.name, eligible: this._isAvailable(a, d.sample, null, { observe: true, fleet: observed.accounts }) })),
+        accounts: observed.accounts.map(a => ({ name: a.name, eligible: this._isAvailable(a, d.sample, null, this._observeOpts(observed)) })),
         sample: d.sample,
         target: this._routeTarget(d.sample, observed),
       });
@@ -1653,7 +1656,11 @@ export class AccountManager {
    * read as "what happens to the request I am debugging" when that request
    * carries an advisor; it is what the next plain request meets.
    */
-  _routingReport(now = Date.now(), observed = this._observedFleet(now)) {
+  _routingReport(observed = this._observedFleet()) {
+    // The report's clock IS the projection's, not a parameter beside it: two
+    // callers passing an instant and a projection taken at a different one is
+    // the split this whole round has been closing, one argument list up.
+    const now = observed.now;
     const scopes = [{ scope: 'shared', route: null, model: null, match: [], autocreated: false }];
     for (const route of this.getRoutes(observed)) {
       // ONE ENTRY PER FAMILY, not per route and not per glob. A route matching
@@ -1685,7 +1692,7 @@ export class AccountManager {
       // `candidates + excluded.length === accounts.length` holds by construction
       // rather than by two filters agreeing.
       const verdicts = observed.accounts.map(account => ({
-        account, why: this._availability(account, model, null, { observe: true }),
+        account, why: this._availability(account, model, null, this._observeOpts(observed)),
       }));
       const candidates = verdicts.filter(v => v.why === null).map(v => v.account);
       const explained = explainBand(this._bandSnapshot(candidates, model, now));
@@ -1801,7 +1808,7 @@ export class AccountManager {
     const inRoute = a => !route.accounts.length
       || route.accounts.includes(a.name) || route.accounts.includes(String(a.index));
     return observed.accounts.filter(inRoute)
-      .map(a => ({ name: a.name, eligible: this._isAvailable(a, sample, null, { observe: true, fleet: observed.accounts }) }));
+      .map(a => ({ name: a.name, eligible: this._isAvailable(a, sample, null, this._observeOpts(observed)) }));
   }
 
   /** A representative model id for a route name (configured or auto fable/sonnet),
@@ -2000,7 +2007,7 @@ export class AccountManager {
    * it.
    */
   _sessionResetTarget(candidates, { fleet = this.accounts, currentIndex = this.currentIndex, now = Date.now(), observe = false } = {}) {
-    const opts = { fleet, observe };
+    const opts = { fleet, observe, now };
     const current = fleet[currentIndex];
     // Need a known weekly reset on the current account to compare against;
     // if it is unknown we are still probing it, so leave it alone.
@@ -2085,6 +2092,13 @@ export class AccountManager {
    * @returns {{ accounts: object[], currentIndex: number }}
    */
   _observedFleet(now = Date.now()) {
+    // The projection CARRIES ITS INSTANT. Every clock read downstream of an
+    // observation — the throttle-hold comparison, the band snapshot, the pick's
+    // pressures, the last resort's "has it passed", the published pressure and
+    // pause — reads this rather than the wall clock, because the projection
+    // decided expired-or-not at exactly this moment and a later read can put a
+    // window on the other side of its own reset. That is finding A's shape
+    // again: two views of one account, one call apart.
     const sessionReset = [];
     const accounts = this.accounts.map(a => {
       const { view, session } = this._expiredQuotaView(a, now);
@@ -2106,7 +2120,14 @@ export class AccountManager {
       const best = this._sessionResetTarget(sessionReset, { fleet: accounts, currentIndex, now, observe: true });
       if (best) currentIndex = best.index;
     }
-    return { accounts, currentIndex };
+    return { accounts, currentIndex, now };
+  }
+
+  /** The options every read inside an observation is made with: the projected
+   * fleet, the instant it was taken at, and the promise not to write. Built
+   * here so a new observation call site cannot pick up two of the three. */
+  _observeOpts(observed) {
+    return { observe: true, fleet: observed.accounts, now: observed.now };
   }
 
   _isNearQuota(account, model = null) {
@@ -2207,8 +2228,9 @@ export class AccountManager {
     // One clock for every candidate, for the reason the band reads one: pressure
     // rises continuously as a window nears its reset, so scoring two accounts at
     // different instants decides an exact tie on the microseconds between two
-    // Date.now() reads.
-    const now = Date.now();
+    // Date.now() reads. An observation hands in its own instant, which is the
+    // one its projection was taken at.
+    const now = opts.now ?? Date.now();
     const pressures = this._pickPressures(candidates, model, now);
     candidates.forEach((account, i) => {
       const priority = account.priority || 0;
@@ -2318,7 +2340,7 @@ export class AccountManager {
       }
     }
 
-    return soonestAccount && soonestTime <= Date.now() ? soonestAccount : null;
+    return soonestAccount && soonestTime <= (opts.now ?? Date.now()) ? soonestAccount : null;
   }
 
   /**
@@ -2739,7 +2761,7 @@ export class AccountManager {
   /**
    * Return a status summary of all accounts (safe to expose, no credentials).
    */
-  getStatus() {
+  getStatus(now = Date.now()) {
     // ONE PROJECTION FOR THE WHOLE PAYLOAD, and one clock behind it. Every
     // section — the routes, the routing report, the per-account rows — answers
     // about the same state: the fleet as the next request will find it. Built
@@ -2748,11 +2770,17 @@ export class AccountManager {
     // ladder ranks an account the row beside it calls spent is the pass-4
     // finding one layer out.
     //
+    // `now` is a parameter so that claim is CHECKABLE rather than asserted: ask
+    // for the payload at an instant, and every field that consults a clock must
+    // answer about that instant. A field that reads the wall clock instead
+    // disagrees with the rest of the payload by however far apart the two reads
+    // are, which is exactly the defect being fixed and is otherwise measured in
+    // microseconds — too narrow for any test to catch, and no less wrong.
+    //
     // `currentAccount` is the projected one for the same reason the
     // destination rows are: after a session reset the prologue moves it before
     // any selection runs, so the live index names an account no request will
     // start from.
-    const now = Date.now();
     const observed = this._observedFleet(now);
     // The tracker's own share of the owed gauge, reported alongside the session
     // view it is derived from but published under expiryRouting, which is the
@@ -2784,10 +2812,13 @@ export class AccountManager {
         },
       },
       routes: this.getRoutes(observed),
-      routing: this._routingReport(now, observed),
+      routing: this._routingReport(observed),
       sessions: { ...sessions, distribute: this.distributeSessions },
       accounts: observed.accounts.map(a => {
-        const pressure = this._pressureVariant(a);
+        // The projection's instant, not a fresh read: a reset falling between
+        // the two would be a live window to the projection and a spent one to
+        // this figure, on the same row of the same payload.
+        const pressure = this._pressureVariant(a, null, now);
         return {
           name: a.name,
           type: a.type,
@@ -2831,7 +2862,7 @@ export class AccountManager {
           rateLimitedUntil: a.rateLimitedUntil
             ? new Date(a.rateLimitedUntil).toISOString()
             : null,
-          pausedUntil: a.pausedUntil && a.pausedUntil > Date.now()
+          pausedUntil: a.pausedUntil && a.pausedUntil > now
             ? new Date(a.pausedUntil).toISOString()
             : null,
         };

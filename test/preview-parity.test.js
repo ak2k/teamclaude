@@ -302,6 +302,34 @@ test('the preview names the account the last resort reopens, and not by probing'
   assert.equal(probes, 0, 'the probe served this request, so the last resort is not what was graded');
 });
 
+// The last resort asks "has this window already passed", which is a clock
+// question, and the preview must ask it at the instant its projection was taken
+// — not at whatever the wall clock says one call later. Graded by handing the
+// preview a projection from ten minutes ago: at that instant the window had not
+// passed and nothing can serve the fleet; at the wall clock it has, and the
+// account is named. A wall-clock read answers the second question for both.
+test('the last resort is asked at the instant the projection was taken', () => {
+  const wall = Date.now();
+  const secs = ms => String(Math.floor(ms / 1000));
+  const am = new AccountManager([acct('spent'), acct('offline')], 0.98,
+    { expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 } });
+  // The reachable desynchronised pair again, with the five-hour reset falling
+  // BETWEEN the two instants.
+  am.updateQuota(0, {
+    'anthropic-ratelimit-unified-5h-reset': secs(wall - 5 * 60e3),
+    'anthropic-ratelimit-unified-7d-utilization': '0.995',
+    'anthropic-ratelimit-unified-7d-reset': secs(wall + 100 * H),
+  });
+  am.accounts[1].disabled = true;
+  am.setCurrentAccount(0);
+
+  const asked = wall - 10 * 60e3;
+  assert.equal(am.previewRouteIndex(null, am._observedFleet(asked)), null,
+    'the preview reopened an account whose window had not passed at that instant');
+  assert.equal(am.previewRouteIndex(null, am._observedFleet(wall)), 0,
+    'the premise: at the wall clock that window HAS passed, so the two instants differ');
+});
+
 test('the states that must move the answer do move it', () => {
   // The premise for the matrix above: if `requalify` or a disabled current
   // account stopped changing where a request goes, the parity assertions would

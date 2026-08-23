@@ -418,6 +418,90 @@ test('an expired window is gone from every section of the payload, and from none
   assert.equal(am.accounts[2].rateLimitedUntil, now - 60_000);
 });
 
+// ONE CLOCK, and asked for rather than asserted. Every field of the payload
+// that consults a clock must consult the SAME one, or two of them straddle a
+// window that resets between the reads: the projection keeps a live window that
+// the pressure figure beside it scores as spent, which is pass 4's converged
+// finding one line down from the code that fixed it.
+//
+// The real gap is microseconds wide and no test can catch it by waiting. This
+// asks for the payload at an instant ten minutes gone instead: every field that
+// reads the wall clock then answers about a different fleet than the field next
+// to it, and the difference is ten minutes rather than a microsecond.
+test('every field of the payload answers about the instant the payload was asked for', () => {
+  // TWO COVERAGES, because they grade different readers. Below one account's
+  // headroom the band admits exactly one account, so the BAND's clock decides
+  // the destination and the pick has nothing left to choose between; at a
+  // coverage of 1 both candidates are admitted under either clock and it is the
+  // PICK's clock that decides. Measured: each value leaves the other's reader
+  // ungraded, and the first version of this test ran only the narrow one.
+  for (const coverage of [1, 0.5]) oneClock(coverage);
+});
+
+function oneClock(coverage) {
+  const H = 3600e3;
+  const wall = Date.now();
+  const asked = wall - 10 * 60e3;
+  const am = new AccountManager(
+    [apikey('expired'), apikey('soon'), apikey('ample'), apikey('held'), apikey('paused')], 0.98,
+    { expiryRouting: { enabled: true, coverage, tolerance: 1.5 } });
+  const q = (i, o) => { am.accounts[i].quota = { ...am.accounts[i].quota, ...o }; };
+  // Its weekly reset falls BETWEEN the two instants: a live window with eight
+  // minutes left when the payload was asked for, an expired one at the wall
+  // clock. Disabled, so it grades the row fields without also being a
+  // destination — the ranking below is a separate claim with its own accounts.
+  am.accounts[0].disabled = true;
+  q(0, { unified5h: 0.1, unified5hReset: wall + 2 * H, unified7d: 0.5, unified7dReset: wall - 2 * 60e3 });
+  // Pressure rises as a window nears its reset, and it rises fastest for the
+  // nearest one: `ample` holds more quota and outranks `soon` at the earlier
+  // instant, while `soon` — one minute from its reset at the wall clock —
+  // overtakes it there. So the destination itself names which clock ranked it.
+  q(1, { unified5h: 0.1, unified5hReset: wall + 2 * H, unified7d: 0.9, unified7dReset: wall + 60e3 });
+  q(2, { unified5h: 0.1, unified5hReset: wall + 2 * H, unified7d: 0.2, unified7dReset: wall + 30 * 60e3 });
+  q(3, { unified5h: 0.1, unified5hReset: wall + 2 * H, unified7d: 0.5, unified7dReset: wall + 200 * H });
+  q(4, { unified5h: 0.1, unified5hReset: wall + 2 * H, unified7d: 0.5, unified7dReset: wall + 400 * H });
+  // A hold and a pause that both elapsed between the two instants.
+  am.accounts[3].status = 'throttled';
+  am.accounts[3].rateLimitedUntil = wall - 5 * 60e3;
+  am.accounts[4].pausedUntil = wall - 60e3;
+
+  const s = am.getStatus(asked);
+  const [expired, , , held, paused] = s.accounts;
+  const shared = s.routing.find(e => e.scope === 'shared');
+
+  assert.equal(expired.quota.unified7d, 0.5,
+    'the projection retired a window that had not reset when the payload was asked for');
+  assert.ok(expired.pressure > 0,
+    'the pressure figure scored that window as already reset, so the row disagrees with itself');
+  assert.equal(expired.pressureAbsent, null);
+  assert.equal(held.status, 'throttled', 'a hold still live at that instant reads as elapsed');
+  assert.ok(shared.band.excluded.some(e => e.account === 'held' && e.reason === 'throttled'),
+    'eligibility reopened a hold the row beside it still calls live');
+  assert.ok(paused.pausedUntil, 'a pause still live at that instant reads as elapsed');
+  assert.equal(shared.target, 'ample',
+    `coverage ${coverage}: the destination was ranked on a different clock than the payload was asked for`);
+  // The report's OWN figures, which are a separate reader from the destination:
+  // the ladder it publishes and the pick it explains both order by pressure, and
+  // pressure is a function of the clock.
+  assert.equal(shared.band.ladder[0].account, 'ample',
+    `coverage ${coverage}: the ladder is ordered by pressure at another instant`);
+  assert.equal(shared.pick.account, 'ample',
+    `coverage ${coverage}: the pick ranked its candidates at another instant`);
+
+  // THE PREMISE: every assertion above must answer differently at the wall
+  // clock, or the fixture cannot tell one clock from two.
+  const later = am.getStatus();
+  const [expiredLater, , , heldLater, pausedLater] = later.accounts;
+  const sharedLater = later.routing.find(e => e.scope === 'shared');
+  assert.equal(expiredLater.quota.unified7d, null);
+  assert.equal(expiredLater.pressure, null);
+  assert.equal(heldLater.status, 'active');
+  assert.equal(pausedLater.pausedUntil, null);
+  assert.equal(sharedLater.target, 'soon');
+  assert.equal(sharedLater.band.ladder[0].account, 'soon');
+  assert.equal(sharedLater.pick.account, 'soon');
+}
+
 test('the active account is the one the next request starts from, not the one it leaves', () => {
   const now = Date.now();
   const H = 3600e3;
