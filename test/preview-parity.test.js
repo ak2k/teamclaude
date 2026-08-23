@@ -261,6 +261,15 @@ test('the rendered Next request row names the account a plain request is served 
 // window — its guard is `q.unified5h != null` — so once the timestamp passes
 // the account carries a reset in the past permanently, while a spent weekly
 // keeps it out of every candidate set.
+//
+// THAT STATE IS ITSELF A DEFECT, registered for round 4 and deliberately not
+// fixed here: `_clearExpiredQuotas` shares the guard, so nothing retires the
+// pair for the life of the process, and `resetTime` takes the FIRST non-null
+// timestamp rather than the reset of the bar that actually applies — so an
+// account barred by its weekly is reopened on the strength of an unrelated
+// five-hour timestamp. This test pins what the code does TODAY and does not
+// bless it. Both premises are asserted, so the round-4 fix makes this test
+// fail rather than quietly grade nothing, which is the handoff.
 test('the preview names the account the last resort reopens, and not by probing', () => {
   const now = Date.now();
   const secs = ms => String(Math.floor(ms / 1000));
