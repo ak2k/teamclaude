@@ -143,6 +143,72 @@
  */
 
 /**
+ * Why one step of the walk went the way it did.
+ *
+ * The exemption splits by AXIS rather than sharing one code, because the axes do
+ * not behave the same way: an account with absent pressure still contributes its
+ * measured headroom to the running total, and one with absent headroom
+ * contributes nothing. A single `unmeasured` code would hand every consumer back
+ * the job of inferring which happened from the numbers beside it, which is the
+ * inference this module exists to make unnecessary.
+ *
+ * `within-tolerance` is the ratio rule's ordinary admission. It exists for
+ * symmetry with `under-target`: a null there would be the one place in a
+ * structure built to keep absence out of the value channel where "no code" had
+ * to be read as "admitted normally".
+ *
+ * @typedef {'under-target' | 'coverage-met' | 'unmeasured-exempt-pressure'
+ *         | 'unmeasured-exempt-headroom' | 'within-tolerance' | 'below-floor'
+ *         | 'lower-tier'} LadderReason
+ */
+
+/**
+ * One step of an admission walk: an account, what was known about it, and what
+ * the walk did with it.
+ *
+ * This is the unit BOTH projections consume. The decision reads `admitted` and
+ * `cumulative` to produce `keep` and `achieved`; the explanation reports the
+ * steps as a ladder. One walk, so a ladder that claims an order the decision did
+ * not perform is unconstructible rather than merely tested for.
+ *
+ * `rank` is null wherever the sort could not order the row: absent pressure
+ * under `sized`, every row under `banded` (the floor is a test, not an order),
+ * and every lower-tier row. A number there would assert an ordering that was
+ * never computed.
+ *
+ * `cumulative` is the running coverage total AFTER this step, and is null only
+ * where the step admitted nobody. A step admitting an account whose headroom is
+ * absent carries the UNCHANGED total rather than null: nothing was added, but
+ * the account was taken, and null in that slot reads as held back.
+ *
+ * @typedef {{
+ *   account: BandAccount,
+ *   rank: number | null,
+ *   pressure: Pressure,
+ *   headroom: Headroom,
+ *   admitted: boolean,
+ *   cumulative: number | null,
+ *   reason: LadderReason,
+ * }} AdmissionStep
+ */
+
+/**
+ * A band decision together with the walk that produced it.
+ *
+ * `BandDecision` deliberately does not grow a ladder field: `decidingTerms` is
+ * "pure, and separate from `decidePick` so that explaining a decision cannot
+ * change it" (`pick-decision.js:172`), and the same posture applies here. So the
+ * explanation is a second projection of the same work rather than a wider
+ * decision, and nothing on the routing path reads it.
+ *
+ * @typedef {{
+ *   decision: BandDecision,
+ *   ladder: AdmissionStep[],
+ *   candidates: number,
+ * }} BandExplanation
+ */
+
+/**
  * Exhaustiveness, enforced at runtime as well as by the type checker. The
  * checker catches a union that gained a variant; this catches a snapshot that
  * arrived from somewhere the checker does not cover, which on a JS codebase
@@ -232,7 +298,7 @@ export function headroomOf(account, switchThreshold) {
  * coverage: capacity that has not been measured cannot be a reason to stop
  * admitting.
  *
- * @typedef {{ kind: 'sized', keep: number[], achieved: number }
+ * @typedef {{ kind: 'sized', steps: AdmissionStep[] }
  *         | { kind: 'fallback', reason: FallbackReason }} SizingOutcome
  */
 
@@ -273,9 +339,22 @@ function sizeByCapacity(tier, pressures, snapshot) {
     return bv - av;
   });
 
-  const keep = [];
+  // The walk is recorded step by step rather than reduced on the way past.
+  // `keep` and `achieved` are recovered from the steps below, and the ladder the
+  // status interface publishes is the same array: one sequence with two readers,
+  // so an explanation that disagrees with the routing it explains cannot be
+  // written. The alternative — a second sort in the explainer — is a parallel
+  // implementation of the decision, and the drift would surface as a ladder
+  // describing an admission that never happened.
+  /** @type {AdmissionStep[]} */
+  const steps = [];
+  let rank = 0;
   let achieved = 0;
   for (const entry of order) {
+    // Ranked only where the sort had something to order by. An account with no
+    // comparable pressure sits at the end of `order` because it sorted as
+    // -Infinity, not because it came fourth on the measurement.
+    const ranked = entry.pressure.kind === 'known' ? (rank += 1) : null;
     // ABSENCE ON EITHER AXIS, not just headroom. This rule ranks on two
     // measurements — pressure decides the order, headroom decides when to stop
     // — and an account missing EITHER is exempt from the coverage stop. Absence
@@ -285,8 +364,13 @@ function sizeByCapacity(tier, pressures, snapshot) {
     // half live: absent pressure sorts last, so it met a target a peer had
     // already met and was dropped, which is the same defect one noun over.
     const unmeasured = entry.headroom.kind === 'absent' || entry.pressure.kind === 'absent';
-    if (!unmeasured && achieved >= snapshot.coverage) continue;
-    keep.push(entry.account.index);
+    if (!unmeasured && achieved >= snapshot.coverage) {
+      steps.push({
+        account: entry.account, rank: ranked, pressure: entry.pressure, headroom: entry.headroom,
+        admitted: false, cumulative: null, reason: 'coverage-met',
+      });
+      continue;
+    }
     switch (entry.headroom.kind) {
       // Counted whenever it is known, including for an account admitted by the
       // exemption above. The reason absent headroom adds nothing is that
@@ -298,16 +382,50 @@ function sizeByCapacity(tier, pressures, snapshot) {
       case 'absent': break;
       default: assertNever(entry.headroom, 'sizeByCapacity');
     }
+    // Pressure is checked first because both axes can be absent at once and the
+    // codes are not symmetric: such a row was admitted by the exemption AND
+    // contributed nothing, and `unmeasured-exempt-pressure` is the half that
+    // explains why it is here at all, which is what a reader seeing it last in
+    // the ladder with no `+x` beside it is asking.
+    const reason = entry.pressure.kind === 'absent' ? 'unmeasured-exempt-pressure'
+      : entry.headroom.kind === 'absent' ? 'unmeasured-exempt-headroom'
+        : 'under-target';
+    steps.push({
+      account: entry.account, rank: ranked, pressure: entry.pressure, headroom: entry.headroom,
+      admitted: true, cumulative: achieved, reason,
+    });
   }
-  // Emitted in the tier's own order, not the pressure order used to choose
-  // them: callers break ties by taking the first acceptable candidate, and
-  // re-ranking here would move that decision into this function silently.
-  const admitted = new Set(keep);
-  return {
-    kind: 'sized',
-    keep: tier.filter(a => admitted.has(a.index)).map(a => a.index),
-    achieved,
-  };
+  return { kind: 'sized', steps };
+}
+
+/**
+ * The accounts a walk admitted, in the TIER's own order rather than the pressure
+ * order that chose them: callers break ties by taking the first acceptable
+ * candidate, so re-ranking here would move that decision into this function
+ * silently.
+ *
+ * @param {BandAccount[]} tier
+ * @param {AdmissionStep[]} steps
+ * @returns {number[]}
+ */
+function keptFrom(tier, steps) {
+  const admitted = new Set(steps.filter(s => s.admitted).map(s => s.account.index));
+  return tier.filter(a => admitted.has(a.index)).map(a => a.index);
+}
+
+/**
+ * What the admitted set can absorb: the last running total the walk published.
+ * Read back from the steps rather than accumulated a second time, so the figure
+ * on the wire and the figure in the ladder's final row are the same number by
+ * construction and cannot disagree in the last decimal.
+ *
+ * @param {AdmissionStep[]} steps
+ * @returns {number}
+ */
+function achievedFrom(steps) {
+  let achieved = 0;
+  for (const step of steps) if (step.cumulative != null) achieved = step.cumulative;
+  return achieved;
 }
 
 /**
@@ -323,9 +441,26 @@ function sizeByCapacity(tier, pressures, snapshot) {
  * @returns {BandDecision}
  */
 export function decideBand(snapshot) {
+  return bandWork(snapshot).decision;
+}
+
+/**
+ * The band's whole computation: the decision, and the steps that produced it.
+ *
+ * Both exported entry points are projections of this. `decideBand` takes the
+ * decision and drops the steps; `explainBand` keeps both. That is what makes an
+ * explanation that contradicts the routing unconstructible: there is one walk,
+ * and neither caller can produce the other's answer from a different one.
+ *
+ * @param {BandSnapshot} snapshot
+ * @returns {{ decision: BandDecision, steps: AdmissionStep[], top: number|null }}
+ */
+function bandWork(snapshot) {
   const { accounts, now, tolerance, enabled } = snapshot;
-  if (!enabled) return { kind: 'passthrough', reason: 'disabled' };
-  if (accounts.length <= 1) return { kind: 'passthrough', reason: 'single-candidate' };
+  if (!enabled) return { decision: { kind: 'passthrough', reason: 'disabled' }, steps: [], top: null };
+  if (accounts.length <= 1) {
+    return { decision: { kind: 'passthrough', reason: 'single-candidate' }, steps: [], top: null };
+  }
 
   const top = Math.min(...accounts.map(a => a.priority));
   const tier = accounts.filter(a => a.priority === top);
@@ -333,18 +468,36 @@ export function decideBand(snapshot) {
   const known = pressures.filter(p => p.kind === 'known').map(p => p.value);
   // Nothing to rank on. Every account in the tier is unknown, so there is no
   // maximum to measure a floor against and no basis for preferring any of them.
-  if (!known.length) return { kind: 'passthrough', reason: 'no-known-pressure' };
+  if (!known.length) {
+    return { decision: { kind: 'passthrough', reason: 'no-known-pressure' }, steps: [], top: null };
+  }
+
+  // Surviving members of the top tier first, then every lower tier untouched.
+  // The order is part of the contract, not an accident of the loop: callers
+  // break ties by taking the first acceptable candidate, so emitting these in
+  // the snapshot's order instead would silently re-rank a mixed-priority fleet.
+  /** @param {number[]} keep @returns {number[]} */
+  const withLowerTiers = keep => {
+    const out = keep.slice();
+    for (const account of accounts) {
+      if (account.priority !== top) out.push(account.index);
+    }
+    return out;
+  };
 
   // Capacity first; the ratio is what it degrades to when nothing has reported
   // a five-hour level.
   const sizing = sizeByCapacity(tier, pressures, snapshot);
   switch (sizing.kind) {
     case 'sized': {
-      const keep = sizing.keep.slice();
-      for (const account of accounts) {
-        if (account.priority !== top) keep.push(account.index);
-      }
-      return { kind: 'sized', keep, target: snapshot.coverage, achieved: sizing.achieved };
+      /** @type {BandDecision} */
+      const decision = {
+        kind: 'sized',
+        keep: withLowerTiers(keptFrom(tier, sizing.steps)),
+        target: snapshot.coverage,
+        achieved: achievedFrom(sizing.steps),
+      };
+      return { decision, steps: sizing.steps, top };
     }
     case 'fallback': {
       const maxKnown = Math.max(...known);
@@ -358,27 +511,91 @@ export function decideBand(snapshot) {
       // two-account fleet kept nothing at all.
       const ratio = Number.isFinite(tolerance) && tolerance > 0 ? tolerance : 1;
       const floor = Math.min(maxKnown, maxKnown / ratio);
-      // Surviving members of the top tier first, then every lower tier
-      // untouched. The order is part of the contract, not an accident of the
-      // loop: callers break ties by taking the first acceptable candidate, so
-      // emitting these in the snapshot's order instead would silently re-rank a
-      // mixed-priority fleet.
-      const keep = [];
-      for (let i = 0; i < tier.length; i += 1) {
-        const pressure = pressures[i];
-        switch (pressure.kind) {
-          // An unknown account stays in: using it is how its quota is
-          // discovered, and banding it out would make the unknown permanent.
-          case 'absent': keep.push(tier[i].index); break;
-          case 'known': if (pressure.value >= floor) keep.push(tier[i].index); break;
-          default: assertNever(pressure, 'decideBand');
-        }
-      }
-      for (const account of accounts) {
-        if (account.priority !== top) keep.push(account.index);
-      }
-      return { kind: 'banded', keep, floor, reason: sizing.reason };
+      const steps = floorSteps(tier, pressures, snapshot, floor);
+      /** @type {BandDecision} */
+      const decision = {
+        kind: 'banded', keep: withLowerTiers(keptFrom(tier, steps)), floor, reason: sizing.reason,
+      };
+      return { decision, steps, top };
     }
-    default: return assertNever(sizing, 'decideBand');
+    default: return assertNever(sizing, 'bandWork');
   }
+}
+
+/**
+ * The ratio rule's walk. No order and no running total: the floor is a test
+ * applied to each account independently, so a rank would assert a comparison
+ * that never happened and a cumulative would assert a coverage claim this rule
+ * does not make.
+ *
+ * @param {BandAccount[]} tier
+ * @param {Pressure[]} pressures
+ * @param {BandSnapshot} snapshot
+ * @param {number} floor
+ * @returns {AdmissionStep[]}
+ */
+function floorSteps(tier, pressures, snapshot, floor) {
+  return tier.map((account, i) => {
+    const pressure = pressures[i];
+    // Carried for the ladder's column even though this rule never consults it:
+    // it is the reading the fleet HAS, and under `no-capacity-signal` its
+    // absence is the very reason this rule is running.
+    const headroom = headroomOf(account, snapshot.switchThreshold);
+    switch (pressure.kind) {
+      // An unknown account stays in: using it is how its quota is discovered,
+      // and banding it out would make the unknown permanent.
+      case 'absent':
+        return {
+          account, rank: null, pressure, headroom,
+          admitted: true, cumulative: null, reason: 'unmeasured-exempt-pressure',
+        };
+      case 'known': {
+        const admitted = pressure.value >= floor;
+        return {
+          account, rank: null, pressure, headroom, admitted, cumulative: null,
+          reason: admitted ? 'within-tolerance' : 'below-floor',
+        };
+      }
+      default: return assertNever(pressure, 'floorSteps');
+    }
+  });
+}
+
+/**
+ * The same decision, with the sequence that produced it.
+ *
+ * Separate from `decideBand` rather than folded into it because explaining a
+ * decision must not be able to change it — the posture `decidingTerms` sets for
+ * the pick (`pick-decision.js:172`) — so `BandDecision` is untouched and nothing
+ * on the routing path reads a ladder. What the two share is the walk itself, not
+ * a convention about how to redo it.
+ *
+ * Lower-tier accounts are appended after the ranked rows, carrying `lower-tier`
+ * and no rank: `decideBand` keeps them wholesale without ever comparing them, so
+ * ranking them here would publish an ordering the band never computed. Under
+ * `passthrough` the ladder is empty for the same reason, and emptiness is the
+ * honest report — no walk ran, so there is no sequence to describe.
+ *
+ * @param {BandSnapshot} snapshot
+ * @returns {BandExplanation}
+ */
+export function explainBand(snapshot) {
+  const { decision, steps, top } = bandWork(snapshot);
+  const candidates = snapshot.accounts.length;
+  if (decision.kind === 'passthrough') return { decision, ladder: [], candidates };
+
+  const ladder = steps.slice();
+  for (const account of snapshot.accounts) {
+    if (account.priority === top) continue;
+    ladder.push({
+      account,
+      rank: null,
+      pressure: pressureOf(account, snapshot.now),
+      headroom: headroomOf(account, snapshot.switchThreshold),
+      admitted: true,
+      cumulative: null,
+      reason: 'lower-tier',
+    });
+  }
+  return { decision, ladder, candidates };
 }
