@@ -158,7 +158,17 @@ function selectionSummary(entry) {
     case 'no-known-pressure':
       return `load-ranked · no quota window reported yet · ${n} eligible`;
     case 'single-candidate':
-      return n === 0 ? 'no eligible account right now' : 'one eligible account; nothing to choose between';
+      if (n > 0) return 'one eligible account; nothing to choose between';
+      // NOTHING ELIGIBLE IS NOT NOTHING SERVED. With every account barred, a
+      // request does not fail — the last resort reopens whichever one's window
+      // has already passed, and `target` names it. This line said nothing was
+      // eligible two rows under `Active spent`, on a fleet where every request
+      // was being served by `spent`. The preview learned to name that
+      // destination this round; the one-row collapse never read it, so the
+      // round made a true line false.
+      return entry.target
+        ? `nothing under the threshold; the next request reopens ${entry.target}`
+        : 'no eligible account right now';
     default:
       return `load-ranked · ${n} eligible`;
   }

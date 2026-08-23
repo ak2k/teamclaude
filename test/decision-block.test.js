@@ -536,6 +536,38 @@ test('a fully barred fleet says nothing is eligible rather than claiming one acc
   assert.match(row(lines, 'Selection'), /no eligible account right now/);
 });
 
+// NOTHING ELIGIBLE IS NOT NOTHING SERVED, and this round is what made the
+// difference visible: the preview learned to name the account the last resort
+// reopens, so `target` stopped being null on an exhausted fleet while the
+// one-row collapse went on saying nothing was eligible. `Active spent` sat two
+// lines above `no eligible account right now` on a fleet serving every request
+// from `spent`.
+test('the collapsed row names where the next request goes when nothing is under the threshold', () => {
+  const now = Date.now();
+  const secs = ms => String(Math.floor(ms / 1000));
+  const am = new AccountManager([acct('spent'), acct('offline')].map(a => a), 0.98,
+    { expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 } });
+  // The reachable last-resort state: a five-hour reset with no utilization
+  // beside it, which nothing retires, under a weekly over the threshold.
+  am.updateQuota(0, {
+    'anthropic-ratelimit-unified-5h-reset': secs(now - 30 * 60e3),
+    'anthropic-ratelimit-unified-7d-utilization': '0.995',
+    'anthropic-ratelimit-unified-7d-reset': secs(now + 100 * H),
+  });
+  am.accounts[1].disabled = true;
+  am.setCurrentAccount(0);
+
+  const status = am.getStatus();
+  const shared = status.routing.find(e => e.scope === 'shared');
+  assert.equal(shared.band.candidates, 0, 'the premise: nothing is eligible on this fleet');
+  assert.equal(shared.target, 'spent', 'the premise: a request is still served, and by whom');
+
+  const line = row(render(am, now), 'Selection');
+  assert.ok(line, 'no collapsed row rendered, so nothing is being compared');
+  assert.match(line, /reopens spent/,
+    'the row says nothing is eligible beside an Active row naming the account every request lands on');
+});
+
 test('one eligible account says there is nothing to choose between', () => {
   const now = Date.now();
   const am = new AccountManager(['a', 'b'].map(acct), 0.98,
