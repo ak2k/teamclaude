@@ -3,8 +3,8 @@ import { sameIdentity } from './identity.js';
 import { weeklyBucketForModel, modelGlobMatches, gatingSource, WEEKLY_BUCKET_KEYS } from './model.js';
 import { SessionTracker } from './session-tracker.js';
 import { WindowWatcher } from './window-watcher.js';
-import { decideBand, pressureOf, assertNever } from './band-decision.js';
-import { decidePick, pressureRank } from './pick-decision.js';
+import { decideBand, explainBand, pressureOf, assertNever } from './band-decision.js';
+import { decidePick, decidingTerms, pressureRank, runnerUp, tiedWith } from './pick-decision.js';
 
 // Re-exported for callers that import these model helpers from here.
 export { isFableModel, parseRequestModel, parseAdvisorModel } from './model.js';
@@ -1532,6 +1532,13 @@ export class AccountManager {
       name: r.name, match: r.match, bucket: r.bucket, color: r.color || null, autocreated: false,
       pinned: this._pinnedName(r.name),
       accounts: this._routeAccountsView(r),
+      // The model this route's live figures were computed for. Published
+      // because `target` and the routing report are answers ABOUT a model, and
+      // a consumer cannot otherwise tell which one was asked about. For a
+      // configured route it is the glob with its wildcards stripped, which is a
+      // representative rather than a model id; the auto-created entries below
+      // carry a real one.
+      sample: sampleModelFor(r),
       target: this._routeTarget(sampleModelFor(r)),
     }));
 
@@ -1548,10 +1555,104 @@ export class AccountManager {
         name: d.name, match: d.match, bucket: null, color: null, autocreated: true,
         pinned: this._pinnedName(d.name),
         accounts: this.accounts.map(a => ({ name: a.name, eligible: this._isAvailable(a, d.sample) })),
+        sample: d.sample,
         target: this._routeTarget(d.sample),
       });
     }
     return out;
+  }
+
+  /**
+   * The band and pick decisions as a report, one entry per routing scope.
+   *
+   * A REPORT OF A DECISION, never a decision. Nothing reads this back: it is
+   * recomputed per status call and thrown away, which is what keeps publishing
+   * an explanation from becoming a feedback path into routing. The functions it
+   * calls are the ones selection calls, in the order selection calls them, so
+   * the entry says what a request arriving now would meet rather than what a
+   * second implementation believes it would.
+   *
+   * The `shared` scope is always present, even on a fleet with no routes at all
+   * — otherwise a stock user, whose `routes` is empty, gets no decision report
+   * at all, and the state where the fleet is down to one eligible account is
+   * exactly where the operator needs one.
+   *
+   * SCOPED TO A PLAIN REQUEST. Each entry describes a request with no advisor
+   * model and nothing already tried, because those are properties of a request
+   * in flight and this is a report about the fleet. An entry cannot therefore be
+   * read as "what happens to the request I am debugging" when that request
+   * carries an advisor; it is what the next plain request meets.
+   */
+  _routingReport(now = Date.now()) {
+    const scopes = [{ scope: 'shared', route: null, model: null }];
+    for (const route of this.getRoutes()) {
+      scopes.push({ scope: 'route', route: route.name, model: route.sample });
+    }
+    return scopes.map(({ scope, route, model }) => {
+      // ONE availability evaluation per account, split two ways. The candidates
+      // are what the band sees and the rest are `excluded[]` with the reason
+      // that removed them, so the two lists cannot disagree about an account and
+      // `candidates + excluded.length === accounts.length` holds by construction
+      // rather than by two filters agreeing.
+      const verdicts = this.accounts.map(account => ({ account, why: this._availability(account, model) }));
+      const candidates = verdicts.filter(v => v.why === null).map(v => v.account);
+      const explained = explainBand(this._bandSnapshot(candidates, model, now));
+      const byIndex = new Map(candidates.map(a => [a.index, a]));
+      // The same projection `_topPressureBand` applies to the same decision:
+      // passthrough keeps the candidate list, the narrowing variants name what
+      // they kept, in the order the caller must see them.
+      const banded = explained.decision.kind === 'passthrough'
+        ? candidates
+        : explained.decision.keep.map(i => byIndex.get(i)).filter(Boolean);
+      const pickSnapshot = this._pickSnapshot(banded, model, now);
+      const pick = decidePick(pickSnapshot);
+      const nameOf = index => this.accounts[index]?.name ?? null;
+
+      return {
+        scope,
+        route,
+        model,
+        // The FAMILY this entry is about. An account that does not meter that
+        // family is measured on the shared bucket instead, which is a per-account
+        // fallback and so appears on the row rather than here — reading this key
+        // as every row's bucket would attribute one window's figure to another.
+        bucket: this._weeklyBucketFor(model),
+        band: {
+          kind: explained.decision.kind,
+          reason: explained.decision.reason ?? null,
+          target: explained.decision.kind === 'sized' ? explained.decision.target : null,
+          achieved: explained.decision.kind === 'sized' ? explained.decision.achieved : null,
+          floor: explained.decision.kind === 'banded' ? explained.decision.floor : null,
+          candidates: candidates.length,
+          admitted: banded.map(a => a.name),
+          ladder: explained.ladder.map(row => ({
+            rank: row.rank,
+            account: nameOf(row.account.index),
+            bucket: this._governingBucket(this.accounts[row.account.index], model),
+            pressure: row.pressure,
+            headroom: row.headroom,
+            cumulative: row.cumulative,
+            admitted: row.admitted,
+            reason: row.reason,
+          })),
+          excluded: verdicts.filter(v => v.why !== null).map(v => ({
+            account: v.account.name,
+            reason: v.why.reason,
+            bucket: v.why.bucket,
+            detail: v.why.detail,
+          })),
+        },
+        pick: {
+          kind: pick.kind,
+          reason: pick.kind === 'none' ? pick.reason : null,
+          account: pick.kind === 'picked' ? nameOf(pick.index) : null,
+          runnerUp: nameOf(runnerUp(pickSnapshot, pick) ?? -1),
+          tiedWith: tiedWith(pickSnapshot, pick).map(nameOf),
+          by: pick.kind === 'picked' ? pick.by : null,
+          terms: decidingTerms(pickSnapshot, pick),
+        },
+      };
+    });
   }
 
   /** The name of the account a request for `model` would land on right now, or
@@ -2413,6 +2514,7 @@ export class AccountManager {
         },
       },
       routes: this.getRoutes(),
+      routing: this._routingReport(),
       sessions: { ...sessions, distribute: this.distributeSessions },
       accounts: this.accounts.map(a => {
         const pressure = this._pressureVariant(a);
