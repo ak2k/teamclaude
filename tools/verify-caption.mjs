@@ -419,6 +419,60 @@ for (const r of results) {
 // One clause per verdict, counted from the verdicts rather than asserted beside
 // them: a summary that states what the check decided, computed from the same
 // data the check used.
+// ── CROSS-TIER CONTROL ──────────────────────────────────────────────────────
+//
+// The caption's ordering claim is scoped to a priority tier. This checks that
+// the scope is load-bearing rather than decoration, because the sentence was
+// wrong here once: unqualified, it claimed the most-expiring account goes first,
+// while `decideBand` ranks only the best priority tier and appends the rest
+// untouched. A priority-1 account with far more expiring quota than the whole
+// top tier therefore goes LAST, and the sentence said it goes first.
+//
+// The rows above cannot see this: `codeOrder` is the ladder minus lower-tier
+// rows, and the readings are scored over the tier, so a cross-tier inversion is
+// invisible to every verdict printed so far. Hence a separate check on a
+// synthesised fleet, and hence its own premise assertions.
+//
+// Demote the account the band ranked first and re-decide. The band must then not
+// rank it at all; the UNQUALIFIED reading — pressure over every candidate,
+// ignoring priority — must still put it first. If those two agree, the tier
+// scope is unobservable here and this control has proved nothing.
+const demotedIndex = codeOrder[0];
+const crossTier = {
+  ...snapshot,
+  accounts: snapshot.accounts.map(a => (a.index === demotedIndex ? { ...a, priority: 1 } : a)),
+};
+const crossLadder = explainBand(crossTier).ladder;
+const demotedRow = crossLadder.find(r => r.account.index === demotedIndex);
+const crossTierOrder = crossLadder.filter(r => r.reason !== 'lower-tier').map(r => r.account.index);
+
+// Premise 1: the demotion actually moved it out of the ranked set.
+if (!demotedRow || demotedRow.reason !== 'lower-tier' || demotedRow.rank != null) {
+  refuse('the cross-tier control could not demote the top account out of the ranked set '
+    + `(row reason ${demotedRow ? demotedRow.reason : 'missing'}, rank ${demotedRow?.rank}), `
+    + 'so it cannot show that the caption\'s tier scope is load-bearing');
+}
+// Premise 2: it still has the highest pressure of the fleet, which is what makes
+// the unqualified reading name it and the priority rule the only thing stopping it.
+const pressures = crossTier.accounts.map(a => ({ index: a.index, p: pressureScore(a) }));
+const strongest = pressures.reduce((best, x) => ((x.p ?? -Infinity) > (best.p ?? -Infinity) ? x : best));
+if (strongest.index !== demotedIndex) {
+  refuse('the demoted account is not the highest-pressure one on this sample, so the '
+    + 'unqualified reading would not name it and the control tests nothing about priority');
+}
+
+const unqualifiedFirst = strongest.index;
+const bandFirst = crossTierOrder[0];
+const scopeIsLoadBearing = unqualifiedFirst !== bandFirst;
+console.log(`\ncross-tier  demoting [${demotedIndex}] to a lower priority: the band then ranks `
+  + `[${crossTierOrder}] and the unqualified reading still names [${unqualifiedFirst}] first`
+  + `  ${scopeIsLoadBearing ? 'DIFFERS, as it must' : 'READS THE SAME'}`);
+if (!scopeIsLoadBearing) {
+  console.error('  the tier-scoped and unqualified readings agree on this fleet, so nothing here');
+  console.error('  shows the caption\'s priority qualifier is doing any work.');
+  process.exit(1);
+}
+
 const tally = results.reduce((acc, r) => { acc[r.verdict] = (acc[r.verdict] || 0) + 1; return acc; }, {});
 const failed = results.filter(r => r.verdict === 'FALSIFIED' || r.verdict === 'INDISTINGUISHABLE');
 console.log(`\nsummary    ${Object.entries(tally).map(([k, v]) => `${v} ${k}`).join(', ')}` +

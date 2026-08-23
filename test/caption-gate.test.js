@@ -80,6 +80,20 @@ test("the gate's order control must differ, or its verdicts are set membership i
   assert.notEqual(got, want, 'the control did not reorder anything');
 });
 
+test("the gate shows the caption's priority scope is doing work, not decorating", () => {
+  // The caption is scoped to a priority tier because unqualified it was false:
+  // `decideBand` ranks only the best tier, so a lower-priority account with far
+  // more expiring quota goes last while the sentence said it goes first. Every
+  // other verdict in this gate is blind to that — the ladder it grades against
+  // excludes lower-tier rows — so the scope needs its own check.
+  const { code, out } = gate([`--sample=${SAMPLE}`, '--model=claude-fable-5', `--now=${NOW}`]);
+  assert.equal(code, 0, out);
+  assert.match(out, /cross-tier {2}demoting \[\d+\] to a lower priority/,
+    'the cross-tier control did not run, so the priority qualifier is ungraded');
+  assert.match(out, /DIFFERS, as it must/,
+    'the tier-scoped and unqualified readings agreed, so the scope is unobservable here');
+});
+
 test('a sample read without its capture clock is refused, not guessed at', () => {
   const { code, out } = gate([`--sample=${SAMPLE}`, '--model=claude-fable-5']);
   assert.equal(code, 2);
