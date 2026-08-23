@@ -810,27 +810,49 @@ test('a degraded advisor request pins the executor\'s family only', () => {
 });
 
 test('a degraded advisor request does not settle the advisor family\'s rollover', () => {
-  // Only 'a' can serve Opus, and it cannot serve Fable — so an Opus request
-  // carrying a Fable advisor has no jointly-eligible account and degrades.
+  // The degrade needs an Opus+Fable request with NO jointly-eligible account.
+  // It used to be built by exhausting b and c on the shared weekly: they served
+  // Fable but not Opus, and 'a' served Opus but not Fable.
+  //
+  // THE WEEKLY GATE MAKES THAT UNCONSTRUCTIBLE. Fable is gated by
+  // max(family, shared) and Opus by shared alone, so the Fable gate is strictly
+  // the stronger: "can serve Fable" now IMPLIES "can serve Opus" on the same
+  // account — 0 violations over all 81 combinations of the two buckets. Any
+  // Fable-capable account is therefore jointly eligible ON THE WEEKLY GATE.
+  //
+  // That is not the whole eligibility test. An earlier version of this comment
+  // said a quota-only degrade "cannot happen", which is false and contradicted
+  // the test it annotates: `_canServeAdvisor` uses family-only
+  // `_modelWeeklyExhausted`, so a single account at {shared 0.2, family 0.99}
+  // degrades on quota alone - which is exactly what account 'a' does here. What
+  // the weekly gate removed is the OTHER construction, where the remaining
+  // accounts were excluded by an over-spent shared bucket while still serving
+  // the family. The degrade is still reachable, but only
+  // when NO account can serve the advisor family at all, so it is reached here
+  // by taking the Fable-capable accounts out of service rather than by
+  // over-spending their shared bucket.
   const am = manager([
     { name: 'a', used: 0.2, resetH: 50, fableUsed: 0.99, fableResetH: 50 },
-    { name: 'b', used: 0.99, resetH: 50, fableUsed: 0.3, fableResetH: 50 },
-    { name: 'c', used: 0.99, resetH: 50, fableUsed: 0.3, fableResetH: 60 },
+    { name: 'b', used: 0.3, resetH: 50, fableUsed: 0.3, fableResetH: 50 },
+    { name: 'c', used: 0.4, resetH: 50, fableUsed: 0.3, fableResetH: 60 },
   ]);
   assert.equal(route(am, 's1', FABLE).name, 'b'); // Fable pinned to 'b'
   am.accounts[2].disabled = true;                 // nowhere for Fable to move yet
   rollFable(am, 1);
   assert.equal(route(am, 's1', FABLE).name, 'b'); // detected, owed on the Fable bucket
-  am.accounts[2].disabled = false;
 
-  // An Opus+Fable-advisor request degrades onto 'a' (Fable-exhausted). It moved
-  // no Fable traffic anywhere, so it must not bank the Fable rollover.
+  // Both Fable-capable accounts out of service: 'a' is the only account left and
+  // it cannot serve Fable, so the advisor is dropped and the request degrades.
+  am.accounts[1].disabled = true;
   const decision = {};
   const acc = am.getActiveAccount(null, OPUS, FABLE, 's1', decision);
   assert.equal(acc.name, 'a');
+  assert.equal(decision.advisorServed, false, 'the request did not degrade, so this proves nothing');
   am.recordSession('s1', acc.index, OPUS, FABLE, decision);
   am.confirmRouted('s1', acc.index, OPUS, FABLE, decision);
 
+  am.accounts[1].disabled = false;
+  am.accounts[2].disabled = false;
   assert.equal(route(am, 's1', FABLE).name, 'c', 'the degraded request settled a rollover it never moved');
 });
 
@@ -1246,7 +1268,10 @@ test('two buckets sharing a window key keep a baseline per account', () => {
 test('a session pinned per bucket keeps a rollover baseline for each account', () => {
   const am = manager([
     { name: 'a', used: 0.2, resetH: 50, fableUsed: 0.99, fableResetH: 50 }, // no Fable left
-    { name: 'b', used: 0.99, resetH: 50, fableUsed: 0.1, fableResetH: 50 }, // no Opus left
+    // 0.97 rather than 0.99: the weekly gate takes the max of the family and
+    // shared buckets now, so a shared bucket AT the cap bars Fable too. This
+    // account has to be Opus-unattractive without being shared-exhausted.
+    { name: 'b', used: 0.97, resetH: 50, fableUsed: 0.1, fableResetH: 50 },
     { name: 'c', used: 0.05, resetH: 60, fableUsed: 0.9, fableResetH: 300 },
   ]);
   // Opus lands on 'a', Fable on 'b' — one session, two accounts.
@@ -1453,7 +1478,13 @@ test('a config reload retunes the feature without zeroing its counters', () => {
 test('the per-bucket view shows one session\'s two families on two accounts', () => {
   const am = manager([
     { name: 'a', used: 0.2, resetH: 50, fableUsed: 0.99, fableResetH: 50 }, // no Fable left
-    { name: 'b', used: 0.99, resetH: 50, fableUsed: 0.1, fableResetH: 50 }, // no Opus left
+    // 0.9 rather than 0.99. The weekly gate takes max(family, shared), so a
+    // shared bucket at the cap bars this account from Fable too - and then NO
+    // account here could serve Fable, the exhausted-fleet probe fired, and the
+    // assertion below passed on a PROBE rather than a routing decision. It was
+    // green for that reason and one spent probe slot away from returning null
+    // and throwing on `.name`.
+    { name: 'b', used: 0.9, resetH: 50, fableUsed: 0.1, fableResetH: 50 },
   ]);
   assert.equal(route(am, 's1', OPUS).name, 'a');
   assert.equal(route(am, 's1', FABLE).name, 'b');

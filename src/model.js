@@ -281,3 +281,44 @@ export function parseAdvisorModel(body) {
     return new AdvisorModelFinder().push(buf);
   } catch { return null; }
 }
+
+/**
+ * The utilization that GATES a request whose weekly bucket is `bucketKey`: the
+ * higher of that bucket and the shared `unified7d`, or null when neither is
+ * reported.
+ *
+ * ONE DEFINITION, because the gate and every display of it answer the SAME
+ * question - can this account serve this family right now. A second derivation
+ * of one question is a copy that drifts, and it did: the routing gate took this
+ * maximum while `status`'s Models row and the TUI's blocked tag each kept
+ * reading the family bucket alone, so one render showed `Fable OK` on an
+ * account routing had just refused. Two derivations of two DIFFERENT questions
+ * are two functions, which is why pressure does not use this: pressure is
+ * headroom over the time until that window resets, and maxing across buckets
+ * would divide one bucket's headroom by another bucket's clock.
+ *
+ * Family spend meters twice, in the family bucket and again in the shared one,
+ * so an account under its family cap can still be over the shared one. Reading
+ * the family bucket alone let it keep serving that family and push the shared
+ * bucket further past its cap, which is a one-way ratchet: once the shared
+ * bucket is spent, family requests are the only ones still admitted.
+ *
+ * NULL IS UNREPORTED AND NEVER ZERO. `Math.max` coerces null to 0, and 0 reads
+ * as "empty" - the opposite of "unknown", in the direction that keeps an
+ * account serving. Both absent cases are handled before the maximum rather than
+ * falling into it. The `own == null` branch is unreachable from both callers
+ * today (the manager resolves the key with the same `== null` test, and the
+ * renderers only ask about a family they have already seen reported); it is
+ * kept because without it a third caller passing an absent family bucket would
+ * silently get `max(0, shared)`, which is the coercion this paragraph exists to
+ * prevent.
+ */
+export function gatingUtilization(quota, bucketKey) {
+  const own = quota?.[bucketKey] ?? null;
+  // Already the shared bucket: max(x, x) is x.
+  if (bucketKey === 'unified7d') return own;
+  const shared = quota?.unified7d ?? null;
+  if (own == null) return shared;
+  if (shared == null) return own;
+  return Math.max(own, shared);
+}

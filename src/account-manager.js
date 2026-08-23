@@ -1,6 +1,6 @@
 import { refreshAccessToken, isTokenExpiringSoon, isTokenExpired } from './oauth.js';
 import { sameIdentity } from './identity.js';
-import { weeklyBucketForModel, modelGlobMatches, WEEKLY_BUCKET_KEYS } from './model.js';
+import { weeklyBucketForModel, modelGlobMatches, gatingUtilization, WEEKLY_BUCKET_KEYS } from './model.js';
 import { SessionTracker } from './session-tracker.js';
 import { WindowWatcher } from './window-watcher.js';
 import { decideBand, pressureOf, assertNever } from './band-decision.js';
@@ -824,10 +824,42 @@ export class AccountManager {
     return this._windowForBucket(account, this._weeklyBucketFor(model));
   }
 
-  /** Utilization (0-1) of the bucket that governs `model` here, or null when
-   * that bucket reports none. */
+  /**
+   * Utilization (0-1) that GATES `model` here: the higher of the governing
+   * family bucket and the shared weekly one, or null when neither reports.
+   *
+   * WHY A MAXIMUM. Family spend meters twice, once in the family bucket and
+   * once in the shared one, so the two are not independent. Reading the family
+   * bucket alone let an account sitting at `unified7d` 1.00 with
+   * `unified7dFable` 0.20 keep serving Fable, and every such request pushed the
+   * shared bucket further past its cap. Once the shared bucket is spent, family
+   * requests are the only ones still admitted, which makes it a one-way
+   * ratchet rather than a bounded overshoot. Upstream measured the coupling
+   * directly (issue #175): per-request increment on the shared bucket
+   * [+1.14e-4, +5.21e-4] against Fable-only traffic.
+   *
+   * NULL IS UNREPORTED AND NEVER ZERO. A max is an invitation to floor an
+   * absent bucket at 0, and 0 reads as "empty" — the opposite of "unknown", and
+   * in the direction that keeps an account serving. If one side is absent the
+   * answer is the other; if both are, the answer is null and the gate leaves
+   * this dimension alone rather than deciding on it.
+   *
+   * THE RESET DELIBERATELY DOES NOT FOLLOW. `_governingWeeklyReset` still keys
+   * off `_governingBucket`, so the value here and the reset there can now name
+   * different buckets. That is safe because no caller pairs them: the value has
+   * exactly two consumers, this gate and `_maxUtilization`, and both ask "how
+   * close to a cap" without a clock. The one site that needs a value and a
+   * reset TOGETHER, `_bandSnapshot`, resolves the bucket once and reads both
+   * from it, so its pair stays coherent — and it deliberately does NOT take
+   * this maximum, because pressure is headroom over the time until THAT window
+   * resets, and maxing across buckets would divide the shared bucket's headroom
+   * by the family window's clock. That is the error `_governingBucket` above
+   * already warns about. Published pressure is therefore about the governing
+   * window and only that; the gate is what accounts for the other bucket, and
+   * it runs first, so an account over its shared cap never reaches the band.
+   */
   _governingWeekly(account, model) {
-    return account.quota[this._governingBucket(account, model)] ?? null;
+    return gatingUtilization(account.quota, this._governingBucket(account, model));
   }
 
   /** Reset timestamp (ms) of the bucket that governs `model` here, or null when
@@ -842,7 +874,16 @@ export class AccountManager {
    * Unlike _isNearQuota this ignores the shared 5h/weekly caps — it is only used
    * to skip an account for a probe of a model it definitely can't serve. Returns
    * false for families without a dedicated bucket (they share unified7d, already
-   * covered by _isNearQuota). */
+   * covered by _isNearQuota).
+   *
+   * FAMILY-ONLY ON PURPOSE, and it does NOT take the maximum `_governingWeekly`
+   * now takes. The two answer different questions: this one asks "can this
+   * account serve this family at all", the gate asks "is this account near any
+   * cap that binds this request". Folding the shared bucket in here would skip
+   * accounts for probes they could still have served, and a probe is how a
+   * stale cached utilization gets corrected — so it would harden the very state
+   * it exists to escape. The next reader will see two similar helpers diverging
+   * and wonder whether one was missed: it was not. */
   _modelWeeklyExhausted(account, model) {
     const key = this._governingBucket(account, model);
     if (key === 'unified7d') return false;
@@ -1683,11 +1724,14 @@ export class AccountManager {
     // Shared 5-hour bucket gates every request regardless of model.
     if (q.unified5h != null && q.unified5h >= this.switchThreshold) return true;
 
-    // Only the weekly bucket that GOVERNS this model is checked: Fable and Sonnet
-    // meter their own weekly quota, so a spent Fable bucket must not bar an Opus
-    // or Sonnet request (and vice versa). When the family bucket isn't reported
-    // (e.g. the plan doesn't expose it), fall back to the shared weekly so an
-    // account over its overall cap is still treated as near-quota.
+    // The HIGHER of the weekly bucket that governs this model and the shared
+    // weekly one. Fable and Sonnet meter their own quota, so a spent Fable
+    // bucket still bars only Fable — but family spend also meters into the
+    // shared bucket, so an account over its overall cap is barred from the
+    // families too, which is what stops it ratcheting further past that cap.
+    // When the family bucket isn't reported the shared one answers alone.
+    // One definition, in `gatingUtilization`; the status row and the TUI tag
+    // display this same value rather than deriving it again.
     const weeklyVal = this._governingWeekly(account, model);
     if (weeklyVal != null && weeklyVal >= this.switchThreshold) return true;
 

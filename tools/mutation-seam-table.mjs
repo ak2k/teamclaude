@@ -207,6 +207,8 @@ const HOLD_RELEASE = '    this._releaseHold(s, hold);\n';
 const HOLD_DRAIN = '      for (const h of [...s.holds]) this._releaseHold(s, h);\n';
 const HOLD_CLAIM = '        if (hold && hold.rid === s.rid && !hold.buckets.has(bucket)) {\n';
 const HOLD_OWNER_END = '    if (hold && hold.rid !== s.rid) return null;\n';
+const GATE_MAX = '  return Math.max(own, shared);\n';
+const GATE_SHARED_READ = '  const shared = quota?.unified7d ?? null;\n';
 const PIN_HELD = '    return now - pin.at <= this.activeTtlMs || (s.pinHolds.get(bucket) || 0) > 0;\n';
 const PICK_PRESSURE = '          pressure: pressures[i],\n';
 const PICK_PRESSURE_TERM = '  { term: \'pressure\', of: a => pressureRank(a.pressure) },\n';
@@ -464,6 +466,34 @@ const M = [
   // claim broken from the inside.
   ['pickDecision      disabled path consults pressure anyway', PRESSURE_OFF, '',
     'src/account-manager.js'],
+  // The weekly gate. THESE TWO COLLAPSE, and NOT because they are one
+  // intervention — that reading was checked and is wrong. Run over all 147
+  // combinations of {null,0,0.2,0.9,0.98,1.0,1.2} across the three bucket keys,
+  // the two mutants agree on 135 and DIFFER on 12:
+  //
+  //   family absent, shared 0.9   max-never-taken -> 0.9   shared-never-read -> null
+  //
+  // They are different functions. What makes them indistinguishable is that the
+  // only inputs separating them are the ones `if (own == null) return shared`
+  // handles, and NO CALLER CAN PRODUCE THEM: the manager resolves the key
+  // through `_windowForBucket`, which collapses an absent family bucket to
+  // `unified7d` and takes the early return; the status renderer and the TUI tag
+  // each ask only about a family they have already seen reported. So the branch
+  // that distinguishes them is unreachable, and the collapse is that
+  // unreachability rather than a shared identity.
+  //
+  // Which makes this the seam-table evidence for keeping that branch TOTAL: it
+  // is the only thing separating these two mutants, and a function whose
+  // correctness rests on inputs its callers happen not to produce is correct by
+  // coincidence.
+  //
+  // The tripwire, and it is the same condition: they SEPARATE the moment any
+  // caller can pass an absent family bucket under a non-shared key. If a fourth
+  // caller appears and these rows still collapse, that caller is not covered.
+  ['weeklyGate        maximum never taken', GATE_MAX, '  return own;\n',
+    'src/model.js'],
+  ['weeklyGate        shared bucket never read', GATE_SHARED_READ,
+    '  const shared = null;\n', 'src/model.js'],
   // Per-bucket load attribution. Restoring the session-level sum charges every
   // account a split session touches with the session's whole context.
   ['loadFor           split session pooled across accounts', LOAD_BUCKET,

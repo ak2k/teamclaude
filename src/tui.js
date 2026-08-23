@@ -1,4 +1,5 @@
 import { createWriteStream } from 'node:fs';
+import { gatingUtilization } from './model.js';
 import { importCredentials, fetchProfile } from './oauth.js';
 import { sameIdentity, findUpsertTarget } from './identity.js';
 import { parseProxyUrl, proxyToUrl, describeProxy, resolveUpstreamProxy, setUpstreamProxy, getUpstreamProxy } from './upstream-proxy.js';
@@ -1221,14 +1222,25 @@ export class TUI {
         line += ` ${familyMark('fable')}F7  ${bar(q.unified7dFable, bw, q.unified7dFableReset)}`;
       }
     }
-    // Explicit "disabled for these models" tag (issue #85): a family whose own
-    // weekly bucket is over the switch threshold can't serve that model even
-    // while the account is otherwise active. A spent shared 5h blocks everything
-    // and is already conveyed by the Ses bar + status, so it's not repeated here.
+    // Explicit "disabled for these models" tag (issue #85): a family the account
+    // cannot serve even while it is otherwise active. A spent shared 5h blocks
+    // everything and is already conveyed by the Ses bar + status, so it is not
+    // repeated here.
+    //
+    // The threshold is compared against `gatingUtilization`, the same value the
+    // router gates on, NOT against the family bucket alone. Family spend meters
+    // into the shared weekly too, so an account under its family cap can be over
+    // the shared one and unable to serve that family at all; reading the family
+    // bucket alone left such an account with no tag while routing refused it.
+    // This tag displays a routing decision, so deriving it a second time here is
+    // a copy that drifts.
     const th = this.am.switchThreshold;
     const blocked = [];
-    if (q.unified7dSonnet != null && q.unified7dSonnet >= th) blocked.push('Sonnet');
-    if (q.unified7dFable != null && q.unified7dFable >= th) blocked.push('Fable');
+    for (const [label, key] of [['Sonnet', 'unified7dSonnet'], ['Fable', 'unified7dFable']]) {
+      if (q[key] == null) continue;           // family not metered separately here
+      const gating = gatingUtilization(q, key);
+      if (gating != null && gating >= th) blocked.push(label);
+    }
     if (blocked.length) line += `  ${red('⊘ ' + blocked.join(' '))}`;
     return line;
   }

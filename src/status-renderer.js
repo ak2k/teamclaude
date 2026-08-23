@@ -1,4 +1,4 @@
-import { findFamilyBlock, modelGlobOverlaps } from './model.js';
+import { findFamilyBlock, modelGlobOverlaps, gatingUtilization } from './model.js';
 
 const ESC = '\x1b[';
 const RESET = `${ESC}0m`;
@@ -145,32 +145,62 @@ function formatAccountStatus(account, now, paint) {
 // specific models" view. Only rendered for accounts that meter a family
 // separately (a Sonnet or Fable weekly bucket), since that is the only case
 // where a request's model changes where it can route. A family reads ✗ when the
-// shared 5h bucket is spent (blocks everything) or when its own weekly bucket is
-// over the switch threshold; the reset is shown when the family bucket is the
-// blocker so it's clear when that model becomes available on this account again.
+// shared 5h bucket is spent (blocks everything) or when the utilization that
+// GATES it is over the switch threshold, which is the higher of its own weekly
+// bucket and the shared weekly one, since family spend meters into both. The
+// reset shown is the family bucket's, so it says when that model becomes
+// available again on this account.
+//
+// That gating value comes from `gatingUtilization`, the same function the router
+// gates on, rather than being recomputed here. This row DISPLAYS a routing
+// decision, so a second derivation of it is a copy that drifts - and it drifted:
+// reading the family bucket alone printed `Fable ✓` on an account the routing
+// line three lines above had already marked unavailable, in one render.
 function modelRoutingLine(account, threshold, blocked, now, paint) {
   const q = account.quota || {};
+  const quota = q;
   if (q.unified7dSonnet == null && q.unified7dFable == null) return null;
   const t = Number(threshold);
   const fiveOver = q.unified5h != null && !Number.isNaN(t) && q.unified5h >= t;
 
-  const cell = (label, weekly, reset) => {
+  const cell = (label, bucketKey, reset) => {
     // The blocklist outranks quota: a blocked family cannot be served however
     // much headroom the account has, so it must not read ✓. Reporting quota
     // alone is what made a fully-blocked model look available.
     if (findFamilyBlock(blocked, label)) {
       return `${label} ${paint.red('⊘')}${paint.dim(' blocked')}`;
     }
-    const weeklyOver = weekly != null && !Number.isNaN(t) && weekly >= t;
+    // The GATE's value, not this bucket's. Family spend meters into the shared
+    // weekly too, so an account under its family cap can be over the shared one
+    // and unable to serve the family at all. Reading `weekly` alone printed
+    // `Fable OK` three lines under a routing line that had just refused it.
+    const gating = gatingUtilization(quota, bucketKey);
+    const weeklyOver = gating != null && !Number.isNaN(t) && gating >= t;
     const mark = fiveOver || weeklyOver ? paint.red('✗') : paint.green('✓');
-    const resetTs = parseTs(reset);
+    // The recovery time is the LATEST of the buckets currently over the
+    // threshold, not this bucket's reset. The gating value is a maximum, so it
+    // only falls below the threshold once EVERY blocking bucket has rolled:
+    // showing the family reset beside a mark the shared bucket produced told an
+    // operator that a week-long block clears tomorrow.
+    const over = [];
+    if (!Number.isNaN(t)) {
+      const own = quota?.[bucketKey];
+      if (own != null && own >= t) over.push(parseTs(reset));
+      if (bucketKey !== 'unified7d' && quota?.unified7d != null && quota.unified7d >= t) {
+        over.push(parseTs(quota.unified7dReset));
+      }
+    }
+    // An unreported reset among the blockers means the recovery time is unknown,
+    // and a known-but-earlier one would understate it. Say nothing rather than
+    // name a time that is not when this clears.
+    const resetTs = over.length && over.every(Boolean) ? Math.max(...over) : null;
     const when = weeklyOver && resetTs && resetTs > now ? paint.dim(` ${formatDuration(resetTs - now)}`) : '';
     return `${label} ${mark}${when}`;
   };
 
-  const cells = [cell('Opus', q.unified7d, q.unified7dReset)];
-  if (q.unified7dSonnet != null) cells.push(cell('Sonnet', q.unified7dSonnet, q.unified7dSonnetReset));
-  if (q.unified7dFable != null) cells.push(cell('Fable', q.unified7dFable, q.unified7dFableReset));
+  const cells = [cell('Opus', 'unified7d', q.unified7dReset)];
+  if (q.unified7dSonnet != null) cells.push(cell('Sonnet', 'unified7dSonnet', q.unified7dSonnetReset));
+  if (q.unified7dFable != null) cells.push(cell('Fable', 'unified7dFable', q.unified7dFableReset));
   return `${paint.dim('Models'.padEnd(8))} ${cells.join('   ')}`;
 }
 
