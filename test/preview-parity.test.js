@@ -249,24 +249,44 @@ test('the rendered Next request row names the account a plain request is served 
 // is the region the probe lives in, so the probe is stubbed and asserted unused:
 // otherwise a green here could mean the walk fell through to a mutation the
 // preview must never mirror.
+//
+// EVERY QUOTA VALUE HERE ARRIVES THROUGH `updateQuota`, from headers upstream
+// can send. My first fixture set `status = 'exhausted'` by hand and nothing in
+// the running system ever writes that value, so it graded this branch from a
+// state no fleet reaches. The reachable route is a DESYNCHRONISED five-hour
+// pair: `updateQuota` sets each field independently through `setQuotaField`,
+// which rejects an out-of-domain value and leaves the field where it was, so a
+// response carrying a 5h reset and no usable 5h utilization leaves the reset
+// set and the utilization null. `_expiredQuotaView` will not retire that
+// window — its guard is `q.unified5h != null` — so once the timestamp passes
+// the account carries a reset in the past permanently, while a spent weekly
+// keeps it out of every candidate set.
 test('the preview names the account the last resort reopens, and not by probing', () => {
   const now = Date.now();
+  const secs = ms => String(Math.floor(ms / 1000));
   const build = () => {
     const am = new AccountManager([acct('spent'), acct('offline')], 0.98,
       { expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 } });
-    am.accounts[0].status = 'exhausted';
-    am.accounts[0].rateLimitedUntil = now - 60_000;
-    am.accounts[0].quota = { ...am.accounts[0].quota,
-      unified5h: 0.99, unified5hReset: now + 2 * H,
-      unified7d: 0.5, unified7dReset: now + 100 * H };
+    am.updateQuota(0, {
+      'anthropic-ratelimit-unified-5h-reset': secs(now - 30 * 60e3),
+      'anthropic-ratelimit-unified-7d-utilization': '0.995',
+      'anthropic-ratelimit-unified-7d-reset': secs(now + 100 * H),
+    });
     am.accounts[1].disabled = true;
     am.setCurrentAccount(0);
     return am;
   };
 
   const previewed = build();
-  // The premise: ordinary selection must find nothing here, or the last resort
-  // is not what either side is answering with.
+  // Premise 1: the state is the one described above, and the fleet-wide refresh
+  // does not retire it. If either stops holding, this grades an ordinary fleet.
+  assert.equal(previewed.accounts[0].quota.unified5h, null,
+    'the 5h pair is no longer desynchronised, so nothing here needs the last resort');
+  previewed.refreshExpiredQuotas();
+  assert.ok(previewed.accounts[0].quota.unified5hReset < now,
+    'the refresh retired the past reset, which is the route this fixture depends on');
+  // Premise 2: ordinary selection must find nothing, or the last resort is not
+  // what either side is answering with.
   assert.equal(previewed._pickBestAvailable(null, null, null,
     { observe: true, fleet: previewed._observedFleet().accounts }), null,
     'an account was eligible after all, so this fixture never reaches the last resort');
