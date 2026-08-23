@@ -1,0 +1,78 @@
+{
+  "_source": "captured from a live /teamclaude/status on 2026-08-22; account identities anonymised, fields the caption gate does not read removed",
+  "_capturedAt": "2026-08-22T23:08:21Z",
+  "switchThreshold": 0.98,
+  "expiryRouting": {
+    "enabled": true,
+    "tolerance": 1.5,
+    "coverage": 1,
+    "preempt": true
+  },
+  "routes": [],
+  "accounts": [
+    {
+      "name": "account-a",
+      "type": "apikey",
+      "priority": 0,
+      "status": "active",
+      "disabled": false,
+      "load": 0,
+      "quota": {
+        "unified5h": 0.11,
+        "unified5hReset": 1787451000178,
+        "unified7d": 0.63,
+        "unified7dReset": 1787857200178,
+        "unified7dFable": 0.36,
+        "unified7dFableReset": 1787857200179
+      }
+    },
+    {
+      "name": "account-b",
+      "type": "apikey",
+      "priority": 0,
+      "status": "active",
+      "disabled": false,
+      "load": 889735,
+      "quota": {
+        "unified5h": 0.1,
+        "unified5hReset": 1787456400000,
+        "unified7d": 0.65,
+        "unified7dReset": 1787770800000,
+        "unified7dFable": 0.51,
+        "unified7dFableReset": 1787770800077
+      }
+    },
+    {
+      "name": "account-c",
+      "type": "apikey",
+      "priority": 0,
+      "status": "active",
+      "disabled": false,
+      "load": 506760,
+      "quota": {
+        "unified5h": 0.04,
+        "unified5hReset": 1787455800000,
+        "unified7d": 0.93,
+        "unified7dReset": 1787562000000,
+        "unified7dFable": 0.8,
+        "unified7dFableReset": 1787562000000
+      }
+    },
+    {
+      "name": "account-d",
+      "type": "apikey",
+      "priority": 0,
+      "status": "active",
+      "disabled": false,
+      "load": 245741,
+      "quota": {
+        "unified5h": 0.12,
+        "unified5hReset": 1787456400000,
+        "unified7d": 0.7,
+        "unified7dReset": 1787781600000,
+        "unified7dFable": 0.47,
+        "unified7dFableReset": 1787781600000
+      }
+    }
+  ]
+}
