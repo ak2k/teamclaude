@@ -260,8 +260,9 @@ function decisionLines(entry, status, paint) {
     out.push(`  ${paint.dim(label)}${ladderRow(row, paint)}`);
   }
   if (spare.length) {
-    const met = metAt(band);
-    const why = met ? `not needed; covered at p${met}` : 'not needed';
+    const rank = metAtRank(band);
+    const why = !targetMet(band) ? 'not needed'
+      : rank == null ? 'not needed; already covered' : `not needed; covered at p${rank}`;
     out.push(`  ${paint.dim('Spare'.padEnd(13))}${paint.dim(why)}`);
     for (const row of spare) out.push(`  ${' '.repeat(13)}${ladderRow(row, paint)}`);
   }
@@ -293,18 +294,45 @@ function decisionLines(entry, status, paint) {
 function bandSummary(band) {
   const of = `${band.admitted.length} of ${band.candidates} candidate${band.candidates === 1 ? '' : 's'}`;
   if (band.kind === 'sized') {
-    const met = metAt(band);
-    const where = met ? ` · met at p${met}` : ' · target not met';
+    const rank = metAtRank(band);
+    // `met at p-` rather than a fabricated ordinal or a bare "met": `p-` is the
+    // ladder's own token for a row the band did not order, so it points at the
+    // row that carried the total across instead of naming a rank that is not
+    // there.
+    const where = !targetMet(band) ? ' · target not met'
+      : rank == null ? ' · met at p-' : ` · met at p${rank}`;
     return `sized · ${formatCapacity(band.achieved)}x the ${formatTarget(band.target)} target${where} · ${of}`;
   }
   return `ratio rule · floor ${band.floor.toExponential(3)} · ${of} (${band.reason})`;
 }
 
-/** The rank at which the published running total first reached the published
- * target, or null when it never did. A scan over emitted numbers, not a replay
- * of the admission loop that emitted them. */
-function metAt(band) {
-  if (band.kind !== 'sized' || band.target == null) return null;
+/**
+ * WHETHER the admitted set reached the target: a state, read from the two
+ * figures the decision published.
+ *
+ * Kept separate from the rank below because they are different questions with
+ * different domains. Deriving the state from the rank overloaded null with two
+ * meanings — *never reached* and *reached on a row that has no rank* — and the
+ * second is ordinary: an absent-pressure row is admitted by the exemption, the
+ * sort could not order it, so its rank is legitimately null while its
+ * cumulative is what carried the total past the target. Reading that as "not
+ * met" printed `1.200x the 1.0 target · target not met` — the evidence and its
+ * denial seven words apart on one line.
+ */
+function targetMet(band) {
+  return band.kind === 'sized' && band.target != null && band.achieved != null
+    && band.achieved >= band.target;
+}
+
+/**
+ * WHICH rank crossed the target, or null when the crossing row had none.
+ *
+ * Null here means "no ordinal to point at" and never "not reached" — that is
+ * `targetMet`'s question, asked and answered before this one is. A scan over
+ * emitted numbers, not a replay of the admission loop that emitted them.
+ */
+function metAtRank(band) {
+  if (!targetMet(band)) return null;
   for (const row of band.ladder) {
     if (row.cumulative != null && row.cumulative >= band.target) return row.rank;
   }

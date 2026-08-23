@@ -60,6 +60,62 @@ test('the band row states achieved against target and where admission stopped', 
   assert.match(band, /2 of 3 candidates/);
 });
 
+test('a target crossed on an unranked row is not reported as unmet', () => {
+  // The exemption admits an absent-pressure row that the sort could not order,
+  // so the row carrying the total past the target has rank null. Deriving "was
+  // it met" from "which rank met it" read that null as never-reached and
+  // printed the denial next to the evidence.
+  const now = Date.now();
+  const am = new AccountManager(['ranked', 'exempt'].map(acct), 0.98,
+    { expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 } });
+  // headroom = (0.98 - unified5h) / 0.98, so 0.4 and 0.8 of the target
+  am.accounts[0].quota = {
+    ...am.accounts[0].quota,
+    unified5h: 0.98 * 0.6, unified5hReset: now + 2 * H,
+    unified7d: 0.5, unified7dReset: now + 40 * H,
+  };
+  // No reset: pressure absent, sorts last, admitted by the exemption
+  am.accounts[1].quota = {
+    ...am.accounts[1].quota,
+    unified5h: 0.98 * 0.2, unified5hReset: now + 2 * H,
+    unified7d: 0.5, unified7dReset: null,
+  };
+
+  const entry = am.getStatus().routing.find(e => e.scope === 'shared');
+  const crossing = entry.band.ladder.find(r => r.cumulative != null && r.cumulative >= entry.band.target);
+  assert.ok(entry.band.achieved >= entry.band.target, 'the premise: the target IS reached');
+  assert.equal(crossing.rank, null, 'the premise: the row that crossed it has no rank');
+
+  const band = row(render(am, now), 'Band');
+  assert.doesNotMatch(band, /target not met/,
+    'the line denies a target its own figure exceeds');
+  assert.match(band, /met at p-/,
+    'the crossing row has no ordinal, so the marker must point at p- rather than invent one');
+});
+
+test('a target genuinely not reached still says so', () => {
+  // The other side of the split: `target not met` must remain reachable, or the
+  // fix above would have replaced one wrong answer with the opposite one.
+  const now = Date.now();
+  const am = new AccountManager(['a', 'b'].map(acct), 0.98,
+    { expiryRouting: { enabled: true, coverage: 3, tolerance: 1.5 } });
+  am.accounts[0].quota = {
+    ...am.accounts[0].quota,
+    unified5h: 0.5, unified5hReset: now + 2 * H, unified7d: 0.1, unified7dReset: now + 20 * H,
+  };
+  am.accounts[1].quota = {
+    ...am.accounts[1].quota,
+    unified5h: 0.6, unified5hReset: now + 2 * H, unified7d: 0.3, unified7dReset: now + 40 * H,
+  };
+
+  const entry = am.getStatus().routing.find(e => e.scope === 'shared');
+  assert.ok(entry.band.achieved < entry.band.target, 'the premise: the target is NOT reached');
+
+  const band = row(render(am, now), 'Band');
+  assert.match(band, /target not met/);
+  assert.doesNotMatch(band, /met at p/, 'an unmet target reported a crossing rank');
+});
+
 test('capacity figures carry three decimals', () => {
   // `achieved >= coverage` is evaluated raw, so a coarser display can show a
   // target met while admission continues.
