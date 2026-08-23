@@ -373,7 +373,7 @@ function decisionLines(entry, status, blocked, paint) {
         label = ' '.repeat(13);
       }
     }
-    out.push(`  ${paint.dim(label)}${ladderRow(row, paint)}`);
+    out.push(`  ${paint.dim(label)}${ladderRow(row, entry.bucket, paint)}`);
     previous = group;
   }
   if (band.excluded.length) {
@@ -459,7 +459,7 @@ function metAtRank(band) {
 
 /** `p1  +0.959  name`, or a bare figure where measured capacity was not added,
  * or a word where there was no measurement to add. */
-function ladderRow(row, paint) {
+function ladderRow(row, scopeBucket, paint) {
   const rank = rankLabel(row).padEnd(4);
   let capacity;
   // `+` means THIS ROW'S HEADROOM IS IN `achieved`, which is exactly the rows
@@ -474,7 +474,20 @@ function ladderRow(row, paint) {
   else if (contributed) capacity = `+${formatCapacity(row.headroom.value)}`.padEnd(7);
   else capacity = ` ${formatCapacity(row.headroom.value)}`.padEnd(7);
   const note = row.pressure.kind === 'absent' ? paint.dim(`  (${row.pressure.reason})`) : '';
-  return `${paint.dim(rank)}${capacity} ${row.account}${note}`;
+  // THE WINDOW THIS ROW'S FIGURE CAME FROM, when it is not the one the block's
+  // header names. An account that does not meter the scope's family is measured
+  // on the shared weekly instead — `_routingReport` publishes that per row for
+  // exactly this reason — and without it a reader sees an ordinary rank under
+  // `[unified7dFable]` and concludes the account has a Fable reading. It does
+  // not. Silent when the buckets match, so the annotation means "this one is
+  // different" rather than becoming a column.
+  //
+  // The `Skipped` rows below already name their bucket, and for the same
+  // reason: a bucket and a figure from different windows on one line. This is
+  // the row type that never got that fix.
+  const bucket = row.bucket && scopeBucket && row.bucket !== scopeBucket
+    ? paint.dim(`  ${row.bucket}`) : '';
+  return `${paint.dim(rank)}${capacity} ${row.account}${bucket}${note}`;
 }
 
 /** An account the band never saw, and the measurement that removed it. */

@@ -568,6 +568,56 @@ test('the collapsed row names where the next request goes when nothing is under 
     'the row says nothing is eligible beside an Active row naming the account every request lands on');
 });
 
+// An account that does not meter the scope's family is ranked on the SHARED
+// weekly instead. Its pressure and headroom are both known, so the caption's
+// "missing either measurement" clause is true and says nothing about it — and a
+// reader sees an ordinary rank under a header naming `unified7dFable` and
+// concludes the account has a Fable reading. It does not. The payload has said
+// which window each row came from since the report was built; the ladder was
+// the one row type that never printed it, while `Skipped` beside it always has.
+//
+// BOTH DIRECTIONS IN ONE RENDER. A fixture where every row differs would pass
+// for a renderer that annotates unconditionally, which is a different defect
+// wearing the same green.
+test('a row measured on another window says so, and the rows on the scope\'s own window do not', () => {
+  const now = Date.now();
+  const am = new AccountManager([acct('meters-fable'), acct('no-fable-reading'), acct('c')], 0.98, {
+    expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 },
+    routes: [{ name: 'fable', match: ['*fable*'] }],
+  });
+  const q = (i, o) => { am.accounts[i].quota = { ...am.accounts[i].quota, ...o }; };
+  q(0, { unified5h: 0.05, unified5hReset: now + 2 * H, unified7d: 0.3, unified7dReset: now + 300 * H,
+    unified7dFable: 0.1, unified7dFableReset: now + 20 * H });
+  q(1, { unified5h: 0.1, unified5hReset: now + 2 * H, unified7d: 0.2, unified7dReset: now + 25 * H });
+  q(2, { unified5h: 0.2, unified5hReset: now + 2 * H, unified7d: 0.4, unified7dReset: now + 400 * H,
+    unified7dFable: 0.5, unified7dFableReset: now + 40 * H });
+
+  const entry = am.getStatus().routing.find(e => e.model && /fable/.test(e.model));
+  const odd = entry.band.ladder.find(r => r.account === 'no-fable-reading');
+  // The premises: one row genuinely measured elsewhere, and it is NOT an
+  // absent-measurement row — the caption's exemption already covers those, and
+  // grading this through one would test the note that was already there.
+  assert.equal(odd.bucket, 'unified7d', 'the odd row is measured on the scope bucket after all');
+  assert.equal(odd.pressure.kind, 'known', 'the odd row is missing a measurement, which is a different claim');
+  assert.ok(entry.band.ladder.some(r => r.bucket === entry.bucket),
+    'no row is on the scope bucket, so the silent half of this is untested');
+
+  const lines = render(am, now);
+  // BY THE RANK MARKER, not by the name: `meters-fable` also appears in the two
+  // destination rows above the ladder, and a first-match selector returns one of
+  // those — which carries no bucket, so every assertion below passed for a
+  // renderer that annotates unconditionally. Measured: that mutation survived
+  // until this line selected the row under test instead of the first line
+  // mentioning it.
+  const rowFor = name => lines.find(l => /\bp(\d+|-)\b/.test(l) && l.includes(name));
+  assert.match(rowFor('no-fable-reading'), /unified7d\b/,
+    'the row ranked on the shared weekly reads as though it had a Fable window');
+  for (const name of ['meters-fable', 'c']) {
+    assert.doesNotMatch(rowFor(name), /unified7d/,
+      `${name} is on the scope's own window, so naming it turns the exception into a column`);
+  }
+});
+
 test('one eligible account says there is nothing to choose between', () => {
   const now = Date.now();
   const am = new AccountManager(['a', 'b'].map(acct), 0.98,
