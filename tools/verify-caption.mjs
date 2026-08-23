@@ -41,17 +41,35 @@
 // a verdict from a broken instrument is worse than no verdict. Every number
 // below that line is downstream of that check passing.
 //
-// ── what a passing run means, and what it does not ──────────────────────────
+// ── the ORDER is the claim, so the order is what is compared ────────────────
 //
-// A caption is checked by the SET it admits and the coverage it reaches, not by
-// its rank order, because the set and the total are what `decideBand` publishes.
-// Two different orders can admit the same set on a given fleet, so a sample can
-// fail to tell a true caption from a false one. That is reported as
-// INDISTINGUISHABLE and fails the run: a sample that cannot discriminate has
-// produced no evidence, and a non-answer must never read as a pass.
+// An earlier version of this gate compared the SET a caption admits and the
+// coverage total it reaches, on the reasoning that those are what `decideBand`
+// publishes. Both are order-insensitive — a set has no sequence and a sum is
+// commutative — while the caption's entire claim is that a particular account
+// *goes first*. So the gate graded everything except the thing on trial.
+//
+// It was not a theoretical gap. Measured before the fix: transposing the top
+// two accounts of the shipped caption's own reading left the admitted set and
+// the total byte-identical and the caption graded REPRODUCES, with
+// `admits [3,2]` printed on the same line as `vs decision [2,3]`.
+//
+// `explainBand` publishes the sequence the band actually walked, so the order
+// is now read from the decision's own ladder and compared position by position.
+// The set and total are still checked, because a caption can be wrong in more
+// than one way and the failure line should say which.
+//
+// A sample can still fail to separate two orderings by set alone; that is
+// reported as INDISTINGUISHABLE and fails the run, because a sample that cannot
+// discriminate has produced no evidence and a non-answer must never read as a
+// pass. And `transposed-band-order` in the registry below is this gate's own red
+// control: the band's own order with two entries swapped, which admits the same
+// set with the same total by construction. A verdict that stops consulting order
+// grades it INDISTINGUISHABLE and the run fails, which is how a future edit that
+// reintroduces the original blindness gets caught rather than inherited.
 import fs from 'node:fs';
 import { AccountManager } from '../src/account-manager.js';
-import { decideBand, pressureOf, headroomOf } from '../src/band-decision.js';
+import { decideBand, explainBand, pressureOf, headroomOf } from '../src/band-decision.js';
 import { ruleCaption } from '../src/status-renderer.js';
 
 const argv = process.argv.slice(2);
@@ -113,6 +131,30 @@ const CAPTIONS = [
     shipped: false,
     pinned: 'the least-used weekly bucket goes first',
     score: a => (a.utilization == null || !Number.isFinite(a.utilization) ? null : -a.utilization),
+  },
+  {
+    // THE ORDER CONTROL. Not a sentence anyone would write — it is this gate's
+    // red control for the one property it exists to grade.
+    //
+    // The band's own order with its first two entries swapped. Both are admitted
+    // (coverage is not met until at least the second), so the admitted SET and
+    // the coverage TOTAL are identical to the decision's by construction, and
+    // the only difference is sequence. A verdict that stops consulting order
+    // therefore grades this INDISTINGUISHABLE and the run fails — which is how a
+    // future edit that reintroduces the original blindness gets caught.
+    //
+    // Its premise is asserted below rather than assumed: if the swap changes the
+    // admitted set on some sample, it is no longer an order-only control there
+    // and the run refuses instead of quietly grading something else.
+    id: 'transposed-band-order',
+    shipped: false,
+    pinned: "the band's own order with its first two entries swapped",
+    score: (a, now) => {
+      const p = pressureOf(a, now);
+      return p.kind === 'known' ? p.value : null;
+    },
+    reorder: ordered => [ordered[1], ordered[0], ...ordered.slice(2)],
+    orderOnly: true,
   },
 ];
 
@@ -265,22 +307,43 @@ function orderBy(score) {
 
 const sameSet = (a, b) => a.length === b.length && [...a].sort((x, y) => x - y).join() === [...b].sort((x, y) => x - y).join();
 const sameTotal = (a, b) => Math.abs(a - b) < 1e-9;
+const sameOrder = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
 
-// ── harness self-check ──────────────────────────────────────────────────────
-const identity = replay(orderBy(a => {
+// The sequence the band actually walked, read from the decision's own published
+// ladder rather than re-sorted here. Lower-tier rows are appended without ever
+// being compared, so they are not part of any ordering claim.
+const codeOrder = explainBand(snapshot).ladder
+  .filter(r => r.reason !== 'lower-tier')
+  .map(r => r.account.index);
+
+// Two ranked accounts minimum, or the order control below cannot transpose and
+// the run would have no evidence the verdict consults order at all.
+if (codeOrder.length < 2) {
+  refuse('the sample has fewer than two ranked accounts, so the order control cannot run; '
+    + 'without it this run has no evidence the gate can see order');
+}
+
+const pressureScore = a => {
   const p = pressureOf(a, snapshot.now);
   return p.kind === 'known' ? p.value : null;
-}));
-const harnessOk = sameSet(identity.keep, decided.keep) && sameTotal(identity.achieved, decided.achieved);
+};
+
+// ── harness self-check ──────────────────────────────────────────────────────
+const identityOrdering = orderBy(pressureScore);
+const identity = replay(identityOrdering);
+const identityOrder = identityOrdering.map(a => a.index);
+const harnessOk = sameOrder(identityOrder, codeOrder)
+  && sameSet(identity.keep, decided.keep) && sameTotal(identity.achieved, decided.achieved);
 console.log(`\nharness    replaying the CODE's own order reproduces the decision: ${harnessOk ? 'yes' : 'NO'}`);
 if (!harnessOk) {
-  console.error(`  decideBand kept [${decided.keep}] achieving ${decided.achieved.toFixed(3)}`);
-  console.error(`  replay     kept [${identity.keep}] achieving ${identity.achieved.toFixed(3)}`);
+  console.error(`  ladder order [${codeOrder}]  decideBand kept [${decided.keep}] achieving ${decided.achieved.toFixed(3)}`);
+  console.error(`  replay order [${identityOrder}]  replay     kept [${identity.keep}] achieving ${identity.achieved.toFixed(3)}`);
   console.error('  the admission replay has drifted from sizeByCapacity. No caption verdict is printed:');
   console.error('  every verdict this tool could give is downstream of this check, so all of them are void.');
   process.exit(1);
 }
 console.log(`           coverage ${snapshot.coverage} met at p${identity.metAt ?? '-'} of ${tier.length} ranked`);
+console.log(`           the band walked [${codeOrder}], which is the sequence each caption is graded against`);
 
 const unmeasuredRows = tier.filter(a => {
   const p = pressureOf(a, snapshot.now);
@@ -296,18 +359,35 @@ if (unmeasuredRows) {
 const results = [];
 for (const caption of CAPTIONS) {
   if (ONLY && caption.id !== ONLY) continue;
-  const got = replay(orderBy(caption.score));
-  const reproduces = sameSet(got.keep, decided.keep) && sameTotal(got.achieved, decided.achieved);
+  const ordering = caption.reorder ? caption.reorder(orderBy(caption.score)) : orderBy(caption.score);
+  const got = replay(ordering);
+  const gotOrder = ordering.map(a => a.index);
+  // An order-only control has to BE order-only on this sample, or it is grading
+  // something other than sequence and its verdict says nothing about order.
+  if (caption.orderOnly
+    && !(sameSet(got.keep, decided.keep) && sameTotal(got.achieved, decided.achieved))) {
+    refuse(`the order control changed the admitted set on this sample `
+      + `([${got.keep}] achieving ${got.achieved.toFixed(3)} against [${decided.keep}] `
+      + `achieving ${decided.achieved.toFixed(3)}), so it is not an order-only control here `
+      + 'and cannot show that the verdict consults order');
+  }
+  // Order first, because it is the caption's actual claim; set and total are
+  // still checked so a caption wrong in more than one way says which.
+  const orderMatches = sameOrder(gotOrder, codeOrder);
+  const reproduces = orderMatches
+    && sameSet(got.keep, decided.keep) && sameTotal(got.achieved, decided.achieved);
   let verdict;
   if (caption.shipped) verdict = reproduces ? 'REPRODUCES' : 'FALSIFIED';
   else verdict = reproduces ? 'INDISTINGUISHABLE' : 'DIFFERS';
-  results.push({ caption, got, verdict, text: textOf(caption) });
+  results.push({ caption, got, gotOrder, orderMatches, verdict, text: textOf(caption) });
 }
 
 console.log('');
 for (const r of results) {
   console.log(`${r.verdict.padEnd(18)} ${r.caption.id}${r.caption.shipped ? '  (shipped)' : '  (control)'}`);
   console.log(`                   "${r.text}"`);
+  console.log(`                   orders [${r.gotOrder}] vs the band's [${codeOrder}]`
+    + `   ${r.orderMatches ? 'same sequence' : 'DIFFERENT SEQUENCE'}`);
   console.log(`                   admits [${r.got.keep}] achieving ${r.got.achieved.toFixed(3)}` +
     `   vs decision [${decided.keep}] achieving ${decided.achieved.toFixed(3)}`);
   if (r.verdict === 'INDISTINGUISHABLE') {

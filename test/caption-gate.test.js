@@ -36,8 +36,48 @@ test('the shipped caption still describes what decideBand does', () => {
   // that graded nothing, because the harness aborts before printing verdicts.
   assert.match(out, /harness {4}replaying the CODE's own order reproduces the decision: yes/);
   assert.match(out, /REPRODUCES {9}unspent-weekly-per-hour/);
-  assert.equal((out.match(/^DIFFERS/gm) || []).length, 2);
+  // Three controls now: two falsified captions and the transposed-order control.
+  assert.equal((out.match(/^DIFFERS/gm) || []).length, 3);
   assert.doesNotMatch(out, /INDISTINGUISHABLE/);
+});
+
+test('the gate grades the ORDER, which is what the caption claims', () => {
+  // Set membership and a coverage total are both order-insensitive, and the
+  // caption's whole claim is that a particular account goes first. Grading only
+  // those two let a transposed reading pass: measured before this changed, the
+  // shipped caption with its top two swapped graded REPRODUCES while printing
+  // `admits [3,2]` beside `vs decision [2,3]`.
+  const { code, out } = gate([`--sample=${SAMPLE}`, '--model=claude-fable-5', `--now=${NOW}`]);
+  assert.equal(code, 0, out);
+  assert.match(out, /the band walked \[[\d,]+\], which is the sequence each caption is graded against/);
+  assert.match(out, /orders \[[\d,]+\] vs the band's \[[\d,]+\] {3}same sequence/);
+  assert.match(out, /DIFFERENT SEQUENCE/,
+    'no control differed on order, so the comparison was never exercised');
+});
+
+test("the gate's order control must differ, or its verdicts are set membership in an ordering's words", () => {
+  // The gate's own red control: the band's order with two entries swapped,
+  // which admits the same set with the same total by construction, so only a
+  // sequence comparison can see it. It is graded through the ordinary caption
+  // path rather than asserted separately — a control checked by different
+  // machinery than the captions proves nothing about the captions.
+  const { code, out } = gate([`--sample=${SAMPLE}`, '--model=claude-fable-5', `--now=${NOW}`]);
+  assert.equal(code, 0, out);
+  assert.match(out, /DIFFERS {12}transposed-band-order {2}\(control\)/,
+    'the transposed order graded as reproducing, so the verdict is not consulting sequence');
+  // Its premise, printed: the SAME admitted set and total as the decision, so
+  // the only thing that can have separated them is sequence. Compared as sets,
+  // because the replay lists what it admitted in walk order while the decision
+  // lists it in tier order — the difference that makes this control order-only
+  // is exactly the difference a string comparison would trip over.
+  const lines = out.split('\n');
+  const admits = lines[lines.findIndex(l => l.includes('transposed-band-order')) + 3];
+  const [, got, gotTotal, want, wantTotal] =
+    admits.match(/admits \[([\d,]+)\] achieving ([\d.]+) +vs decision \[([\d,]+)\] achieving ([\d.]+)/);
+  assert.deepEqual(got.split(',').sort(), want.split(',').sort(),
+    'the control changed the admitted set, so it is not an order-only control here');
+  assert.equal(gotTotal, wantTotal, 'the control changed the coverage total');
+  assert.notEqual(got, want, 'the control did not reorder anything');
 });
 
 test('a sample read without its capture clock is refused, not guessed at', () => {
