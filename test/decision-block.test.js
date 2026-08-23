@@ -300,50 +300,66 @@ test('a route pin is what the block names, even with distribution on', () => {
   assert.match(line, /route pin/, 'the block credits a term when a pin decided');
 });
 
-test('a pin that fell through is not credited, and is not hidden either', () => {
-  // `setRoutePin` documents pinning a near-quota or throttled account as
-  // supported: it acts as a preference and routing falls back to best-available
-  // until the pinned account is eligible. Branching on the pin's EXISTENCE
-  // therefore credited a pin that had not acted — and worse, suppressed the
-  // reason that had, sending a reader debugging the destination to the pin.
+test('a pin that fell through names the destination the router chose, not the pick', () => {
+  // `_selectRoute:421` skips the session-distribution path whenever a pin is set
+  // for this scope — EXISTENCE, not eligibility. So while any pin is set, a new
+  // session goes wherever the router's own order sends it and no pick term
+  // applies. The block must therefore name `entry.target` and must not credit a
+  // term, while still disclosing that the pin did not act.
   //
-  // Four accounts, because removing the pinned one must still leave a band that
-  // sizes; on two or three the scope passes through and the block renders
-  // nothing, which reads as agreement.
+  // THE FIXTURE MAKES THE TWO CANDIDATE DESTINATIONS DIFFER. An earlier version
+  // had the current account as both the router's choice AND the load-ranked
+  // winner, so `target === pick.account` and every assertion passed whichever
+  // one the code printed. Here `current` is usable but its weekly window is
+  // furthest out, so the pick names someone else.
   const now = Date.now();
   const build = pinnedHealthy => {
-    const am = new AccountManager(['a', 'b', 'c', 'pinned'].map(acct), 0.98, {
+    const am = new AccountManager(['current', 'ranked', 'third', 'pinned'].map(acct), 0.98, {
       expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 },
       routes: [{ name: 'fable', match: ['*fable*'] }],
       distributeSessions: true,
     });
-    am.accounts.forEach((x, i) => {
-      x.quota = { ...x.quota,
-        unified5h: 0.05 + i * 0.1, unified5hReset: now + 2 * H,
-        unified7d: 0.1 + i * 0.1, unified7dReset: now + (20 + i * 10) * H,
-        unified7dFable: 0.1 + i * 0.1, unified7dFableReset: now + (30 + i * 10) * H };
-    });
-    // Near-quota rather than disabled: the state the docstring names.
-    if (!pinnedHealthy) am.accounts[3].quota = { ...am.accounts[3].quota, unified5h: 0.99 };
+    const q = (i, o) => { am.accounts[i].quota = { ...am.accounts[i].quota, ...o }; };
+    q(0, { unified5h: 0.2, unified5hReset: now + 2 * H, unified7d: 0.8, unified7dReset: now + 400 * H,
+      unified7dFable: 0.8, unified7dFableReset: now + 400 * H });
+    q(1, { unified5h: 0.05, unified5hReset: now + 2 * H, unified7d: 0.1, unified7dReset: now + 20 * H,
+      unified7dFable: 0.1, unified7dFableReset: now + 20 * H });
+    q(2, { unified5h: 0.1, unified5hReset: now + 2 * H, unified7d: 0.2, unified7dReset: now + 30 * H,
+      unified7dFable: 0.2, unified7dFableReset: now + 30 * H });
+    q(3, { unified5h: pinnedHealthy ? 0.1 : 0.99, unified5hReset: now + 2 * H,
+      unified7d: 0.3, unified7dReset: now + 40 * H,
+      unified7dFable: 0.3, unified7dFableReset: now + 40 * H });
+    am.setCurrentAccount(0);
     assert.equal(am.setRoutePin('fable', 3).ok, true, 'the premise: the pin was accepted');
     return am;
   };
 
-  const fellThrough = build(false).getStatus();
-  const entry = fellThrough.routing.find(e => e.route === 'fable');
+  const status = build(false).getStatus();
+  const entry = status.routing.find(e => e.route === 'fable');
   assert.equal(entry.pinnedTo, 'pinned', 'the premise: a pin is set');
-  assert.notEqual(entry.target, 'pinned', 'the premise: it did not win, so crediting it would be false');
-  const newSession = row(renderStatus(fellThrough, { color: false, now }).split('\n'), 'New session');
-  assert.doesNotMatch(newSession, /route pin\)/, 'the block credits a pin that did not act');
-  assert.match(newSession, /by \w+/, 'the reason that DID choose is suppressed by the pin branch');
+  assert.notEqual(entry.target, 'pinned', 'the premise: it did not win');
+  assert.notEqual(entry.target, entry.pick.account,
+    'the premise: the two candidate destinations differ, or this cannot tell them apart');
+
+  // What a new session actually gets, on a fresh manager.
+  const served = build(false).getActiveAccount(null, 'claude-fable-5', null, 'sess-1', {});
+  assert.equal(served.name, entry.target,
+    'the premise: with a pin set, the session path is skipped and the router decides');
+
+  const newSession = row(renderStatus(status, { color: false, now }).split('\n'), 'New session');
+  assert.match(newSession, new RegExp(`→ ${entry.target}\\b`),
+    'the block names the load-ranked winner on a fleet where load ranking never ran');
+  assert.doesNotMatch(newSession, /by \w+/,
+    'a pick term is credited, and no pick term applied');
   assert.match(newSession, /pin to pinned is not eligible/,
     'a pin the operator set vanished from the block, which reads as no pin at all');
 
-  // Control: the same fixture with the pinned account healthy. Without this the
-  // assertions above pass for a block that never credits a pin at all.
+  // Control: the same fixture with the pinned account healthy. Without it these
+  // assertions pass for a block that never credits a pin at all.
   const honoured = build(true).getStatus();
   assert.equal(honoured.routing.find(e => e.route === 'fable').target, 'pinned');
-  assert.match(row(renderStatus(honoured, { color: false, now }).split('\n'), 'New session'), /→ pinned .*route pin/,
+  assert.match(row(renderStatus(honoured, { color: false, now }).split('\n'), 'New session'),
+    /→ pinned .*route pin/,
     'an honoured pin is not credited, so the block cannot distinguish the two cases');
 });
 

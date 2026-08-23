@@ -279,14 +279,26 @@ function decisionLines(entry, status, blocked, paint) {
   // for a destination the ordinary ranking chose. Worse than a wrong label: it
   // replaced the true reason with a false one, so a reader debugging why traffic
   // sits on that account was sent to look at the pin.
+  // WHICH PATH RUNS is the question, and it is answered by the pin's EXISTENCE:
+  // `_selectRoute:421` skips the session-distribution path whenever a pin is set
+  // for this scope, eligible or not. So while any pin is set, a new session goes
+  // wherever the router's own order sends it — `entry.target` — and no pick term
+  // applies at all.
+  //
+  // Keying this branch on whether the pin was HONOURED instead was wrong in the
+  // other direction: it corrected the reason and broke the destination, naming
+  // the load-ranked winner on a fleet where load ranking never ran. Honoured
+  // versus fell-through is a property of the REASON, not of the destination.
   const pinHonoured = Boolean(entry.pinnedTo) && entry.target === entry.pinnedTo;
-  // And a pin that fell through must not vanish from the block either. The
-  // operator set it and is watching for it; silence reads as "no pin here".
-  const pinNote = entry.pinnedTo && !pinHonoured
-    ? `; pin to ${entry.pinnedTo} is not eligible` : '';
-  if (!distributing || pinHonoured) {
-    const why = pinHonoured ? `route pin${distributing ? '' : '; distribution off'}`
-      : `distribution off; not load-ranked${pinNote}`;
+  if (!distributing || entry.pinnedTo) {
+    // Three states, three sentences. A pin that fell through still names itself:
+    // the operator set it and is watching for it, and silence reads as no pin.
+    let why;
+    if (pinHonoured) why = `route pin${distributing ? '' : '; distribution off'}`;
+    else if (entry.pinnedTo) {
+      why = `pin to ${entry.pinnedTo} is not eligible; the router's own order decided`
+        + (distributing ? '' : '; distribution off');
+    } else why = 'distribution off; not load-ranked';
     if (entry.target) {
       out.push(`  ${paint.dim('New session'.padEnd(13))}${paint.dim('→')} ${entry.target} `
         + `${paint.dim(`(${why})`)}`);
@@ -297,7 +309,7 @@ function decisionLines(entry, status, blocked, paint) {
     const tie = pick.tiedWith.length
       ? `first of ${pick.tiedWith.length + 1} tied on every term, config order`
       : term;
-    out.push(`  ${paint.dim('New session'.padEnd(13))}${paint.dim('→')} ${pick.account} ${paint.dim(`(${tie}${pinNote})`)}`);
+    out.push(`  ${paint.dim('New session'.padEnd(13))}${paint.dim('→')} ${pick.account} ${paint.dim(`(${tie})`)}`);
   } else {
     out.push(`  ${paint.dim('New session'.padEnd(13))}${paint.dim('nothing eligible for this scope')}`);
   }
