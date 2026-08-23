@@ -276,6 +276,84 @@ test('each entry names the family its own figures were computed for', () => {
   }
 });
 
+// A GLOB IS NOT A FAMILY. `*fable*` happens to strip to a string whose family
+// resolves correctly, which is why every fixture above passes with the glob
+// used as a model id. `claude-*` strips to `claude-`, which resolves to the
+// SHARED bucket, so one entry answered for Opus, Sonnet and Fable at once —
+// with the shared weekly's band, ladder and destination.
+function familyFleet(now, routes) {
+  const am = fleet({ accounts: ['idle', 'opus-best', 'sonnet-best', 'fable-best'], routes });
+  // Out of the way, so every destination below comes from ranking rather than
+  // from the current account sitting still.
+  am.accounts[0].disabled = true;
+  quota(am, 0, { unified5h: 0.05, unified7d: 0.5, unified7dReset: now + 500 * H });
+  quota(am, 1, {
+    unified5h: 0.05, unified7d: 0.1, unified7dReset: now + 20 * H,
+    unified7dSonnet: 0.9, unified7dSonnetReset: now + 500 * H,
+    unified7dFable: 0.9, unified7dFableReset: now + 500 * H,
+  });
+  quota(am, 2, {
+    unified5h: 0.05, unified7d: 0.9, unified7dReset: now + 500 * H,
+    unified7dSonnet: 0.1, unified7dSonnetReset: now + 20 * H,
+    unified7dFable: 0.9, unified7dFableReset: now + 500 * H,
+  });
+  quota(am, 3, {
+    unified5h: 0.05, unified7d: 0.9, unified7dReset: now + 500 * H,
+    unified7dSonnet: 0.9, unified7dSonnetReset: now + 500 * H,
+    unified7dFable: 0.1, unified7dFableReset: now + 20 * H,
+  });
+  return am;
+}
+
+test('a glob spanning families publishes one entry per family, each with a real model id', () => {
+  const now = Date.now();
+  const routes = [{ name: 'broad', match: ['claude-*'] }];
+  const entries = familyFleet(now, routes).getStatus().routing.filter(e => e.route === 'broad');
+
+  assert.equal(entries.length, 3, 'a family-spanning glob published one answer for every family');
+  assert.deepEqual(entries.map(e => e.bucket),
+    ['unified7d', 'unified7dSonnet', 'unified7dFable'],
+    'the entries do not cover one bucket each');
+  // The premise: on this fleet the three families genuinely go to three
+  // different accounts, so an entry copying another family's answer is visible.
+  assert.equal(new Set(entries.map(e => e.target)).size, 3,
+    'the fixture sends every family to the same account, so the entries cannot be told apart');
+
+  for (const entry of entries) {
+    // Each entry, against a request for the model that entry claims to be
+    // about, on a manager of its own.
+    const served = familyFleet(now, routes);
+    const account = served.getActiveAccount(null, entry.model, null, null, {});
+    assert.equal(entry.target, account ? account.name : null,
+      `${entry.model}: the entry names ${entry.target}, a request for it is served by ${account?.name}`);
+    assert.equal(entry.bucket, served._weeklyBucketFor(entry.model),
+      `${entry.model}: the entry's bucket is not the one a request for it is metered on`);
+  }
+});
+
+test('a glob naming no metered family stays one scope on the shared bucket', () => {
+  const now = Date.now();
+  const entries = familyFleet(now, [{ name: 'other', match: ['gpt-*'] }])
+    .getStatus().routing.filter(e => e.route === 'other');
+  assert.equal(entries.length, 1, 'a glob that names no family was split per family anyway');
+  assert.equal(entries[0].bucket, 'unified7d');
+});
+
+test('a family an earlier route captures is not claimed by a later one', () => {
+  // Routes match in order, so `*fable*` above `claude-*` takes Fable with it.
+  // An entry for a family this route never receives claims a destination for
+  // traffic that goes somewhere else entirely.
+  const now = Date.now();
+  const routes = [{ name: 'fable', match: ['*fable*'] }, { name: 'broad', match: ['claude-*'] }];
+  const report = familyFleet(now, routes).getStatus().routing;
+
+  assert.deepEqual(report.filter(e => e.route === 'broad').map(e => e.model),
+    ['claude-opus-4-5', 'claude-sonnet-4-6'],
+    'the broad route claims a family the fable route receives');
+  assert.deepEqual(report.filter(e => e.route === 'fable').map(e => e.bucket), ['unified7dFable'],
+    'the premise: the earlier route is the one reporting Fable');
+});
+
 test('two routes sharing a name each carry their own metadata and target', () => {
   // Route names are not unique. A consumer joining an entry back to routes[] by
   // name attaches this decision to another route's globs and another route's

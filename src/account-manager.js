@@ -1,6 +1,6 @@
 import { refreshAccessToken, isTokenExpiringSoon, isTokenExpired } from './oauth.js';
 import { sameIdentity } from './identity.js';
-import { weeklyBucketForModel, modelGlobMatches, gatingSource, WEEKLY_BUCKET_KEYS } from './model.js';
+import { weeklyBucketForModel, modelGlobMatches, gatingSource, WEEKLY_BUCKET_KEYS, familyModelsMatching } from './model.js';
 import { SessionTracker } from './session-tracker.js';
 import { WindowWatcher } from './window-watcher.js';
 import { decideBand, explainBand, pressureOf, assertNever } from './band-decision.js';
@@ -1656,13 +1656,16 @@ export class AccountManager {
   _routingReport(now = Date.now(), observed = this._observedFleet(now)) {
     const scopes = [{ scope: 'shared', route: null, model: null, match: [], autocreated: false }];
     for (const route of this.getRoutes(observed)) {
-      // ONE ENTRY PER FAMILY, not per route. A route matching two globs has two
-      // governing buckets and therefore two different bands and two different
-      // picks; publishing one entry for it presented the first family's answer
-      // as the answer for every family the route matches. Each entry now names
-      // the single glob whose model its figures were computed for.
+      // ONE ENTRY PER FAMILY, not per route and not per glob. A route matching
+      // two families has two governing buckets and therefore two different
+      // bands and two different picks; publishing one entry for it presented
+      // the first family's answer as the answer for every family the route
+      // matches. Each entry names the glob it came from and the REAL model id
+      // its figures were computed for — never the glob with its wildcards
+      // filed off, which is an id nobody sends and which resolves to the shared
+      // bucket whatever the route actually carries.
       const globs = route.autocreated ? [{ glob: route.match[0], model: route.sample }]
-        : route.match.map(glob => ({ glob, model: glob.replace(/\*/g, '') || 'model' }));
+        : route.match.flatMap(glob => this._scopeModelsFor(glob, route).map(model => ({ glob, model })));
       for (const { glob, model } of globs) {
         scopes.push({
           scope: 'route', route: route.name, model,
@@ -1755,6 +1758,27 @@ export class AccountManager {
         },
       };
     });
+  }
+
+  /**
+   * The models one of a route's globs answers for: one per weekly bucket the
+   * glob can actually carry.
+   *
+   * ONLY the families this route RECEIVES. Routes are matched in order, so an
+   * earlier route can capture a family a later route's glob also names, and
+   * publishing an entry for it would claim a destination for traffic this route
+   * never sees. The ownership test compares the route the model resolves to
+   * with this one by identity rather than by name, because route names are not
+   * unique — the same reason `pinnedTo` is carried rather than looked up.
+   *
+   * A glob naming no metered family (`gpt-*`) falls back to its literal core,
+   * which is the shared bucket and is the right answer for it: there is one
+   * scope, not one per family.
+   */
+  _scopeModelsFor(glob, route) {
+    const owned = familyModelsMatching(glob)
+      .filter(m => this._routeForModel(m)?.match === route.match);
+    return owned.length ? owned : [glob.replace(/\*/g, '') || 'model'];
   }
 
   /** The name of the account a request for `model` would land on right now, or

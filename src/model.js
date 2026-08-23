@@ -45,6 +45,26 @@ export function weeklyBucketForModel(model) {
 export const WEEKLY_BUCKET_KEYS = Object.freeze(
   [...new Set([...Object.values(FAMILY_WEEKLY_BUCKET), 'unified7d'])]);
 
+// One CONCRETE model id per weekly bucket a request can meter into, in the
+// order a reader meets them: the shared bucket first, then the families that
+// meter their own.
+//
+// A GLOB IS NOT A MODEL, which is what these exist to stop. Stripping the
+// wildcards off `claude-*` yields `claude-`, an id nobody sends, whose family
+// resolves to 'other' and therefore to the shared weekly bucket — so a route
+// spanning Opus and Fable published the shared bucket's band, its ladder and
+// its destination as the answer for Fable requests that are metered somewhere
+// else entirely. Answering per family means answering with an id that family
+// actually uses.
+export const FAMILY_MODELS = Object.freeze(['claude-opus-4-5', 'claude-sonnet-4-6', 'claude-fable-5']);
+
+// The family representatives a glob can carry, in FAMILY_MODELS order. Empty
+// when the glob names no family this proxy meters separately (`gpt-*`), which
+// the caller reads as "one scope, on the shared bucket" rather than as an error.
+export function familyModelsMatching(glob) {
+  return FAMILY_MODELS.filter(m => modelGlobMatches(glob, m));
+}
+
 // Match a shell-style glob against a model id. Only `*` is special (matches any
 // run of characters, including none); every other character is literal. The
 // comparison is case-insensitive. Used by configurable routes so a pattern like
