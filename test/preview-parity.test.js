@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AccountManager } from '../src/account-manager.js';
+import { renderStatus } from '../src/status-renderer.js';
 
 // THE INVARIANT, enforced rather than promised:
 //
@@ -134,6 +135,64 @@ test('the preview matches selection for a routed model, pinned or not', () => {
   for (const [label, arrange] of ROUTED) {
     parity(label, arrange, 'claude-fable-5', { routes });
   }
+});
+
+// THE BLOCK HAS TWO DESTINATION ROWS ANSWERING TWO DIFFERENT QUESTIONS, and
+// they need two different oracles. Everything above drives a SESSION-LESS
+// request, which is the right oracle for `Next request` and cannot be the one
+// for `New session` — that row is a claim about a request carrying a new
+// session id, and the session-distribution path only runs for such a request.
+//
+// Grading one row and not the other is how a regression landed in the row that
+// was ungraded: the condition selecting between the two destinations was
+// changed, the session-less oracle agreed either way, and nothing failed.
+const NEW_SESSION_STATES = [
+  ['no pin, so the session-distribution path RUNS', () => {}],
+  ['an ineligible pin, so that path is SKIPPED', am => {
+    am.accounts[2].quota = { ...am.accounts[2].quota, unified5h: 0.99 };
+    am.setRoutePin('fable', 2);
+  }],
+  ['an eligible pin, which wins outright', am => { am.setRoutePin('fable', 2); }],
+];
+
+test('the block names the account a NEW SESSION is served by, which is a different question', () => {
+  const routes = [{ name: 'fable', match: ['*fable*'] }];
+  const model = 'claude-fable-5';
+  let distinguished = 0;
+
+  for (const [label, arrange] of NEW_SESSION_STATES) {
+    const now = Date.now();
+    // Distribution ON, or both rows resolve through `_select` and the
+    // interesting arm is vacuous — the two candidate destinations become the
+    // same account for a reason unrelated to anything under test.
+    const opts = { routes, distributeSessions: true };
+    const observed = baseFleet(now, opts);
+    arrange(observed);
+    const served = baseFleet(now, opts);
+    arrange(served);
+
+    const entry = observed.getStatus().routing.find(e => e.route === 'fable');
+    // The premise `baseFleet` exists to provide: the router's choice and the
+    // load-ranked winner must differ, or this cannot tell which one is printed.
+    if (entry.target !== entry.pick.account) distinguished += 1;
+
+    const account = served.getActiveAccount(null, model, null, `sess-${label}`, {});
+    const expected = account ? account.name : null;
+    // THE RENDERER'S OWN OUTPUT, not a model of it. Computing what the block
+    // "would" print from `pinnedTo` and `pick` would test a second derivation
+    // against the oracle and leave the renderer free to disagree with both —
+    // which is the defect class this whole round has been removing.
+    const lines = renderStatus(observed.getStatus(), { color: false, now }).split('\n');
+    const rowText = (lines.find(l => l.trim().startsWith('New session')) || '');
+    const shown = (rowText.match(/→ (\S+)/) || [])[1] ?? null;
+    assert.ok(rowText, `${label}: no New session row rendered, so nothing is being compared`);
+    assert.equal(shown, expected,
+      `${label}: the block names ${shown}, a new session is served by ${expected}`);
+  }
+
+  assert.ok(distinguished > 0,
+    'no state had the router and the pick disagreeing, so every assertion above held '
+    + 'whichever destination the block printed');
 });
 
 test('the states that must move the answer do move it', () => {
