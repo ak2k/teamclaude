@@ -157,6 +157,41 @@ test('the printed contributions add up to the published total', () => {
     'the lower-tier row claims a contribution the coverage total never took');
 });
 
+test('the ladder renders in the order the band walked it', () => {
+  // The ladder is a SEQUENCE — that is the whole reason it is published rather
+  // than recomputed. An account admitted by the exemption sorts LAST, after
+  // coverage was already met, so grouping the admitted rows above the held ones
+  // lifted it above a row the walk reached first and printed an admission order
+  // that did not happen.
+  const now = Date.now();
+  const am = new AccountManager(['a', 'b', 'held', 'exempt'].map(acct), 0.98,
+    { expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 } });
+  const q = (i, o) => { am.accounts[i].quota = { ...am.accounts[i].quota, ...o }; };
+  q(0, { unified5h: 0.05, unified5hReset: now + 2 * H, unified7d: 0.1, unified7dReset: now + 20 * H });
+  q(1, { unified5h: 0.15, unified5hReset: now + 2 * H, unified7d: 0.3, unified7dReset: now + 40 * H });
+  q(2, { unified5h: 0.3, unified5hReset: now + 2 * H, unified7d: 0.6, unified7dReset: now + 200 * H });
+  // No reset: absent pressure, so it sorts last and is admitted by the exemption
+  // AFTER the held row — the interleaving a partition cannot represent.
+  q(3, { unified5h: 0.2, unified5hReset: now + 2 * H, unified7d: 0.4, unified7dReset: null });
+
+  const status = am.getStatus();
+  const walk = status.routing.find(e => e.scope === 'shared').band.ladder;
+  const heldIndex = walk.findIndex(r => !r.admitted);
+  assert.ok(heldIndex >= 0 && walk.slice(heldIndex).some(r => r.admitted),
+    'the premise: an admitted row comes AFTER a held one, or grouping cannot reorder anything');
+
+  const lines = renderStatus(status, { color: false, now }).split('\n');
+  const names = am.accounts.map(a => a.name);
+  const rendered = lines
+    .slice(lines.findIndex(l => l.startsWith('Decision')))
+    .filter(l => /\bp(\d+|-)\s/.test(l))
+    .map(l => names.find(n => new RegExp(`\\b${n}\\b`).test(l)))
+    .filter(Boolean);
+
+  assert.deepEqual(rendered, walk.map(r => r.account),
+    'the block prints the ladder in an order the band never performed');
+});
+
 test('a held account prints its capacity without a plus sign', () => {
   const now = Date.now();
   const lines = render(sizedFleet(now), now);

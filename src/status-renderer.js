@@ -298,18 +298,35 @@ function decisionLines(entry, status, blocked, paint) {
 
   out.push(`  ${paint.dim('Band'.padEnd(13))}${bandSummary(band)}`);
 
-  const admitted = band.ladder.filter(r => r.admitted);
-  const spare = band.ladder.filter(r => !r.admitted);
-  for (const [i, row] of admitted.entries()) {
-    const label = i === 0 ? 'Admit'.padEnd(13) : ' '.repeat(13);
+  // THE LADDER IS A SEQUENCE, so it renders in the order the band walked it.
+  // Grouping the admitted rows above the held ones reordered it: an account
+  // admitted by the exemption sorts LAST — after coverage was already met — so
+  // partitioning lifted it above a row the walk reached first, and the block
+  // published an admission order that did not happen. That is the defect this
+  // whole phase exists to remove, committed by the renderer on the very field
+  // built to prevent it.
+  //
+  // `Admit` labels the first row of each contiguous run of admissions, so a run
+  // interrupted by a held row is labelled again rather than merged with the
+  // first. Two `Admit` runs look odd and are true; one merged run reads well and
+  // is not.
+  const rank = metAtRank(band);
+  const coveredAt = !targetMet(band) ? 'not needed'
+    : rank == null ? 'not needed; already covered' : `not needed; covered at p${rank}`;
+  let previous = null;
+  for (const row of band.ladder) {
+    const group = row.admitted ? 'Admit' : 'Spare';
+    let label = ' '.repeat(13);
+    if (group !== previous) {
+      label = group.padEnd(13);
+      // The held run carries the reason it was not needed, once, where it starts.
+      if (group === 'Spare') {
+        out.push(`  ${paint.dim(label)}${paint.dim(coveredAt)}`);
+        label = ' '.repeat(13);
+      }
+    }
     out.push(`  ${paint.dim(label)}${ladderRow(row, paint)}`);
-  }
-  if (spare.length) {
-    const rank = metAtRank(band);
-    const why = !targetMet(band) ? 'not needed'
-      : rank == null ? 'not needed; already covered' : `not needed; covered at p${rank}`;
-    out.push(`  ${paint.dim('Spare'.padEnd(13))}${paint.dim(why)}`);
-    for (const row of spare) out.push(`  ${' '.repeat(13)}${ladderRow(row, paint)}`);
+    previous = group;
   }
   if (band.excluded.length) {
     // Accounts the band never saw. Without this row they are absent from both
