@@ -131,10 +131,35 @@ export function blockedState(patterns, { models = [], globs = [] } = {}) {
   const list = (Array.isArray(patterns) ? patterns : []).filter(p => typeof p === 'string' && p);
   const ids = models.filter(m => typeof m === 'string' && m);
   if (!list.length) return 'clear';
-  const hits = ids.filter(m => list.some(p => modelGlobMatches(p, m)));
-  if (ids.length && hits.length === ids.length) return 'blocked';
-  if (hits.length) return 'partial';
+  // FULL requires COVERAGE OF THE GLOB, never agreement of the representatives.
+  // `FAMILY_MODELS` holds one id per family — a representative, not a census —
+  // and reading it as exhaustive made a single blocked id read as a blocked
+  // family: `claude-fable-5` on the blocklist reported `*fable*` dead while
+  // `claude-fable-4` and every dated variant of `claude-fable-5` itself still
+  // matched the glob and were still served.
+  if (globs.length && globs.every(g => list.some(p => globCovers(p, g)))) return 'blocked';
+  // Nothing left to survive: a scope with no glob at all is exactly its ids.
+  if (!globs.length && ids.length && ids.every(m => list.some(p => modelGlobMatches(p, m)))) {
+    return 'blocked';
+  }
+  if (ids.some(m => list.some(p => modelGlobMatches(p, m)))) return 'partial';
   return globs.some(g => list.some(p => modelGlobOverlaps(p, g))) ? 'partial' : 'clear';
+}
+
+// Does every model matching `glob` also match `pattern`? Decidable for the
+// shapes in use, and deliberately conservative everywhere else — an unsure
+// answer is `false`, which reports `partial` rather than claiming a route is
+// dead. `*` covers everything; a `*core*` pattern covers any glob whose own
+// core contains that core (every id matching the glob contains the core, so it
+// matches the pattern); a pattern with no wildcards covers only itself.
+function globCovers(pattern, glob) {
+  if (typeof pattern !== 'string' || typeof glob !== 'string') return false;
+  const core = s => s.replace(/\*/g, '').toLowerCase();
+  const p = core(pattern);
+  const g = core(glob);
+  if (!pattern.includes('*')) return !glob.includes('*') && p === g;
+  if (!p) return true; // a bare `*`
+  return g.includes(p);
 }
 
 // Streaming, byte-exact locator for a TOP-LEVEL string field of a JSON object,

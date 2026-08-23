@@ -165,9 +165,25 @@ test('renderStatus marks a blocked family blocked, not available, despite free q
   assert.match(output, /Opus ✓/); // unrelated families keep reporting quota
 });
 
-test('renderStatus marks a family blocked by a concrete model id, not just a glob', () => {
+// The claim this has always made is that a CONCRETE id is visible on the family
+// row — a blocklist entry that lights up nothing is how a blocked model came to
+// read as available. That claim stands. What changed is the word: one id of a
+// family is not the family, because `claude-fable-4` and every dated variant of
+// `claude-fable-5` still match the route and are still served. `partly blocked`
+// says the thing that is true; `⊘ blocked` said the route was dead and it was
+// carrying traffic.
+test('renderStatus marks a family reached by a concrete model id, without calling it dead', () => {
   const output = renderStatus(blockedStatus(['claude-fable-5']), { color: false, now });
-  assert.match(output, /Fable ⊘ blocked/);
+  assert.match(output, /Fable [^\n]*partly blocked/,
+    'a concrete id lights up nothing on the family row, which is how a blocked model reads as available');
+  assert.doesNotMatch(output, /Fable ⊘ blocked/,
+    'one blocked id of a family is reported as the whole family being out of service');
+});
+
+test('renderStatus still calls a family dead when the blocklist covers it', () => {
+  const output = renderStatus(blockedStatus(['*fable*']), { color: false, now });
+  assert.match(output, /Fable ⊘ blocked/,
+    'a glob covering the family no longer reads as blocked, so the distinction collapsed the other way');
 });
 
 test('renderStatus leaves families untouched by an unrelated block', () => {

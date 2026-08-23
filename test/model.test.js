@@ -59,14 +59,22 @@ test('TopLevelFieldFinder marks done (absent) once the root object closes', () =
 // does not touch are three different things to tell an operator, and reporting
 // the middle one as either of the others is how the Decision block came to
 // render a live destination above a Routing line calling the same route dead.
+// FULL IS A PROPERTY OF THE GLOB, not of the representatives. `FAMILY_MODELS`
+// is one id per family — a representative, not a census — and this file used to
+// assert the opposite: that blocking `claude-fable-5` blocks Fable. It does not.
+// `claude-fable-4` and every dated variant of `claude-fable-5` match the same
+// route and are still served, so the route is `partial` and the old expectation
+// was the defect written down as an expectation.
 test('blockedState separates a family fully blocked from one only partly blocked', () => {
   const fable = { models: [familyModel('Fable')], globs: ['*fable*'] };
   assert.equal(blockedState(['*fable*'], fable), 'blocked');
-  assert.equal(blockedState(['claude-fable-5'], fable), 'blocked',
-    'the id the family is represented by blocks it');
   assert.equal(blockedState(['*'], fable), 'blocked', 'the catch-all blocks every family');
+  assert.equal(blockedState(['claude-fable-5'], fable), 'partial',
+    'blocking the representative id reports the whole family dead while its siblings are served');
   assert.equal(blockedState(['claude-fable-4'], fable), 'partial',
     'a single id that is not the representative takes the whole family out of service');
+  assert.equal(blockedState(['claude-fable-5-20260101'], fable), 'partial',
+    'a dated variant, which is the ordinary shape of a concrete block');
   assert.equal(blockedState(['*opus*'], fable), 'clear');
   assert.equal(blockedState([], fable), 'clear');
   assert.equal(blockedState(null, fable), 'clear');
@@ -74,12 +82,19 @@ test('blockedState separates a family fully blocked from one only partly blocked
     'a malformed entry beside a real one changes the answer');
 });
 
-test('blockedState is answered on models, and on globs only for the partial case', () => {
-  // A glob is never enough to call something fully blocked: glob intersection
-  // is not decidable, so `blocked` is reserved for concrete ids that match.
-  assert.equal(blockedState(['*fable*'], { models: [], globs: ['*fable*'] }), 'partial');
-  assert.equal(blockedState(['*fable*'], { models: ['claude-fable-5'], globs: ['*fable*'] }), 'blocked');
-  // Every model of a many-family scope must be matched, or it still carries some.
+test('blockedState reserves `blocked` for a pattern that covers the whole glob', () => {
+  // Coverage is decidable for the shapes in use and conservative elsewhere: an
+  // unsure answer is `partial`, which understates a block rather than calling a
+  // live route dead.
+  assert.equal(blockedState(['*fable*'], { globs: ['*fable*'] }), 'blocked');
+  assert.equal(blockedState(['*fable*'], { globs: ['*claude-fable*'] }), 'blocked',
+    'a narrower glob is covered by a wider pattern: every id matching it matches the pattern');
+  assert.equal(blockedState(['*claude-fable*'], { globs: ['*fable*'] }), 'partial',
+    'a wider glob is not covered by a narrower pattern, and this is the direction that overstates');
+  assert.equal(blockedState(['claude-fable-5'], { globs: ['claude-fable-5'] }), 'blocked',
+    'a concrete pattern covers an identical concrete glob and nothing else');
+  // A scope with no glob at all is exactly its ids, so they decide it.
+  assert.equal(blockedState(['*fable*'], { models: ['claude-fable-5'] }), 'blocked');
   const both = { models: ['claude-opus-4-5', 'claude-fable-5'], globs: ['claude-*'] };
   assert.equal(blockedState(['*fable*'], both), 'partial');
   assert.equal(blockedState(['claude-*'], both), 'blocked');

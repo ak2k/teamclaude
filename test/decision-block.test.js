@@ -264,9 +264,16 @@ test('every section agrees about what the blocklist does to a family', () => {
   // the family's representative and `claude-fable-4` is deliberately not: a
   // fixture using only the representative agrees with any of the three rules by
   // coincidence, which is how this survived one fix already.
+  // `claude-fable-5` read `blocked` here for a whole pass, and this table is
+  // where it was written down: the D fix made three sections agree and I
+  // asserted the agreement without asking whether the answer they agreed on was
+  // true. It was not — the route still carries `claude-fable-4` and every dated
+  // variant of `claude-fable-5` itself. A consistency check cannot tell you
+  // which of "consistent" and "correct" you got, so the expected values here
+  // are now derived from what the route would actually still serve.
   const CASES = [
     ['*fable*', 'blocked'],
-    ['claude-fable-5', 'blocked'],
+    ['claude-fable-5', 'partly'],
     ['claude-fable-4', 'partly'],
     ['*opus*', 'clear'],
   ];
