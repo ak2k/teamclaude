@@ -491,46 +491,66 @@ if (!scopeIsLoadBearing) {
 // invisible on this fleet and the clause is ungraded, which is the state the
 // caption was in until a pass found it.
 //
+// EITHER MEASUREMENT MEANS TWO, and this graded one of them. The clause exempts
+// an account "missing either measurement": pressure OR headroom. Synthesising
+// absence by removing `resetAt` only ever produces the PRESSURE half, so the
+// exemption could have been lost on the headroom side — an account with a known
+// pressure and no five-hour reading — and this gate would have stayed green.
+// Filed from outside on pass 4, and it is the falsification-per-axis argument
+// arriving on schedule: a control checks what its author thought to build,
+// while the sentence's claim space is wider than that.
+//
+// One implementation, two axes. Two copies of this would be two chances to fix
+// the axis nobody is looking at, which is the shape being closed here.
+//
 // Synthesised, because the committed sample has no unmeasured account: the
-// lowest-ranked account's governing reset is removed, which is what makes its
-// pressure absent and sorts it last.
-const lastRanked = codeOrder[codeOrder.length - 1];
-const exemptSnapshot = {
-  ...snapshot,
-  accounts: snapshot.accounts.map(a => (a.index === lastRanked ? { ...a, resetAt: null } : a)),
-};
-const exemptLadder = explainBand(exemptSnapshot).ladder;
-const exemptRow = exemptLadder.find(r => r.account.index === lastRanked);
-const heldBefore = exemptLadder.findIndex(r => !r.admitted);
+// lowest-ranked account loses one measurement. Removing `resetAt` makes its
+// pressure absent (and sorts it last, where it already is); removing `fiveHour`
+// leaves the ranking untouched and takes its headroom away instead.
+function gradeExemption(axis, drop, expectedReason) {
+  const lastRanked = codeOrder[codeOrder.length - 1];
+  const exemptSnapshot = {
+    ...snapshot,
+    accounts: snapshot.accounts.map(a => (a.index === lastRanked ? { ...a, ...drop } : a)),
+  };
+  const exemptLadder = explainBand(exemptSnapshot).ladder;
+  const exemptRow = exemptLadder.find(r => r.account.index === lastRanked);
+  const heldBefore = exemptLadder.findIndex(r => !r.admitted);
 
-// Premise 1: the account must actually be admitted by the exemption.
-if (!exemptRow || !exemptRow.admitted || !String(exemptRow.reason).startsWith('unmeasured-exempt')) {
-  refuse('the stop-clause control could not produce a row admitted by the exemption '
-    + `(reason ${exemptRow ? exemptRow.reason : 'missing'}, admitted ${exemptRow?.admitted}), `
-    + 'so it cannot grade the half of the caption that says so');
-}
-// Premise 2: it must be admitted AFTER coverage was already met, or the strict
-// reading would admit it too and the two would agree for a trivial reason.
-if (heldBefore < 0 || exemptLadder.indexOf(exemptRow) < heldBefore) {
-  refuse('the exempt row is not admitted after a held one on this sample, so the strict '
-    + 'and exempting readings cannot differ and the stop clause stays ungraded');
+  // Premise 1: the account must actually be admitted by the exemption, and on
+  // THIS axis — a headroom control that produced an absent-pressure row would
+  // grade the axis the other control already covers.
+  if (!exemptRow || !exemptRow.admitted || exemptRow.reason !== expectedReason) {
+    refuse(`the ${axis} stop-clause control could not produce a row admitted by that half of `
+      + `the exemption (reason ${exemptRow ? exemptRow.reason : 'missing'}, admitted `
+      + `${exemptRow?.admitted}, wanted ${expectedReason}), so it cannot grade the clause`);
+  }
+  // Premise 2: it must be admitted AFTER coverage was already met, or the strict
+  // reading would admit it too and the two would agree for a trivial reason.
+  if (heldBefore < 0 || exemptLadder.indexOf(exemptRow) < heldBefore) {
+    refuse(`the ${axis} exempt row is not admitted after a held one on this sample, so the `
+      + 'strict and exempting readings cannot differ and the stop clause stays ungraded');
+  }
+
+  const exemptTier = exemptSnapshot.accounts.filter(a => a.priority === Math.min(...exemptSnapshot.accounts.map(x => x.priority)));
+  const orderedExempt = exemptTier
+    .map((a, i) => ({ a, i, v: pressureScore(a) }))
+    .sort((x, y) => ((y.v == null ? -Infinity : y.v) - (x.v == null ? -Infinity : x.v)) || x.i - y.i)
+    .map(e => e.a);
+  const asWritten = replay(orderedExempt).keep;
+  const strictStop = replay(orderedExempt, { exempt: false }).keep;
+  const observable = !sameSet(asWritten, strictStop);
+  console.log(`\nstop clause  ${axis.padEnd(8)} with the exemption [${asWritten}] against a strict stop `
+    + `at coverage [${strictStop}]  ${observable ? 'DIFFERS, as it must' : 'READS THE SAME'}`);
+  if (!observable) {
+    console.error(`  a caption that stopped at coverage and said nothing about a missing ${axis}`);
+    console.error('  would grade identically here, so this run does not check that clause at all.');
+    process.exit(1);
+  }
 }
 
-const exemptTier = exemptSnapshot.accounts.filter(a => a.priority === Math.min(...exemptSnapshot.accounts.map(x => x.priority)));
-const orderedExempt = exemptTier
-  .map((a, i) => ({ a, i, v: pressureScore(a) }))
-  .sort((x, y) => ((y.v == null ? -Infinity : y.v) - (x.v == null ? -Infinity : x.v)) || x.i - y.i)
-  .map(e => e.a);
-const asWritten = replay(orderedExempt).keep;
-const strictStop = replay(orderedExempt, { exempt: false }).keep;
-const exemptionIsObservable = !sameSet(asWritten, strictStop);
-console.log(`\nstop clause  with the exemption [${asWritten}] against a strict stop at coverage `
-  + `[${strictStop}]  ${exemptionIsObservable ? 'DIFFERS, as it must' : 'READS THE SAME'}`);
-if (!exemptionIsObservable) {
-  console.error('  a caption that stopped at coverage and said nothing about unmeasured accounts');
-  console.error('  would grade identically here, so this run does not check that clause at all.');
-  process.exit(1);
-}
+gradeExemption('pressure', { resetAt: null }, 'unmeasured-exempt-pressure');
+gradeExemption('headroom', { fiveHour: null }, 'unmeasured-exempt-headroom');
 
 const tally = results.reduce((acc, r) => { acc[r.verdict] = (acc[r.verdict] || 0) + 1; return acc; }, {});
 const failed = results.filter(r => r.verdict === 'FALSIFIED' || r.verdict === 'INDISTINGUISHABLE');
