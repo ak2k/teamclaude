@@ -314,11 +314,36 @@ export function parseAdvisorModel(body) {
  * prevent.
  */
 export function gatingUtilization(quota, bucketKey) {
+  return gatingSource(quota, bucketKey)?.value ?? null;
+}
+
+/**
+ * The same gate, saying WHICH bucket produced the figure.
+ *
+ * A caller reporting why an account was barred has to name a bucket, and the
+ * value is a maximum over two of them: printing the governing bucket's key
+ * beside a number that came from the shared one is the two-buckets-one-word
+ * defect this file's header is about, committed by the report instead of by the
+ * gate. So the maximum is taken once, here, and the winner is carried out with
+ * it rather than reconstructed by comparing the two buckets a second time.
+ *
+ * `gatingUtilization` is the projection for the callers that only need the
+ * number, which is all of routing. Null means neither bucket is reported, and
+ * is never a zero.
+ *
+ * @param {Record<string, number|null|undefined>|null|undefined} quota
+ * @param {string} bucketKey
+ * @returns {{ value: number, bucket: string } | null}
+ */
+export function gatingSource(quota, bucketKey) {
   const own = quota?.[bucketKey] ?? null;
   // Already the shared bucket: max(x, x) is x.
-  if (bucketKey === 'unified7d') return own;
+  if (bucketKey === 'unified7d') return own == null ? null : { value: own, bucket: bucketKey };
   const shared = quota?.unified7d ?? null;
-  if (own == null) return shared;
-  if (shared == null) return own;
-  return Math.max(own, shared);
+  if (own == null) return shared == null ? null : { value: shared, bucket: 'unified7d' };
+  if (shared == null) return { value: own, bucket: bucketKey };
+  // Ties name the family bucket rather than the shared one. Both are true at
+  // equality, and the family key is the more specific of the two answers to
+  // "which window is this account out of for this model".
+  return shared > own ? { value: shared, bucket: 'unified7d' } : { value: own, bucket: bucketKey };
 }

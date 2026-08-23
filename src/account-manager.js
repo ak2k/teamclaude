@@ -1,6 +1,6 @@
 import { refreshAccessToken, isTokenExpiringSoon, isTokenExpired } from './oauth.js';
 import { sameIdentity } from './identity.js';
-import { weeklyBucketForModel, modelGlobMatches, gatingUtilization, WEEKLY_BUCKET_KEYS } from './model.js';
+import { weeklyBucketForModel, modelGlobMatches, gatingSource, WEEKLY_BUCKET_KEYS } from './model.js';
 import { SessionTracker } from './session-tracker.js';
 import { WindowWatcher } from './window-watcher.js';
 import { decideBand, pressureOf, assertNever } from './band-decision.js';
@@ -859,7 +859,16 @@ export class AccountManager {
    * it runs first, so an account over its shared cap never reaches the band.
    */
   _governingWeekly(account, model) {
-    return gatingUtilization(account.quota, this._governingBucket(account, model));
+    return this._governingWeeklySource(account, model)?.value ?? null;
+  }
+
+  /** The same figure with the bucket that produced it, for a caller that has to
+   * report which window barred the account. The maximum is taken once, in
+   * `gatingSource`; recovering the winner by comparing the two buckets again
+   * here would be a second reading of the rule this method exists to have one
+   * of. */
+  _governingWeeklySource(account, model) {
+    return gatingSource(account.quota, this._governingBucket(account, model));
   }
 
   /** Reset timestamp (ms) of the bucket that governs `model` here, or null when
@@ -938,37 +947,73 @@ export class AccountManager {
   }
 
   _isAvailable(account, model = null, advisorModel = null) {
+    // The null check is a lookup failure, not an availability question, so it
+    // stays here rather than becoming a reason `_availability` could report.
+    // Nothing enumerates a missing account, and inventing a code for one would
+    // put a value in `excluded[]`'s domain that no fleet can produce.
     if (!account) return false;
+    return this._availability(account, model, advisorModel) === null;
+  }
 
+  /**
+   * WHY an account cannot serve this request, or null when it can.
+   *
+   * `_isAvailable` is the projection to the boolean selection needs, so the
+   * predicate that filters candidates and the report of what it filtered are
+   * one evaluation. The alternative — a reporter re-asking the same questions in
+   * the same order — is a second implementation of eligibility, and the way it
+   * fails is by disagreeing with routing about who is eligible while claiming to
+   * explain it.
+   *
+   * Every branch has its own code, including the two API-key limits that
+   * `_isNearQuota` folds into one boolean, because the point of the field is to
+   * separate states an operator would act on differently. `bucket` and `detail`
+   * are present only where a measurement produced the exclusion.
+   *
+   * Order matters and is the order selection applies: the first bar found is
+   * the one reported, so a disabled account over its weekly cap reads as
+   * disabled, which is the fact to act on.
+   *
+   * @returns {{ reason: string, bucket: string|null, detail: number|null } | null}
+   */
+  _availability(account, model = null, advisorModel = null) {
     // Manually disabled accounts are skipped entirely until re-enabled.
-    if (account.disabled) return false;
+    if (account.disabled) return { reason: 'disabled', bucket: null, detail: null };
 
     // Check rate limit expiry
     if (account.status === 'throttled' && account.rateLimitedUntil) {
-      if (Date.now() < account.rateLimitedUntil) return false;
+      if (Date.now() < account.rateLimitedUntil) {
+        return { reason: 'throttled', bucket: null, detail: account.rateLimitedUntil };
+      }
       account.status = 'active';
       account.rateLimitedUntil = null;
       account.throttledAt = null;
       console.log(`[TeamClaude] Account "${account.name}" rate limit expired, marking active`);
     }
 
-    if (account.status === 'exhausted' || account.status === 'error') return false;
-    // Model-scoped: _isNearQuota checks the shared 5h bucket plus only the weekly
+    if (account.status === 'exhausted') return { reason: 'exhausted', bucket: null, detail: null };
+    if (account.status === 'error') return { reason: 'error', bucket: null, detail: null };
+    // Model-scoped: _quotaBar checks the shared 5h bucket plus only the weekly
     // bucket that governs this model, so a spent Fable/Sonnet bucket bars just
     // that family — the account still serves every other model normally.
-    if (this._isNearQuota(account, model)) return false;
+    const bar = this._quotaBar(account, model);
+    if (bar) return bar;
 
     // Route/ownership restriction: a configured route can pin a model pattern to
     // an exclusive set of accounts; failing that, a per-account `models` claim
     // restricts an owned model to its owners. Either way an account not eligible
     // for this model is skipped so the request never lands somewhere it can't run.
-    if (model && !this._routeAllows(account, model)) return false;
+    if (model && !this._routeAllows(account, model)) {
+      return { reason: 'route-excluded', bucket: null, detail: null };
+    }
 
     // An advisor request additionally needs the account to serve the ADVISOR's
     // model (the shared buckets were already checked above for the executor).
-    if (advisorModel && !this._canServeAdvisor(account, advisorModel)) return false;
+    if (advisorModel && !this._canServeAdvisor(account, advisorModel)) {
+      return { reason: 'advisor-ineligible', bucket: null, detail: null };
+    }
 
-    return true;
+    return null;
   }
 
   /**
@@ -1732,11 +1777,34 @@ export class AccountManager {
   }
 
   _isNearQuota(account, model = null) {
+    return this._quotaBar(account, model) !== null;
+  }
+
+  /**
+   * WHICH quota bars this account, or null when none does.
+   *
+   * Four different windows can bar a request and they call for different
+   * actions: a five-hour window that clears within the hour, a weekly one that
+   * does not, and two API-key limits that are not windows at all. `_isNearQuota`
+   * is the projection to the boolean routing needs, so the gate and the report
+   * of the gate are the same evaluation rather than two that agree today.
+   *
+   * `bucket` names the window the reported figure came from, which for the
+   * weekly case is not always the governing bucket: the gate takes a maximum
+   * over the family bucket and the shared one, and `gatingSource` says which
+   * won. Naming the governing key beside a number the shared bucket produced
+   * would put a bucket and a figure from different windows on one line.
+   *
+   * @returns {{ reason: string, bucket: string|null, detail: number } | null}
+   */
+  _quotaBar(account, model = null) {
     const q = account.quota;
     this._clearExpiredQuotas(account);
 
     // Shared 5-hour bucket gates every request regardless of model.
-    if (q.unified5h != null && q.unified5h >= this.switchThreshold) return true;
+    if (q.unified5h != null && q.unified5h >= this.switchThreshold) {
+      return { reason: 'five-hour-spent', bucket: 'unified5h', detail: q.unified5h };
+    }
 
     // The HIGHER of the weekly bucket that governs this model and the shared
     // weekly one. Fable and Sonnet meter their own quota, so a spent Fable
@@ -1746,21 +1814,25 @@ export class AccountManager {
     // When the family bucket isn't reported the shared one answers alone.
     // One definition, in `gatingUtilization`; the status row and the TUI tag
     // display this same value rather than deriving it again.
-    const weeklyVal = this._governingWeekly(account, model);
-    if (weeklyVal != null && weeklyVal >= this.switchThreshold) return true;
+    const weekly = this._governingWeeklySource(account, model);
+    if (weekly != null && weekly.value >= this.switchThreshold) {
+      return { reason: 'weekly-spent', bucket: weekly.bucket, detail: weekly.value };
+    }
 
-    // Standard quotas (API key accounts)
+    // Standard quotas (API key accounts). Their own reasons rather than
+    // `weekly-spent`: neither is a weekly window, and an account out of tokens
+    // wants a different answer from one that is out of week.
     if (q.tokensLimit != null && q.tokensRemaining != null) {
       const used = 1 - (q.tokensRemaining / q.tokensLimit);
-      if (used >= this.switchThreshold) return true;
+      if (used >= this.switchThreshold) return { reason: 'tokens-spent', bucket: null, detail: used };
     }
 
     if (q.requestsLimit != null && q.requestsRemaining != null) {
       const used = 1 - (q.requestsRemaining / q.requestsLimit);
-      if (used >= this.switchThreshold) return true;
+      if (used >= this.switchThreshold) return { reason: 'requests-spent', bucket: null, detail: used };
     }
 
-    return false;
+    return null;
   }
 
   /**

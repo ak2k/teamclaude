@@ -212,7 +212,11 @@ const HOLD_RELEASE = '    this._releaseHold(s, hold);\n';
 const HOLD_DRAIN = '      for (const h of [...s.holds]) this._releaseHold(s, h);\n';
 const HOLD_CLAIM = '        if (hold && hold.rid === s.rid && !hold.buckets.has(bucket)) {\n';
 const HOLD_OWNER_END = '    if (hold && hold.rid !== s.rid) return null;\n';
-const GATE_MAX = '  return Math.max(own, shared);\n';
+// Re-anchored when the gate began naming the bucket its figure came from. The
+// maximum is now spelled as a comparison that carries the winner out, so the
+// anchor moved with it; the intervention is unchanged, since returning the
+// family bucket unconditionally is exactly "the maximum is never taken".
+const GATE_MAX = "  return shared > own ? { value: shared, bucket: 'unified7d' } : { value: own, bucket: bucketKey };\n";
 const GATE_SHARED_READ = '  const shared = quota?.unified7d ?? null;\n';
 const PIN_HELD = '    return now - pin.at <= this.activeTtlMs || (s.pinHolds.get(bucket) || 0) > 0;\n';
 const PICK_PRESSURE = '          pressure: pressures[i],\n';
@@ -495,8 +499,8 @@ const M = [
   // The tripwire, and it is the same condition: they SEPARATE the moment any
   // caller can pass an absent family bucket under a non-shared key. If a fourth
   // caller appears and these rows still collapse, that caller is not covered.
-  ['weeklyGate        maximum never taken', GATE_MAX, '  return own;\n',
-    'src/model.js'],
+  ['weeklyGate        maximum never taken', GATE_MAX,
+    "  return { value: own, bucket: bucketKey };\n", 'src/model.js'],
   ['weeklyGate        shared bucket never read', GATE_SHARED_READ,
     '  const shared = null;\n', 'src/model.js'],
   // Per-bucket load attribution. Restoring the session-level sum charges every
