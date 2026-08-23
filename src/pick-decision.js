@@ -188,3 +188,66 @@ export function decidingTerms(snapshot, decision) {
     default: return assertNever(decision, 'decidingTerms');
   }
 }
+
+/**
+ * The accounts equal to the winner on EVERY term, so that config order is what
+ * separated them.
+ *
+ * `by` makes the winner provably MINIMAL on that term, not uniquely minimal,
+ * and the gap is reachable rather than theoretical. `decidingTerms` keeps a term
+ * when ANY account differs from the winner, so on a field where the winner and
+ * the runner-up are both at `load: 0` and a third account is not, `by` reads
+ * `load` while load did nothing to separate the two accounts that mattered.
+ * `by: 'first'` cannot catch it either: `decidePick` only reaches that value
+ * when the whole field is unanimous on all six terms, so a tie broken by array
+ * position is invisible in a decision that reports a term.
+ *
+ * Non-empty here means position broke the tie, which is what a report should
+ * say instead of crediting a term that did not decide. Empty means the winner
+ * really is uniquely minimal.
+ *
+ * Pure, and separate from `decidePick` for the reason the header gives: nothing
+ * here may change what was chosen.
+ *
+ * @param {PickSnapshot} snapshot
+ * @param {PickDecision} decision
+ * @returns {number[]}
+ */
+export function tiedWith(snapshot, decision) {
+  switch (decision.kind) {
+    case 'none': return [];
+    case 'picked': {
+      const winner = snapshot.accounts.find(a => a.index === decision.index);
+      if (!winner) return [];
+      return snapshot.accounts
+        .filter(a => a.index !== winner.index && TERMS.every(({ of }) => of(a) === of(winner)))
+        .map(a => a.index);
+    }
+    default: return assertNever(decision, 'tiedWith');
+  }
+}
+
+/**
+ * Who would have been chosen if the winner were not there.
+ *
+ * Derived by running `decidePick` again over the field minus the winner rather
+ * than by tracking second place during the first pass. Second place is not
+ * something that comparison loop computes — it keeps a single leader and never
+ * ranks the rest — so any attempt to read it out of that loop would be a new
+ * ordering rule written beside the real one. Running the same function on a
+ * smaller field cannot disagree with it.
+ *
+ * Null when the winner was alone, which is a different fact from a tie and is
+ * why it is not spelled as an index of anything.
+ *
+ * @param {PickSnapshot} snapshot
+ * @param {PickDecision} decision
+ * @returns {number | null}
+ */
+export function runnerUp(snapshot, decision) {
+  if (decision.kind !== 'picked') return null;
+  const rest = snapshot.accounts.filter(a => a.index !== decision.index);
+  if (!rest.length) return null;
+  const second = decidePick({ ...snapshot, accounts: rest });
+  return second.kind === 'picked' ? second.index : null;
+}

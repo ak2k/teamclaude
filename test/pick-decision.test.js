@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AccountManager } from '../src/account-manager.js';
-import { decidePick, decidingTerms, pressureRank } from '../src/pick-decision.js';
+import { decidePick, decidingTerms, pressureRank, tiedWith, runnerUp } from '../src/pick-decision.js';
 
 // The load weight: selection ranked by what accounts are measurably carrying
 // rather than by how many sessions each holds.
@@ -503,4 +503,88 @@ test('with expiry routing off, no account has a pressure to rank on', () => {
   // Inert rather than special-cased: every account ranks equal, so the reset
   // tiebreak decides exactly as it did before the term existed.
   assert.equal(am._pickBestAvailable(null, OPUS).name, 'drained-resets-soon');
+});
+
+// `by` says the winner is minimal on a term; it does not say the term separated
+// the winner from the account behind it. These hold the difference.
+
+const flat = (index, over = {}) => ({
+  index,
+  priority: 0,
+  load: 0,
+  sessions: 0,
+  inFlight: 0,
+  pressure: { kind: 'known', value: 1 },
+  reset: 1000,
+  ...over,
+});
+
+test('a tie broken by position is reported as a tie, not credited to a term', () => {
+  // The brief's failure, as a snapshot: [0] and [1] are equal on every term,
+  // [2] differs on load. `by` reads 'load' because SOME account differs from
+  // the winner on it, and a display crediting that term says load chose between
+  // two accounts that were level on it.
+  const accounts = [flat(0), flat(1), flat(2, { load: 1_310_000 })];
+  const decision = decidePick({ accounts });
+
+  assert.equal(decision.index, 0, 'the premise: array position decided');
+  assert.equal(decision.by, 'load', 'the premise: `by` credits a term here');
+  assert.deepEqual(tiedWith({ accounts }, decision), [1],
+    'the account the winner did not actually beat is not reported');
+  assert.equal(runnerUp({ accounts }, decision), 1);
+});
+
+test('a winner that really is uniquely minimal is tied with nobody', () => {
+  const accounts = [flat(0, { load: 5 }), flat(1, { load: 9 }), flat(2, { load: 7 })];
+  const decision = decidePick({ accounts });
+
+  assert.equal(decision.index, 0);
+  assert.deepEqual(tiedWith({ accounts }, decision), [],
+    'a decisive win is reported as a tie, which inverts the field it exists to clarify');
+  assert.equal(runnerUp({ accounts }, decision), 2,
+    'the runner-up is the account that would be picked next, not the next index');
+});
+
+test('the runner-up is what the same rule picks with the winner removed', () => {
+  // Derived rather than tracked: the comparison loop keeps one leader and never
+  // ranks the rest, so second place has to come from running the rule again.
+  const accounts = [flat(0, { load: 5 }), flat(1, { load: 9 }), flat(2, { load: 7 })];
+  const decision = decidePick({ accounts });
+  const without = accounts.filter(a => a.index !== decision.index);
+
+  assert.equal(runnerUp({ accounts }, decision), decidePick({ accounts: without }).index);
+});
+
+test('an alone winner has no runner-up, and no candidates has neither', () => {
+  const alone = [flat(0)];
+  const decision = decidePick({ accounts: alone });
+  assert.equal(runnerUp({ accounts: alone }, decision), null,
+    'a lone account reports a runner-up, so the display names an alternative that does not exist');
+  assert.deepEqual(tiedWith({ accounts: alone }, decision), []);
+
+  const none = decidePick({ accounts: [] });
+  assert.equal(none.kind, 'none');
+  assert.equal(runnerUp({ accounts: [] }, none), null);
+  assert.deepEqual(tiedWith({ accounts: [] }, none), []);
+});
+
+test('every term is consulted before two accounts are called tied', () => {
+  // One at a time, so a `tiedWith` that stopped early or skipped a term is
+  // caught on the term it skipped rather than on whichever one a single fixture
+  // happened to vary.
+  const varied = [
+    ['priority', { priority: 1 }],
+    ['load', { load: 1 }],
+    ['sessions', { sessions: 1 }],
+    ['in-flight', { inFlight: 1 }],
+    ['pressure', { pressure: { kind: 'known', value: 0.5 } }],
+    ['reset', { reset: 2000 }],
+  ];
+  for (const [term, over] of varied) {
+    const accounts = [flat(0), flat(1, over)];
+    const decision = decidePick({ accounts });
+    assert.equal(decision.index, 0, `${term}: the premise, account 0 still wins`);
+    assert.deepEqual(tiedWith({ accounts }, decision), [],
+      `${term} does not separate the field, so a difference on it reads as a tie`);
+  }
 });
