@@ -464,6 +464,18 @@ function oneClock(coverage) {
   am.accounts[3].status = 'throttled';
   am.accounts[3].rateLimitedUntil = wall - 5 * 60e3;
   am.accounts[4].pausedUntil = wall - 60e3;
+  // A session that falls out of the ACTIVE window between the two instants. Its
+  // clock lives in `session-tracker.js`, one module out, which is how a sweep
+  // for `Date.now()` inside `account-manager.js` walked past it: the payload's
+  // session figures answered five minutes from the fleet described beside them.
+  // Pinned to the DISABLED account: load is a ranking term ahead of pressure,
+  // so hanging it on a candidate would move the pick and grade the clock
+  // through a fixture that no longer isolates it.
+  am.recordSession('s-clock', 0, 'claude-opus-5');
+  am.recordTokenUsage(0, 's-clock', 'claude-opus-5', { input_tokens: 10, output_tokens: 20 });
+  for (const s of am.sessionTracker.sessions.values()) {
+    s.lastSeen = wall - am.sessionTracker.activeTtlMs - 60e3;
+  }
 
   const s = am.getStatus(asked);
   const [expired, , , held, paused] = s.accounts;
@@ -487,6 +499,10 @@ function oneClock(coverage) {
     `coverage ${coverage}: the ladder is ordered by pressure at another instant`);
   assert.equal(shared.pick.account, 'ample',
     `coverage ${coverage}: the pick ranked its candidates at another instant`);
+  assert.equal(s.sessions.active, 1,
+    `coverage ${coverage}: the session tracker answered at its own clock, not the payload's`);
+  assert.ok(s.accounts[0].load > 0,
+    `coverage ${coverage}: per-account load was measured at another instant than the row it sits on`);
 
   // THE PREMISE: every assertion above must answer differently at the wall
   // clock, or the fixture cannot tell one clock from two.
@@ -500,6 +516,8 @@ function oneClock(coverage) {
   assert.equal(sharedLater.target, 'soon');
   assert.equal(sharedLater.band.ladder[0].account, 'soon');
   assert.equal(sharedLater.pick.account, 'soon');
+  assert.equal(later.sessions.active, 0);
+  assert.equal(later.accounts[0].load, 0);
 }
 
 test('the active account is the one the next request starts from, not the one it leaves', () => {

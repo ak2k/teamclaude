@@ -2793,9 +2793,20 @@ export class AccountManager {
     // The tracker's own share of the owed gauge, reported alongside the session
     // view it is derived from but published under expiryRouting, which is the
     // feature it says something about.
-    const { pendingRollovers, ...sessions } = this.sessionTracker.stats();
+    // BOTH take the payload's instant. Their clock defaults live in
+    // `session-tracker.js`, one module out, which is how the sweep that closed
+    // this class inside `account-manager.js` walked straight past them: a
+    // `Date.now()` enumeration cannot see a default it does not contain. The
+    // fields they produce — active sessions, per-account load — sat five
+    // minutes from the fleet described beside them.
+    //
+    // `stats` also sweeps expired sessions at the instant it is given. At the
+    // wall clock that is exactly today's behaviour; asked about an earlier one
+    // it deletes strictly fewer and moves `_lastSweep` back, which only makes
+    // the next ordinary sweep sooner.
+    const { pendingRollovers, ...sessions } = this.sessionTracker.stats(now);
     // One walk per account for the whole payload, not one per field read.
-    const measured = new Map(observed.accounts.map(a => [a.index, this.sessionTracker.loadFor(a.index)]));
+    const measured = new Map(observed.accounts.map(a => [a.index, this.sessionTracker.loadFor(a.index, now)]));
     return {
       currentAccount: observed.accounts[observed.currentIndex]?.name,
       switchThreshold: this.switchThreshold,
