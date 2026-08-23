@@ -335,6 +335,92 @@ test('a manual route pin is what the entry reports, not the load winner', () => 
   }
 });
 
+test('reading the status cannot change where the next request goes', () => {
+  // The report walks availability for every account in every scope, and the
+  // quota gate used to CLEAR expired windows as it answered. A five-hour window
+  // whose reset has passed is a session-reset event that `refreshExpiredQuotas`
+  // owns — it collects the accounts that reset and hands them to
+  // `_switchOnSessionReset` — so clearing it first consumed the event, and a
+  // fleet that had been polled routed somewhere else than one that had not.
+  //
+  // Two arms differing only in whether the status was read. Anything an
+  // observer does that a non-observer does not is a bug by construction here,
+  // which is why this asserts the destination rather than any field.
+  const now = Date.now();
+  const build = () => {
+    const am = fleet({ accounts: ['incumbent', 'resetting'] });
+    quota(am, 0, { unified5h: 0.2, unified5hReset: now + 2 * H, unified7d: 0.3, unified7dReset: now + 300 * H });
+    // Its five-hour window has already reset, and its weekly expires far sooner,
+    // so the session-reset switch should move to it.
+    quota(am, 1, { unified5h: 0.99, unified5hReset: now - 60_000, unified7d: 0.3, unified7dReset: now + 10 * H });
+    return am;
+  };
+
+  const unpolled = build();
+  unpolled.refreshExpiredQuotas();
+  const withoutPoll = unpolled.accounts[unpolled.currentIndex].name;
+
+  const polled = build();
+  polled.getStatus();
+  const fiveHourSurvived = polled.accounts[1].quota.unified5h;
+  polled.refreshExpiredQuotas();
+  const withPoll = polled.accounts[polled.currentIndex].name;
+
+  assert.equal(withoutPoll, 'resetting',
+    'the premise: unobserved, the session reset moves the current account');
+  assert.equal(fiveHourSurvived, 0.99,
+    'the status read consumed the reset event before the request path could see it');
+  assert.equal(withPoll, withoutPoll,
+    'reading the status changed where the next request goes');
+});
+
+test('an observer answers with the state the request path would see', () => {
+  // Not consuming the event is half of it. The other half is that the answer
+  // must still be the one the request path gets: an observer that skips the
+  // clear and then reads the UNCLEARED window reports an account as
+  // five-hour-spent when its window has in fact reset, which is a wrong report
+  // rather than a stolen event, and no destination changes so nothing else here
+  // would catch it.
+  const now = Date.now();
+  const am = fleet({ accounts: ['incumbent', 'resetting'] });
+  quota(am, 0, { unified5h: 0.2, unified5hReset: now + 2 * H, unified7d: 0.3, unified7dReset: now + 300 * H });
+  quota(am, 1, { unified5h: 0.99, unified5hReset: now - 60_000, unified7d: 0.3, unified7dReset: now + 10 * H });
+
+  const entry = am.getStatus().routing.find(e => e.scope === 'shared');
+  assert.equal(am.accounts[1].quota.unified5h, 0.99, 'the premise: the read did not clear the window');
+  assert.ok(!entry.band.excluded.some(x => x.account === 'resetting'),
+    'the report calls an account spent whose five-hour window has already reset');
+  assert.equal(entry.band.candidates, 2, 'the reset account is missing from the candidate set');
+});
+
+test('a route preview does not consume the event either', () => {
+  // `_routeTarget` runs the preview for every route scope, and the preview
+  // consults a manual pin and can fall through to a full pick — both of which
+  // asked availability. The shared scope alone does not reach either path, so a
+  // fleet with a route and a pin is what exercises them.
+  const now = Date.now();
+  const am = fleet({
+    accounts: ['incumbent', 'resetting'],
+    routes: [{ name: 'fable', match: ['*fable*'] }],
+  });
+  quota(am, 0, {
+    unified5h: 0.2, unified5hReset: now + 2 * H, unified7d: 0.3, unified7dReset: now + 300 * H,
+    unified7dFable: 0.2, unified7dFableReset: now + 40 * H,
+  });
+  quota(am, 1, {
+    unified5h: 0.99, unified5hReset: now - 60_000, unified7d: 0.3, unified7dReset: now + 10 * H,
+    unified7dFable: 0.2, unified7dFableReset: now + 30 * H,
+  });
+  assert.equal(am.setRoutePin('fable', 1).ok, true, 'the premise: the pin routes the preview at the reset account');
+  // The current account is out, so the preview also falls through to a pick.
+  am.accounts[0].disabled = true;
+
+  const status = am.getStatus();
+  assert.ok(status.routing.some(e => e.route === 'fable'), 'the premise: the route scope is reported');
+  assert.equal(am.accounts[1].quota.unified5h, 0.99,
+    'the route preview consumed the session-reset event while answering a display');
+});
+
 test('the report names accounts and never a session id', () => {
   const now = Date.now();
   const am = ladderFleet(now);

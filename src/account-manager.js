@@ -751,17 +751,24 @@ export class AccountManager {
    * consumes an event a preview must not spend).
    */
   previewRouteIndex(model) {
+    // A PREVIEW, and its only callers are displays: the status report and the
+    // TUI. So it observes without writing — asking where a request would go must
+    // not be the thing that decides where the next one does. Availability here
+    // answers against the same post-clear state the request path would see; what
+    // it does not do is perform the clear, which would consume a session-reset
+    // event `refreshExpiredQuotas` owns.
+    const observe = { observe: true };
     const pinned = this._pinnedAccountForModel(model);
-    if (pinned && this._isAvailable(pinned, model)) return pinned.index;
+    if (pinned && this._isAvailable(pinned, model, null, observe)) return pinned.index;
     const current = this.accounts[this.currentIndex];
-    if (current && this._isAvailable(current, model)) {
+    if (current && this._isAvailable(current, model, null, observe)) {
       // Mirror getActiveAccount's priority preemption: a strictly higher-priority
       // available account wins over a healthy current one; same tier stays put.
       const better = this.accounts.some(a =>
-        this._isAvailable(a, model) && (a.priority || 0) < (current.priority || 0));
+        this._isAvailable(a, model, null, observe) && (a.priority || 0) < (current.priority || 0));
       if (!better) return current.index;
     }
-    const best = this._pickBestAvailable(null, model);
+    const best = this._pickBestAvailable(null, model, null, observe);
     return best ? best.index : null;
   }
 
@@ -946,13 +953,13 @@ export class AccountManager {
     return best;
   }
 
-  _isAvailable(account, model = null, advisorModel = null) {
+  _isAvailable(account, model = null, advisorModel = null, opts = {}) {
     // The null check is a lookup failure, not an availability question, so it
     // stays here rather than becoming a reason `_availability` could report.
     // Nothing enumerates a missing account, and inventing a code for one would
     // put a value in `excluded[]`'s domain that no fleet can produce.
     if (!account) return false;
-    return this._availability(account, model, advisorModel) === null;
+    return this._availability(account, model, advisorModel, opts) === null;
   }
 
   /**
@@ -976,7 +983,7 @@ export class AccountManager {
    *
    * @returns {{ reason: string, bucket: string|null, detail: number|null } | null}
    */
-  _availability(account, model = null, advisorModel = null) {
+  _availability(account, model = null, advisorModel = null, { observe = false } = {}) {
     // Manually disabled accounts are skipped entirely until re-enabled.
     if (account.disabled) return { reason: 'disabled', bucket: null, detail: null };
 
@@ -985,10 +992,15 @@ export class AccountManager {
       if (Date.now() < account.rateLimitedUntil) {
         return { reason: 'throttled', bucket: null, detail: account.rateLimitedUntil };
       }
-      account.status = 'active';
-      account.rateLimitedUntil = null;
-      account.throttledAt = null;
-      console.log(`[TeamClaude] Account "${account.name}" rate limit expired, marking active`);
+      // Past the hold: the account IS available. Writing that back is a state
+      // transition the request path owns, so an observer reaches the same
+      // answer without performing it.
+      if (!observe) {
+        account.status = 'active';
+        account.rateLimitedUntil = null;
+        account.throttledAt = null;
+        console.log(`[TeamClaude] Account "${account.name}" rate limit expired, marking active`);
+      }
     }
 
     if (account.status === 'exhausted') return { reason: 'exhausted', bucket: null, detail: null };
@@ -996,7 +1008,7 @@ export class AccountManager {
     // Model-scoped: _quotaBar checks the shared 5h bucket plus only the weekly
     // bucket that governs this model, so a spent Fable/Sonnet bucket bars just
     // that family — the account still serves every other model normally.
-    const bar = this._quotaBar(account, model);
+    const bar = this._quotaBar(account, model, { observe });
     if (bar) return bar;
 
     // Route/ownership restriction: a configured route can pin a model pattern to
@@ -1202,9 +1214,9 @@ export class AccountManager {
    * tiebreaks. Shared by both selection loops so they cannot disagree on the
    * candidate set.
    */
-  _bandedCandidates(exclude = null, model = null, advisorModel = null) {
+  _bandedCandidates(exclude = null, model = null, advisorModel = null, opts = {}) {
     return this._topPressureBand(
-      this.accounts.filter(a => !exclude?.has(a.index) && this._isAvailable(a, model, advisorModel)),
+      this.accounts.filter(a => !exclude?.has(a.index) && this._isAvailable(a, model, advisorModel, opts)),
       model);
   }
 
@@ -1575,7 +1587,7 @@ export class AccountManager {
       out.push({
         name: d.name, match: d.match, bucket: null, color: null, autocreated: true,
         pinned: this._pinnedName(d.name),
-        accounts: this.accounts.map(a => ({ name: a.name, eligible: this._isAvailable(a, d.sample) })),
+        accounts: this.accounts.map(a => ({ name: a.name, eligible: this._isAvailable(a, d.sample, null, { observe: true }) })),
         sample: d.sample,
         target: this._routeTarget(d.sample),
       });
@@ -1632,7 +1644,9 @@ export class AccountManager {
       // that removed them, so the two lists cannot disagree about an account and
       // `candidates + excluded.length === accounts.length` holds by construction
       // rather than by two filters agreeing.
-      const verdicts = this.accounts.map(account => ({ account, why: this._availability(account, model) }));
+      const verdicts = this.accounts.map(account => ({
+        account, why: this._availability(account, model, null, { observe: true }),
+      }));
       const candidates = verdicts.filter(v => v.why === null).map(v => v.account);
       const explained = explainBand(this._bandSnapshot(candidates, model, now));
       // The SAME projection selection applies, not a copy of it. The report
@@ -1725,7 +1739,7 @@ export class AccountManager {
     const sample = sampleModelFor(route);
     const inRoute = a => !route.accounts.length
       || route.accounts.includes(a.name) || route.accounts.includes(String(a.index));
-    return this.accounts.filter(inRoute).map(a => ({ name: a.name, eligible: this._isAvailable(a, sample) }));
+    return this.accounts.filter(inRoute).map(a => ({ name: a.name, eligible: this._isAvailable(a, sample, null, { observe: true }) }));
   }
 
   /** A representative model id for a route name (configured or auto fable/sonnet),
@@ -1796,48 +1810,80 @@ export class AccountManager {
    * "reset" log fires at most once per window.
    * @returns {{changed: boolean, session: boolean}} what was cleared.
    */
-  _clearExpiredQuotas(account) {
+  /**
+   * WHICH quota windows have expired, as a projection. Reads; never writes.
+   *
+   * Split from the clearing below because clearing is not only a tidy-up: a
+   * five-hour window whose reset has passed is a session-reset EVENT, and
+   * `refreshExpiredQuotas` owns it — it collects the accounts that reset and
+   * hands them to `_switchOnSessionReset`. Whoever nulls the fields first
+   * consumes that event, because the next reader sees a window that has already
+   * gone.
+   *
+   * That made an observer a participant. `_routingReport` walks availability for
+   * every account in every scope, availability asks the quota gate, and the gate
+   * cleared: so reading the status ate the rollover the request path would have
+   * acted on, and a fleet that had been polled routed somewhere else. Measured
+   * on two trees — before this round a poll left the field at 0.99, after it the
+   * field came back null and the destination changed.
+   *
+   * @returns {{ view: object, changed: boolean, session: boolean, cleared: string[] }}
+   */
+  _expiredQuotaView(account, now = Date.now()) {
     const q = account.quota;
-    const now = Date.now();
-    let changed = false;
+    const view = { ...q };
+    const cleared = [];
     let session = false;
 
-    // Clear expired unified quotas
     if (q.unified5h != null && q.unified5hReset && now >= q.unified5hReset) {
-      console.log(`[TeamClaude] Account "${account.name}" session quota reset`);
-      q.unified5h = null;
-      q.unified5hReset = null;
-      changed = true;
+      view.unified5h = null;
+      view.unified5hReset = null;
+      cleared.push('session');
       session = true;
     }
     if (q.unified7d != null && q.unified7dReset && now >= q.unified7dReset) {
-      console.log(`[TeamClaude] Account "${account.name}" weekly quota reset`);
-      q.unified7d = null;
-      q.unified7dReset = null;
-      q.unifiedStatus = null;
-      changed = true;
+      view.unified7d = null;
+      view.unified7dReset = null;
+      view.unifiedStatus = null;
+      cleared.push('weekly');
     }
     if (q.unified7dSonnet != null && q.unified7dSonnetReset && now >= q.unified7dSonnetReset) {
-      q.unified7dSonnet = null;
-      q.unified7dSonnetReset = null;
-      changed = true;
+      view.unified7dSonnet = null;
+      view.unified7dSonnetReset = null;
+      cleared.push('sonnet');
     }
     if (q.unified7dFable != null && q.unified7dFableReset && now >= q.unified7dFableReset) {
-      q.unified7dFable = null;
-      q.unified7dFableReset = null;
-      changed = true;
+      view.unified7dFable = null;
+      view.unified7dFableReset = null;
+      cleared.push('fable');
     }
-
-    // Clear expired standard quotas
     if (q.resetsAt && now >= new Date(q.resetsAt).getTime()) {
-      q.tokensRemaining = null;
-      q.tokensLimit = null;
-      q.requestsRemaining = null;
-      q.requestsLimit = null;
-      q.resetsAt = null;
-      changed = true;
+      view.tokensRemaining = null;
+      view.tokensLimit = null;
+      view.requestsRemaining = null;
+      view.requestsLimit = null;
+      view.resetsAt = null;
+      cleared.push('standard');
     }
 
+    return { view, changed: cleared.length > 0, session, cleared };
+  }
+
+  _clearExpiredQuotas(account) {
+    const { view, changed, session, cleared } = this._expiredQuotaView(account);
+    if (!changed) return { changed, session };
+    if (cleared.includes('session')) {
+      console.log(`[TeamClaude] Account "${account.name}" session quota reset`);
+    }
+    if (cleared.includes('weekly')) {
+      console.log(`[TeamClaude] Account "${account.name}" weekly quota reset`);
+    }
+    // In place, not a reassignment. Callers hold `account.quota` across this —
+    // the test helpers do, and so does anything that captured it before a sweep
+    // — and swapping the object would leave every such reference reading the
+    // pre-clear values while the account itself had moved on. Same fields, same
+    // object identity.
+    Object.assign(account.quota, view);
     return { changed, session };
   }
 
@@ -1949,9 +1995,12 @@ export class AccountManager {
    *
    * @returns {{ reason: string, bucket: string|null, detail: number } | null}
    */
-  _quotaBar(account, model = null) {
-    const q = account.quota;
-    this._clearExpiredQuotas(account);
+  _quotaBar(account, model = null, { observe = false } = {}) {
+    // Observing answers against the SAME post-clear state the request path
+    // would see, without performing the clear — so the answer is identical and
+    // the session-reset event stays unconsumed for whoever owns it.
+    const q = observe ? this._expiredQuotaView(account).view : account.quota;
+    if (!observe) this._clearExpiredQuotas(account);
 
     // Shared 5-hour bucket gates every request regardless of model.
     if (q.unified5h != null && q.unified5h >= this.switchThreshold) {
@@ -1966,7 +2015,7 @@ export class AccountManager {
     // When the family bucket isn't reported the shared one answers alone.
     // One definition, in `gatingUtilization`; the status row and the TUI tag
     // display this same value rather than deriving it again.
-    const weekly = this._governingWeeklySource(account, model);
+    const weekly = gatingSource(q, this._governingBucket({ ...account, quota: q }, model));
     if (weekly != null && weekly.value >= this.switchThreshold) {
       return { reason: 'weekly-spent', bucket: weekly.bucket, detail: weekly.value };
     }
@@ -2009,13 +2058,13 @@ export class AccountManager {
    * member out before this loop ever saw it. Returns the account or null if none
    * are available.
    */
-  _pickBestAvailable(exclude = null, model = null, advisorModel = null) {
+  _pickBestAvailable(exclude = null, model = null, advisorModel = null, opts = {}) {
     let best = null;
     let bestPriority = Infinity;
     let bestPressure = Infinity;
     let bestReset = Infinity;
 
-    const candidates = this._bandedCandidates(exclude, model, advisorModel);
+    const candidates = this._bandedCandidates(exclude, model, advisorModel, opts);
     // One clock for every candidate, for the reason the band reads one: pressure
     // rises continuously as a window nears its reset, so scoring two accounts at
     // different instants decides an exact tie on the microseconds between two
