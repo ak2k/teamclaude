@@ -315,3 +315,74 @@ test('each account publishes what it is carrying and how many reports back it', 
   assert.equal(idle.load, 0, 'an account carrying nothing reports no load');
   assert.equal(idle.observed, 0);
 });
+
+test('a missing pressure says which measurement is missing', () => {
+  const now = Date.now();
+  const am = new AccountManager(
+    [apikey('no-util'), apikey('no-reset'), apikey('healthy'), apikey('bad-util')], 0.98);
+  // Each account is one absence, set away from the null default so freezing the
+  // field to null fails here rather than passing on the happy path. The healthy
+  // one is the other half of the claim: `pressureAbsent` is non-null EXACTLY
+  // when `pressure` is null, so a fixture of absences alone would let a field
+  // that is always non-null pass.
+  am.accounts[0].quota = { ...am.accounts[0].quota, unified7d: null, unified7dReset: now + 3600e3 };
+  am.accounts[1].quota = { ...am.accounts[1].quota, unified7d: 0.4, unified7dReset: null };
+  am.accounts[2].quota = { ...am.accounts[2].quota, unified7d: 0.4, unified7dReset: now + 3600e3 };
+  am.accounts[3].quota = { ...am.accounts[3].quota, unified7d: Number.NaN, unified7dReset: now + 3600e3 };
+
+  const [noUtil, noReset, healthy, badUtil] = am.getStatus().accounts;
+
+  assert.equal(noUtil.pressure, null);
+  assert.equal(noUtil.pressureAbsent, 'no-utilization',
+    'a window nobody has reported reads the same as one whose reset is missing');
+  assert.equal(noReset.pressure, null);
+  assert.equal(noReset.pressureAbsent, 'no-reset');
+  assert.equal(badUtil.pressure, null);
+  assert.equal(badUtil.pressureAbsent, 'utilization-not-finite',
+    'a malformed value reads as merely unreported, so nobody goes and looks at the account');
+  assert.ok(healthy.pressure > 0, 'the fixture must contain a measurable account');
+  assert.equal(healthy.pressureAbsent, null,
+    'a measured account carries an absence reason, so the field means nothing');
+});
+
+test('the absence reason never reports the feature flag', () => {
+  // `expiry-routing-off` is a reason `_pickPressures` gives for a model-scoped
+  // question. This pressure is computed whether the flag is on or off, so
+  // publishing the flag here would report a measured fleet as unmeasurable
+  // because a feature is switched off.
+  const now = Date.now();
+  const quota = { unified7d: 0.4, unified7dReset: now + 3600e3 };
+  const off = new AccountManager([apikey('a'), apikey('b')], 0.98);
+  const on = new AccountManager([apikey('a'), apikey('b')], 0.98,
+    { expiryRouting: { enabled: true } });
+  for (const am of [off, on]) {
+    for (const a of am.accounts) a.quota = { ...a.quota, ...quota };
+  }
+
+  assert.equal(off.expiryRouting.enabled, false, 'the premise: this manager has the feature off');
+  assert.equal(on.expiryRouting.enabled, true, 'the premise: this manager has it on');
+  for (const account of off.getStatus().accounts) {
+    assert.equal(account.pressureAbsent, null);
+    assert.ok(account.pressure > 0, 'pressure is computed with expiry routing off');
+  }
+  assert.deepEqual(
+    off.getStatus().accounts.map(a => a.pressureAbsent),
+    on.getStatus().accounts.map(a => a.pressureAbsent),
+    'the absence reason moved when the feature flag moved');
+});
+
+test('an account publishes how many requests it is carrying right now', async () => {
+  const am = new AccountManager([apikey('busy'), apikey('idle')], 0.98);
+  // Through admit() rather than by assigning the counter: admit() is what the
+  // request path calls, so a field wired to something else fails here.
+  assert.equal(await am.admit(0), true);
+  assert.equal(await am.admit(0), true);
+  assert.equal(await am.admit(1), true);
+  am.release(1);
+
+  const [busy, idle] = am.getStatus().accounts;
+  assert.equal(busy.inFlight, 2,
+    'the in-flight gauge is not published, so the term that ranks is invisible');
+  assert.equal(idle.inFlight, 0,
+    'zero here is a measurement, nothing in flight, and is what a released slot returns to');
+});

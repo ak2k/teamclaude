@@ -1117,19 +1117,33 @@ export class AccountManager {
    * scored against the same instant.
    */
   _expiryPressure(account, model = null, now = Date.now()) {
-    // One implementation of pressure, in the decision layer. This wrapper is
-    // the status payload's view of it, which has to publish `null` where the
-    // decision says `absent`: two encodings of the same fact, and the wire
-    // format is not free to change. Reimplementing the arithmetic here instead
-    // would give the published figure and the routing decision separate
-    // definitions of the same word.
-    const [snapshotAccount] = this._bandSnapshot([account], model, now).accounts;
-    const pressure = pressureOf(snapshotAccount, now);
+    const pressure = this._pressureVariant(account, model, now);
     switch (pressure.kind) {
       case 'known': return pressure.value;
       case 'absent': return null;
       default: return assertNever(pressure, '_expiryPressure');
     }
+  }
+
+  /**
+   * The same pressure in the decision layer's own encoding, absence and all.
+   *
+   * One implementation of pressure, in the decision layer. `_expiryPressure` is
+   * the wire's view of it and has to publish `null` where the decision says
+   * `absent`, because the payload's `pressure` field is a number and that format
+   * is not free to change. Reimplementing the arithmetic for either view would
+   * give the published figure and the routing decision separate definitions of
+   * the same word.
+   *
+   * The status payload takes the variant rather than the number so it can
+   * publish WHY a pressure is missing beside the null it has to send anyway.
+   * Both fields come from this one call, which is what makes "absent exactly
+   * when null" a property of the code instead of an agreement between two call
+   * sites.
+   */
+  _pressureVariant(account, model = null, now = Date.now()) {
+    const [snapshotAccount] = this._bandSnapshot([account], model, now).accounts;
+    return pressureOf(snapshotAccount, now);
   }
 
 
@@ -2328,14 +2342,16 @@ export class AccountManager {
       },
       routes: this.getRoutes(),
       sessions: { ...sessions, distribute: this.distributeSessions },
-      accounts: this.accounts.map(a => ({
-        name: a.name,
-        type: a.type,
-        orgName: a.orgName || null,
-        priority: a.priority || 0,
-        disabled: a.disabled || false,
-        status: a.status,
-        sessions: sessions.perAccount[a.index] || 0,
+      accounts: this.accounts.map(a => {
+        const pressure = this._pressureVariant(a);
+        return {
+          name: a.name,
+          type: a.type,
+          orgName: a.orgName || null,
+          priority: a.priority || 0,
+          disabled: a.disabled || false,
+          status: a.status,
+          sessions: sessions.perAccount[a.index] || 0,
         // What this account is measurably carrying, and how many upstream
         // reports back that figure. Published together because neither is
         // legible alone: `load: 0` with sessions on the account is a dead token
@@ -2343,19 +2359,39 @@ export class AccountManager {
         // not, and nothing else on this payload separates them. That is the
         // same distinction `reports` exists for one layer in, at the level an
         // operator actually reads.
-        load: measured.get(a.index).context,
-        observed: measured.get(a.index).reports,
-        // Shared-weekly pressure (model-agnostic view); null while unknown.
-        pressure: this._expiryPressure(a),
-        quota: { ...a.quota },
-        usage: { ...a.usage },
-        rateLimitedUntil: a.rateLimitedUntil
-          ? new Date(a.rateLimitedUntil).toISOString()
-          : null,
-        pausedUntil: a.pausedUntil && a.pausedUntil > Date.now()
-          ? new Date(a.pausedUntil).toISOString()
-          : null,
-      })),
+          load: measured.get(a.index).context,
+          observed: measured.get(a.index).reports,
+          // How many requests this account is carrying RIGHT NOW. A live gauge,
+          // like `rolloversOwed` and unlike `rolloversDetected`: zero is a
+          // measurement meaning nothing is in flight, not a missing reading, and
+          // nothing accumulates. It is already a ranking term in `_pickSnapshot`
+          // and was the one term an operator could not see, so a pick that went
+          // somewhere unexpected had a reason with no field behind it.
+          inFlight: a.inFlight || 0,
+          // Shared-weekly pressure (model-agnostic view); null while unknown,
+          // and `pressureAbsent` says which unknown. A bare null cannot separate
+          // a window nobody has reported from a reset instant that never
+          // arrived from a value that came back malformed, and those want
+          // different actions: wait, wait, or go and look at the account.
+          //
+          // 'expiry-routing-off' is deliberately NOT in this field's domain.
+          // That reason belongs to `_pickPressures`, which answers a
+          // model-scoped question about the feature flag. This pressure is
+          // computed whether the flag is on or off, so reporting the flag here
+          // would call a measured fleet unmeasurable because a feature is
+          // switched off.
+          pressure: pressure.kind === 'known' ? pressure.value : null,
+          pressureAbsent: pressure.kind === 'absent' ? pressure.reason : null,
+          quota: { ...a.quota },
+          usage: { ...a.usage },
+          rateLimitedUntil: a.rateLimitedUntil
+            ? new Date(a.rateLimitedUntil).toISOString()
+            : null,
+          pausedUntil: a.pausedUntil && a.pausedUntil > Date.now()
+            ? new Date(a.pausedUntil).toISOString()
+            : null,
+        };
+      }),
     };
   }
 }
