@@ -116,6 +116,22 @@ test('the gate grades the stop clause on BOTH measurements, not on the one it th
   }
 });
 
+// The caption has TWO branches and the gate graded one. The other runs whenever
+// no account has reported a five-hour level — cold start, probe off — and went
+// ungraded for the whole round. That is the stop clause's gap on a different
+// axis, and deferring the stop clause once is how it became a finding.
+test('the gate grades the banded caption, not only the sized one', () => {
+  const { code, out } = gate([`--sample=${SAMPLE}`, '--model=claude-fable-5', `--now=${NOW}`]);
+  assert.equal(code, 0, out);
+  const reproduces = out.split('\n').find(l => l.startsWith('banded') && l.includes('the sentence admits'));
+  assert.ok(reproduces, 'the banded sentence is ungraded, which is the state the stop clause was in');
+  assert.match(reproduces, /REPRODUCES/,
+    'the banded caption does not describe what the ratio rule did');
+  const control = out.split('\n').find(l => l.startsWith('banded') && l.includes('exemption'));
+  assert.match(control, /DIFFERS, as it must/,
+    'a caption that dropped "admitted regardless" would grade identically');
+});
+
 test('a sample read without its capture clock is refused, not guessed at', () => {
   const { code, out } = gate([`--sample=${SAMPLE}`, '--model=claude-fable-5']);
   assert.equal(code, 2);

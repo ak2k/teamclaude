@@ -552,6 +552,97 @@ function gradeExemption(axis, drop, expectedReason) {
 gradeExemption('pressure', { resetAt: null }, 'unmeasured-exempt-pressure');
 gradeExemption('headroom', { fiveHour: null }, 'unmeasured-exempt-headroom');
 
+// ── THE BANDED CAPTION ──────────────────────────────────────────────────────
+//
+// `ruleCaption` has two branches and everything above grades one of them. The
+// other runs whenever no account has reported a five-hour level — the
+// cold-start and probe-off state, which is not exotic — and it has never been
+// graded at all. That is the same gap the stop clause was in for four passes,
+// on a different axis, and deferring it once is how that one became a finding.
+//
+// The banded sentence claims three things: the best priority TIER, everything
+// within the tolerance RATIO of the best unspent-weekly-per-hour, and accounts
+// with no pressure reading admitted REGARDLESS. Each is replayed literally
+// against `floorSteps`, from the same sample with its five-hour readings
+// removed — which is precisely what makes the band fall back to the ratio.
+// Synthesised on two axes, because the committed sample cannot exercise either
+// clause on its own: with the five-hour readings gone every account still has a
+// known pressure and all of them clear the floor, so a caption saying "admit
+// everything" would reproduce exactly as well as the real one. The
+// lowest-ranked account's window is pushed far out (pressure below the floor,
+// so the RATIO is observable) and the next one's reset is removed (pressure
+// absent, so the EXEMPTION is observable).
+const belowIdx = codeOrder[codeOrder.length - 1];
+const absentIdx = codeOrder[codeOrder.length - 2];
+const bandedSnapshot = {
+  ...snapshot,
+  accounts: snapshot.accounts.map((a) => {
+    const base = { ...a, fiveHour: null };
+    if (a.index === belowIdx) return { ...base, resetAt: snapshot.now + 1e12 };
+    if (a.index === absentIdx) return { ...base, resetAt: null };
+    return base;
+  }),
+};
+const bandedDecision = decideBand(bandedSnapshot);
+// Premise: the fallback must actually be running, or this grades the sentence
+// that is not on screen.
+if (bandedDecision.kind !== 'banded') {
+  refuse(`removing every five-hour reading still decides '${bandedDecision.kind}', so the `
+    + 'banded caption never runs on this sample and cannot be graded from it');
+}
+
+const bandedTier = bandedSnapshot.accounts
+  .filter(a => a.priority === Math.min(...bandedSnapshot.accounts.map(x => x.priority)));
+const bandedScores = bandedTier.map(a => pressureScore(a));
+const maxKnown = Math.max(...bandedScores.filter(v => v != null));
+const ratio = Number.isFinite(bandedSnapshot.tolerance) && bandedSnapshot.tolerance > 0
+  ? bandedSnapshot.tolerance : 1;
+const asWrittenFloor = Math.min(maxKnown, maxKnown / ratio);
+// The sentence, replayed: admit an account whose pressure is at or above the
+// floor, and admit an account with no pressure reading whatever the floor is.
+const bandedKeep = bandedTier
+  .filter((a, i) => bandedScores[i] == null || bandedScores[i] >= asWrittenFloor)
+  .map(a => a.index);
+const bandedCode = bandedDecision.keep.filter(i => bandedTier.some(a => a.index === i));
+// Premises, so the comparison below cannot pass by admitting everything: the
+// floor must exclude one account, and one must be admitted with no reading.
+if (bandedCode.includes(belowIdx)) {
+  refuse(`the floor admits [${belowIdx}] on the banded fleet, so the tolerance clause is not `
+    + 'observable here and a caption with no floor at all would grade the same. TWO CAUSES, '
+    + 'and the second is likelier: this sample stopped discriminating, or `floorSteps` stopped '
+    + 'applying the floor. Read the rule before touching the fixture.');
+}
+if (!bandedCode.includes(absentIdx)) {
+  refuse(`the account with no pressure reading [${absentIdx}] was not admitted, so the `
+    + '"regardless" clause is not what this sample exercises. TWO CAUSES, and the second is '
+    + 'likelier: this sample stopped carrying an unmeasured account, or `floorSteps` stopped '
+    + 'exempting one. Read the rule before touching the fixture.');
+}
+const bandedAgrees = sameSet(bandedKeep, bandedCode)
+  && sameTotal(asWrittenFloor, bandedDecision.floor);
+console.log(`\nbanded      the sentence admits [${bandedKeep}] at floor ${asWrittenFloor.toExponential(3)}`
+  + `  against the decision's [${bandedCode}] at ${bandedDecision.floor.toExponential(3)}`
+  + `  ${bandedAgrees ? 'REPRODUCES' : 'FALSIFIED'}`);
+if (!bandedAgrees) {
+  console.error('  the banded caption does not describe what the ratio rule did on this fleet.');
+  process.exit(1);
+}
+
+// Its red control, on the clause most easily lost: a reading that drops the
+// exemption admits a SMALLER set, or the exemption is invisible here and the
+// clause is ungraded — the same argument as the stop clause's two axes.
+const strictBanded = bandedTier
+  .filter((a, i) => bandedScores[i] != null && bandedScores[i] >= asWrittenFloor)
+  .map(a => a.index);
+const exemptionObservable = !sameSet(bandedKeep, strictBanded);
+console.log(`banded      with the pressure exemption [${bandedKeep}] against a strict floor `
+  + `[${strictBanded}]  ${exemptionObservable ? 'DIFFERS, as it must' : 'READS THE SAME'}`);
+if (!exemptionObservable) {
+  console.error('  no account in this sample lacks a pressure reading once the five-hour figures');
+  console.error('  are gone, so "admitted regardless" is not exercised and the clause is ungraded.');
+  process.exit(1);
+}
+
 const tally = results.reduce((acc, r) => { acc[r.verdict] = (acc[r.verdict] || 0) + 1; return acc; }, {});
 const failed = results.filter(r => r.verdict === 'FALSIFIED' || r.verdict === 'INDISTINGUISHABLE');
 console.log(`\nsummary    ${Object.entries(tally).map(([k, v]) => `${v} ${k}`).join(', ')}` +
