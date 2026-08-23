@@ -357,7 +357,14 @@ test('a pin that fell through names the destination the router chose, not the pi
   // Control: the same fixture with the pinned account healthy. Without it these
   // assertions pass for a block that never credits a pin at all.
   const honoured = build(true).getStatus();
-  assert.equal(honoured.routing.find(e => e.route === 'fable').target, 'pinned');
+  const honouredEntry = honoured.routing.find(e => e.route === 'fable');
+  assert.equal(honouredEntry.target, 'pinned');
+  // The control needs the same premise the main case does: if the healthy pin
+  // also won the load ranking, this arm would be satisfied by a block that
+  // ignored the pin entirely and printed the pick.
+  assert.notEqual(honouredEntry.target, honouredEntry.pick.account,
+    'the honoured pin is also the load-ranked winner, so this control cannot tell '
+    + 'a credited pin from an ignored one');
   assert.match(row(renderStatus(honoured, { color: false, now }).split('\n'), 'New session'),
     /→ pinned .*route pin/,
     'an honoured pin is not credited, so the block cannot distinguish the two cases');

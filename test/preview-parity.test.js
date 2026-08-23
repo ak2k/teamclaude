@@ -172,9 +172,15 @@ test('the block names the account a NEW SESSION is served by, which is a differe
     arrange(served);
 
     const entry = observed.getStatus().routing.find(e => e.route === 'fable');
-    // The premise `baseFleet` exists to provide: the router's choice and the
-    // load-ranked winner must differ, or this cannot tell which one is printed.
-    if (entry.target !== entry.pick.account) distinguished += 1;
+    // PER ARM, not once across the set. The router's choice and the load-ranked
+    // winner must differ on THIS arm, or this arm holds whichever destination
+    // the block printed and contributes nothing — including the honoured-pin
+    // arm, which exists to prove the block can still credit a pin and would be
+    // satisfied by a block that never consults the pin at all.
+    assert.notEqual(entry.target, entry.pick.account,
+      `${label}: the router's choice and the pick are the same account, so this arm `
+      + 'cannot tell which branch produced the row');
+    distinguished += 1;
 
     const account = served.getActiveAccount(null, model, null, `sess-${label}`, {});
     const expected = account ? account.name : null;
@@ -190,9 +196,8 @@ test('the block names the account a NEW SESSION is served by, which is a differe
       `${label}: the block names ${shown}, a new session is served by ${expected}`);
   }
 
-  assert.ok(distinguished > 0,
-    'no state had the router and the pick disagreeing, so every assertion above held '
-    + 'whichever destination the block printed');
+  assert.equal(distinguished, NEW_SESSION_STATES.length,
+    'an arm was skipped, so the set is smaller than it reads');
 });
 
 test('the states that must move the answer do move it', () => {
