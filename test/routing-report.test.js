@@ -335,43 +335,56 @@ test('a manual route pin is what the entry reports, not the load winner', () => 
   }
 });
 
-test('reading the status cannot change where the next request goes', () => {
-  // The report walks availability for every account in every scope, and the
-  // quota gate used to CLEAR expired windows as it answered. A five-hour window
-  // whose reset has passed is a session-reset event that `refreshExpiredQuotas`
-  // owns — it collects the accounts that reset and hands them to
-  // `_switchOnSessionReset` — so clearing it first consumed the event, and a
-  // fleet that had been polled routed somewhere else than one that had not.
+test('a status poll cannot change the account the next request selects', () => {
+  // THE CLAIM: reading `/teamclaude/status` is free of routing consequence. A
+  // poll can happen at any frequency, from a dashboard, a scrape or a person
+  // pressing a key, and none of it may move traffic. A read that changes where
+  // the next request goes is a read nobody can afford to automate.
   //
-  // Two arms differing only in whether the status was read. Anything an
-  // observer does that a non-observer does not is a bug by construction here,
-  // which is why this asserts the destination rather than any field.
+  // This is the evidence for that claim rather than an assertion of it, and it
+  // is the answer to upstream issue #177's question about whether the status
+  // endpoint is side-effect free. The honest form of the answer is: polling is
+  // idempotent with respect to routing, demonstrated by two fleets that differ
+  // in nothing but whether they were read.
+  //
+  // HOW IT DEMONSTRATES THAT. Two identical fleets. One is polled before the
+  // request path runs, one is not. If reading has no consequence they must
+  // select the same account, so a difference between the arms IS the defect —
+  // which is why the assertion is on the selected account and not on any
+  // internal field.
+  //
+  // The fleet is built so the arms have something to disagree about. One
+  // account's five-hour window has already reset; that reset is an event which
+  // moves the current account, so it is worth stealing and its theft is
+  // visible. Without it both arms would agree for a reason unrelated to the
+  // property, and the test would pass while proving nothing.
   const now = Date.now();
-  const build = () => {
+  const identicalFleet = () => {
     const am = fleet({ accounts: ['incumbent', 'resetting'] });
-    quota(am, 0, { unified5h: 0.2, unified5hReset: now + 2 * H, unified7d: 0.3, unified7dReset: now + 300 * H });
-    // Its five-hour window has already reset, and its weekly expires far sooner,
-    // so the session-reset switch should move to it.
-    quota(am, 1, { unified5h: 0.99, unified5hReset: now - 60_000, unified7d: 0.3, unified7dReset: now + 10 * H });
+    am.accounts[0].quota = { ...am.accounts[0].quota,
+      unified5h: 0.2, unified5hReset: now + 2 * H, unified7d: 0.3, unified7dReset: now + 300 * H };
+    // Five-hour window already past its reset, weekly expiring much sooner than
+    // the incumbent's: the account the reset event should move traffic to.
+    am.accounts[1].quota = { ...am.accounts[1].quota,
+      unified5h: 0.99, unified5hReset: now - 60_000, unified7d: 0.3, unified7dReset: now + 10 * H };
     return am;
   };
 
-  const unpolled = build();
-  unpolled.refreshExpiredQuotas();
-  const withoutPoll = unpolled.accounts[unpolled.currentIndex].name;
+  const neverRead = identicalFleet();
+  assert.ok(neverRead.accounts[1].quota.unified5hReset < now,
+    'the premise: there is a reset event for a poll to consume, or both arms agree for free');
+  neverRead.refreshExpiredQuotas();
+  const selectedWithoutAnyPoll = neverRead.accounts[neverRead.currentIndex].name;
 
-  const polled = build();
-  polled.getStatus();
-  const fiveHourSurvived = polled.accounts[1].quota.unified5h;
-  polled.refreshExpiredQuotas();
-  const withPoll = polled.accounts[polled.currentIndex].name;
+  const readFirst = identicalFleet();
+  readFirst.getStatus();
+  readFirst.refreshExpiredQuotas();
+  const selectedAfterAPoll = readFirst.accounts[readFirst.currentIndex].name;
 
-  assert.equal(withoutPoll, 'resetting',
-    'the premise: unobserved, the session reset moves the current account');
-  assert.equal(fiveHourSurvived, 0.99,
-    'the status read consumed the reset event before the request path could see it');
-  assert.equal(withPoll, withoutPoll,
-    'reading the status changed where the next request goes');
+  assert.equal(selectedWithoutAnyPoll, 'resetting',
+    'the premise: unread, the reset event moves the selected account, so there is a change to lose');
+  assert.equal(selectedAfterAPoll, selectedWithoutAnyPoll,
+    'reading the status changed the account the next request selects');
 });
 
 test('an observer answers with the state the request path would see', () => {
