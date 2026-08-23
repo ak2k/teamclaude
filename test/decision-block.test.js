@@ -300,6 +300,53 @@ test('a route pin is what the block names, even with distribution on', () => {
   assert.match(line, /route pin/, 'the block credits a term when a pin decided');
 });
 
+test('a pin that fell through is not credited, and is not hidden either', () => {
+  // `setRoutePin` documents pinning a near-quota or throttled account as
+  // supported: it acts as a preference and routing falls back to best-available
+  // until the pinned account is eligible. Branching on the pin's EXISTENCE
+  // therefore credited a pin that had not acted — and worse, suppressed the
+  // reason that had, sending a reader debugging the destination to the pin.
+  //
+  // Four accounts, because removing the pinned one must still leave a band that
+  // sizes; on two or three the scope passes through and the block renders
+  // nothing, which reads as agreement.
+  const now = Date.now();
+  const build = pinnedHealthy => {
+    const am = new AccountManager(['a', 'b', 'c', 'pinned'].map(acct), 0.98, {
+      expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 },
+      routes: [{ name: 'fable', match: ['*fable*'] }],
+      distributeSessions: true,
+    });
+    am.accounts.forEach((x, i) => {
+      x.quota = { ...x.quota,
+        unified5h: 0.05 + i * 0.1, unified5hReset: now + 2 * H,
+        unified7d: 0.1 + i * 0.1, unified7dReset: now + (20 + i * 10) * H,
+        unified7dFable: 0.1 + i * 0.1, unified7dFableReset: now + (30 + i * 10) * H };
+    });
+    // Near-quota rather than disabled: the state the docstring names.
+    if (!pinnedHealthy) am.accounts[3].quota = { ...am.accounts[3].quota, unified5h: 0.99 };
+    assert.equal(am.setRoutePin('fable', 3).ok, true, 'the premise: the pin was accepted');
+    return am;
+  };
+
+  const fellThrough = build(false).getStatus();
+  const entry = fellThrough.routing.find(e => e.route === 'fable');
+  assert.equal(entry.pinnedTo, 'pinned', 'the premise: a pin is set');
+  assert.notEqual(entry.target, 'pinned', 'the premise: it did not win, so crediting it would be false');
+  const newSession = row(renderStatus(fellThrough, { color: false, now }).split('\n'), 'New session');
+  assert.doesNotMatch(newSession, /route pin\)/, 'the block credits a pin that did not act');
+  assert.match(newSession, /by \w+/, 'the reason that DID choose is suppressed by the pin branch');
+  assert.match(newSession, /pin to pinned is not eligible/,
+    'a pin the operator set vanished from the block, which reads as no pin at all');
+
+  // Control: the same fixture with the pinned account healthy. Without this the
+  // assertions above pass for a block that never credits a pin at all.
+  const honoured = build(true).getStatus();
+  assert.equal(honoured.routing.find(e => e.route === 'fable').target, 'pinned');
+  assert.match(row(renderStatus(honoured, { color: false, now }).split('\n'), 'New session'), /→ pinned .*route pin/,
+    'an honoured pin is not credited, so the block cannot distinguish the two cases');
+});
+
 test('a block for one of two same-named routes shows its own globs', () => {
   // Route names are not unique, so a renderer joining the entry back to routes[]
   // by name labels this decision with another route's globs. The fable route is

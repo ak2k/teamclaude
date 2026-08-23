@@ -272,9 +272,21 @@ function decisionLines(entry, status, blocked, paint) {
   // again when a manual route pin is set for this scope — a pin wins over load
   // ranking whether or not distribution is on. In both cases the router sends a
   // new session to the same place it sends anything else.
-  if (!distributing || entry.pinnedTo) {
-    const why = entry.pinnedTo ? `route pin${distributing ? '' : '; distribution off'}`
-      : 'distribution off; not load-ranked';
+  // A pin that EXISTS is not a pin that ACTED. `setRoutePin` documents pinning a
+  // near-quota or throttled account as supported — it acts as a preference and
+  // routing falls back to best-available until the pinned account is eligible —
+  // so branching on the pin's existence credited a pin that had fallen through,
+  // for a destination the ordinary ranking chose. Worse than a wrong label: it
+  // replaced the true reason with a false one, so a reader debugging why traffic
+  // sits on that account was sent to look at the pin.
+  const pinHonoured = Boolean(entry.pinnedTo) && entry.target === entry.pinnedTo;
+  // And a pin that fell through must not vanish from the block either. The
+  // operator set it and is watching for it; silence reads as "no pin here".
+  const pinNote = entry.pinnedTo && !pinHonoured
+    ? `; pin to ${entry.pinnedTo} is not eligible` : '';
+  if (!distributing || pinHonoured) {
+    const why = pinHonoured ? `route pin${distributing ? '' : '; distribution off'}`
+      : `distribution off; not load-ranked${pinNote}`;
     if (entry.target) {
       out.push(`  ${paint.dim('New session'.padEnd(13))}${paint.dim('→')} ${entry.target} `
         + `${paint.dim(`(${why})`)}`);
@@ -285,7 +297,7 @@ function decisionLines(entry, status, blocked, paint) {
     const tie = pick.tiedWith.length
       ? `first of ${pick.tiedWith.length + 1} tied on every term, config order`
       : term;
-    out.push(`  ${paint.dim('New session'.padEnd(13))}${paint.dim('→')} ${pick.account} ${paint.dim(`(${tie})`)}`);
+    out.push(`  ${paint.dim('New session'.padEnd(13))}${paint.dim('→')} ${pick.account} ${paint.dim(`(${tie}${pinNote})`)}`);
   } else {
     out.push(`  ${paint.dim('New session'.padEnd(13))}${paint.dim('nothing eligible for this scope')}`);
   }
