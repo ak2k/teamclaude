@@ -197,7 +197,12 @@ const END_IN_FINALLY = '        accountManager.endSession(sessionId, ctx.hold);\
 const FORWARD_AWAIT = '        await forwardRequest(req, res, body, accountManager, upstream, 0, hooks, reqId, ctx, logDir, sx);\n';
 const REC_STREAM = '      accountManager.recordTokenUsage(accountIndex, sessionId, model, merged);';
 const REC_BODY = '      accountManager.recordTokenUsage(accountIndex, sessionId, model, json.usage);';
-const BAND_APPLY = '    const decision = decideBand(this._bandSnapshot(candidates, model, Date.now()));\n';
+// Re-anchored when the band's clock became a parameter: an observation hands in
+// the instant its projection was taken at, so the call no longer reads
+// `Date.now()` here. The interventions are unchanged — one severs the decision
+// from its application, the other freezes the clock — but the anchor had to
+// follow the text, and until it did both rows measured nothing and said so.
+const BAND_APPLY = '    const decision = decideBand(this._bandSnapshot(candidates, model, now));\n';
 const SIZED_BRANCH = '  const sizing = sizeByCapacity(tier, pressures, snapshot);\n';
 const UNMEASURED_BOTH = '    const unmeasured = entry.headroom.kind === \'absent\' || entry.pressure.kind === \'absent\';\n';
 // Re-anchored when the admission loop began recording its steps: the stop went
@@ -206,7 +211,11 @@ const UNMEASURED_BOTH = '    const unmeasured = entry.headroom.kind === \'absent
 // admitted — but the anchor had to follow the text, and until it did this row
 // silently measured nothing while the table still counted 63.
 const COVERAGE_STOP = '    if (!unmeasured && achieved >= snapshot.coverage) {\n';
-const RESET_RANK_GUARD = '    if (rankOf.get(best.index) > rankOf.get(current.index)) return;\n';
+// Re-anchored when the session-reset switch was split into a chooser and an
+// applier: the guard now refuses by returning null to `_switchOnSessionReset`
+// rather than returning from it. Same intervention — delete the guard and the
+// switch may leave a strictly better incumbent behind.
+const RESET_RANK_GUARD = '    if (rankOf.get(best.index) > rankOf.get(current.index)) return null;\n';
 const RESET_RANK_ORDER = '      if (mine < theirs\n';
 const HOLD_RELEASE = '    this._releaseHold(s, hold);\n';
 const HOLD_DRAIN = '      for (const h of [...s.holds]) this._releaseHold(s, h);\n';
@@ -373,7 +382,7 @@ const M = [
   // anything calls it; these sever the call site instead, which is the failure
   // that ships green.
   ['bandDecision      call site ignores the decision', BAND_APPLY,
-    '    const decision = decideBand(this._bandSnapshot(candidates, model, Date.now()));\n'
+    '    const decision = decideBand(this._bandSnapshot(candidates, model, now));\n'
     + '    void decision;\n    return candidates;\n', 'src/account-manager.js'],
   ['bandDecision      snapshot ignores the clock', BAND_APPLY,
     '    const decision = decideBand(this._bandSnapshot(candidates, model, 0));\n',
