@@ -328,21 +328,44 @@ export class SessionTracker {
   // state once the bounded probe has found no idle victim, so the cap holds at
   // any concurrency. Returns false only when the map is empty.
   _evictOne() {
+    const victim = this.evictionVictim();
+    if (victim === null) return false;
+    this.sessions.delete(victim);
+    this.evicted += 1;
+    return true;
+  }
+
+  /**
+   * WHICH session the next eviction would take, or null when there is none.
+   * Reads; never writes.
+   *
+   * Split from the eviction above for the reason every other chooser in this
+   * codebase is split from its applier: admitting a session at the cap evicts
+   * one, and the eviction changes `loadFor` — so a report that says where a NEW
+   * session would go is answering over a session set that admitting the session
+   * destroys. The observer needs the victim's identity without spending it.
+   *
+   * One rule, not two: the eviction calls this rather than repeating the probe,
+   * so an observer and a request cannot disagree about who dies.
+   */
+  evictionVictim() {
     let probed = 0;
     let oldest = null;
     for (const [id, s] of this.sessions) {
       if (oldest === null) oldest = id;
-      if (s.inFlight === 0) {
-        this.sessions.delete(id);
-        this.evicted += 1;
-        return true;
-      }
+      if (s.inFlight === 0) return id;
       if (++probed >= SESSION_EVICT_PROBE) break;
     }
-    if (oldest === null) return false;
-    this.sessions.delete(oldest);
-    this.evicted += 1;
-    return true;
+    return oldest;
+  }
+
+  /**
+   * The session the tracker would evict to admit a NEW id right now, or null
+   * when admitting one costs nothing. Distinct from `evictionVictim`, which
+   * answers "who is next out" regardless of whether anyone is knocking.
+   */
+  victimForNewSession() {
+    return this.sessions.size >= this.maxSessions ? this.evictionVictim() : null;
   }
 
   // The rollover baselines for this session, built on `create` for the paths
@@ -516,11 +539,15 @@ export class SessionTracker {
   // Zero across the board is not a special case: an unmeasured fleet scores
   // every account zero, the load term cannot discriminate, and the caller's
   // remaining tiebreaks decide exactly as they did before any of this existed.
-  loadFor(accountIndex, now = this._now()) {
+  loadFor(accountIndex, now = this._now(), { excluding = null } = {}) {
     let sessions = 0;
     let context = 0;
     let reports = 0;
-    for (const s of this.sessions.values()) {
+    for (const [id, s] of this.sessions) {
+      // `excluding` is the projected eviction: an observer asking where a NEW
+      // session would go must ask over the set that admitting it leaves behind,
+      // because admitting it is what removes this one.
+      if (excluding !== null && id === excluding) continue;
       if (!this._isActive(s, now)) continue;
       let counted = false;
       for (const [bucket, pin] of s.pins) {

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AccountManager } from '../src/account-manager.js';
+import { SessionTracker } from '../src/session-tracker.js';
 import { renderStatus } from '../src/status-renderer.js';
 
 // THE INVARIANT, enforced rather than promised:
@@ -337,6 +338,67 @@ test('the last resort is asked at the instant the projection was taken', () => {
     'the preview reopened an account whose window had not passed at that instant');
   assert.equal(am.previewRouteIndex(null, am._observedFleet(wall)), 0,
     'the premise: at the wall clock that window HAS passed, so the two instants differ');
+});
+
+// THE SESSION CAP, where admitting a session is itself a write. At the cap the
+// tracker evicts the least-recently-seen to make room, and the eviction moves
+// `loadFor` — so a block that says where a NEW session goes, computed over the
+// current set, is predicting from a set the request destroys on its way in.
+//
+// THE ORDER IS THE FINDING, not the state. `server.js:706` begins the session
+// and `:999` selects, so the eviction happens BEFORE the walk that chooses. A
+// fixture that calls `getActiveAccount` alone — which is what I first built —
+// has correct state and agrees with the block, because it never performs the
+// step the defect lives in. This drives `beginSession` first, in that order,
+// for that reason.
+//
+// THE CAP IS INJECTED, not filled: `maxSessions` is a constructor option, so
+// three sessions exercise the same `touch` -> `_evictOne` path that 2048 would.
+// Said here because a fixture reaching a path by a shortcut has to name it —
+// the state an operator must actually be in is a fleet at the real cap.
+test('the block says where a new session goes over the set admitting it leaves behind', () => {
+  const now = Date.now();
+  const build = () => {
+    const am = new AccountManager([acct('a'), acct('b')], 0.98, {
+      expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 },
+      distributeSessions: true,
+      sessionTracker: new SessionTracker({ maxSessions: 3 }),
+    });
+    am.accounts.forEach((x, i) => {
+      x.quota = { ...x.quota, unified5h: 0.05, unified5hReset: now + 2 * H,
+        unified7d: 0.2, unified7dReset: now + (20 + i) * H };
+    });
+    // The OLDEST session carries a heavy load on `a`; two light ones on `b`
+    // fill the cap. Evicting the oldest is therefore what decides which
+    // account is least loaded.
+    am.recordSession('old-heavy', 0, 'claude-opus-5');
+    am.recordTokenUsage(0, 'old-heavy', 'claude-opus-5',
+      { input_tokens: 10, cache_read_input_tokens: 400000, output_tokens: 10 });
+    for (const id of ['light-1', 'light-2']) {
+      am.recordSession(id, 1, 'claude-opus-5');
+      am.recordTokenUsage(1, id, 'claude-opus-5', { input_tokens: 10, output_tokens: 10 });
+    }
+    return am;
+  };
+
+  // Premises: the cap is reached, and the eviction MOVES the load. A cap full
+  // of sessions all pinned to one account evicts one and moves no figure —
+  // that version passes while grading nothing.
+  const probe = build();
+  assert.equal(probe.sessionTracker.stats().known, 3, 'the premise: the fixture is at its cap');
+  const before = probe.sessionTracker.loadFor(0).context;
+  probe.sessionTracker.touch('brand-new');
+  assert.notEqual(probe.sessionTracker.loadFor(0).context, before,
+    'the premise: the eviction must move the load, or this grades nothing');
+
+  const reported = build();
+  const entry = reported.getStatus().routing.find(e => e.scope === 'shared');
+  const served = build();
+  served.beginSession('brand-new'); // the server's order, and the whole finding
+  const account = served.getActiveAccount(null, 'claude-opus-5', null, 'brand-new', {});
+
+  assert.equal(entry.pick.account, account ? account.name : null,
+    'the block predicts a new session from the session set admitting it destroys');
 });
 
 test('the states that must move the answer do move it', () => {

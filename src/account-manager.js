@@ -606,11 +606,17 @@ export class AccountManager {
    * @param {number} now
    * @returns {import('./pick-decision.js').PickSnapshot}
    */
-  _pickSnapshot(candidates, model, now) {
+  _pickSnapshot(candidates, model, now, { excludingSession = null } = {}) {
     const pressures = this._pickPressures(candidates, model, now);
     return {
       accounts: candidates.map((a, i) => {
-        const measured = this.sessionTracker.loadFor(a.index, now);
+        // `excludingSession` is the eviction a NEW session would cause, which
+        // the request path has already performed by the time it selects
+        // (`server.js:706` begins the session, `:999` selects) and the report
+        // has not. Passing it is how the report answers over the set the
+        // request will actually meet; the request path passes nothing, because
+        // for it the eviction is done rather than pending.
+        const measured = this.sessionTracker.loadFor(a.index, now, { excluding: excludingSession });
         return {
           index: a.index,
           priority: a.priority || 0,
@@ -1724,7 +1730,13 @@ export class AccountManager {
       // describing a candidate set selection would not have used is the failure
       // this shares a method to make unconstructible.
       const banded = this._applyBand(explained.decision, candidates);
-      const pickSnapshot = this._pickSnapshot(banded, model, now);
+      // WHERE A NEW SESSION GOES, over the set admitting it leaves behind. At
+      // the session cap, admitting one evicts the least-recently-seen, and that
+      // eviction moves `loadFor` — so the pick computed over the current set is
+      // a prediction the request destroys on its way to being served. Null
+      // below the cap, where admitting a session costs nothing.
+      const evicted = this.sessionTracker.victimForNewSession();
+      const pickSnapshot = this._pickSnapshot(banded, model, now, { excludingSession: evicted });
       const pick = decidePick(pickSnapshot);
       const nameOf = index => observed.accounts[index]?.name ?? null;
 
