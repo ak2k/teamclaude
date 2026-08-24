@@ -359,6 +359,14 @@ function decisionLines(entry, status, blocked, paint) {
   } else {
     out.push(`  ${paint.dim('Next request'.padEnd(13))}${paint.dim('nothing eligible')}`);
   }
+  // The destinations above are the representative's, and on a split family they
+  // are not the whole answer. Printed only when it applies, for the reason the
+  // ladder's bucket is: an always-present qualifier is a column, and a column
+  // is ignored.
+  if (entry.familySplit) {
+    out.push(`  ${paint.dim('Scope'.padEnd(13))}`
+      + paint.dim(`answers for ${entry.model}; other ids in this family are claimed by other accounts`));
+  }
 
   out.push(`  ${paint.dim('Band'.padEnd(13))}${bandSummary(band)}`);
 
@@ -413,8 +421,13 @@ function decisionLines(entry, status, blocked, paint) {
     // and says so.
     const names = others.map((e) => {
       const state = scopeState(e, blocked);
-      if (state === 'blocked') return `${scopeName(e)}: blocked`;
-      return `${scopeName(e)}: ${e.band.kind}${state === 'partial' ? ', partly blocked' : ''}`;
+      // A split family is disclosed HERE as well as in the block, because that
+      // is where it lands: claims that split a family leave its entry with one
+      // candidate, so the entry collapses to passthrough and never wins the
+      // block. Disclosing it only there would disclose it exactly never.
+      const split = e.familySplit ? ', split by model claims' : '';
+      if (state === 'blocked') return `${scopeName(e)}: blocked${split}`;
+      return `${scopeName(e)}: ${e.band.kind}${state === 'partial' ? ', partly blocked' : ''}${split}`;
     }).join(', ');
     out.push(`  ${paint.dim('Other scopes'.padEnd(13))}${paint.dim(names)}`);
   }

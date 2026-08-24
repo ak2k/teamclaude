@@ -672,6 +672,60 @@ test('a route spanning families says which family each entry is', () => {
     'an unambiguous route carries a qualifier in the scope list, so the exception becomes a column');
 });
 
+// AN ENTRY ANSWERS FOR A SET, AND THE SET IS NOT ALWAYS UNIFORM. A family is
+// one scope only while it routes as one: per-account `models` claims split it,
+// and then `claude-fable-5` and `claude-fable-4` are served by different
+// accounts while the entry advertises the first as the answer for both.
+//
+// This is the same axis as a route spanning families, one level in, and it is
+// disclosed rather than closed — keying entries on the model id would be the
+// representative problem in reverse and would multiply entries by every dated
+// variant upstream ships.
+//
+// Where it lands is the point: splitting a family leaves its entry with one
+// candidate, so the entry collapses to passthrough and never wins the block.
+// Disclosed only there, it would be disclosed exactly never.
+test('a family split by per-account model claims says so where it lands', () => {
+  const now = Date.now();
+  const build = (claims) => {
+    const withClaims = n => (claims
+      ? { name: n, type: 'apikey', apiKey: `k-${n}`, models: [`claude-fable-${n === 'five' ? 5 : 4}`] }
+      : acct(n));
+    const am = new AccountManager([withClaims('five'), withClaims('four')], 0.98, {
+      expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 },
+      routes: [{ name: 'fable', match: ['*fable*'] }],
+    });
+    am.accounts.forEach((a, i) => {
+      a.quota = { ...a.quota, unified5h: 0.05 + i * 0.05, unified5hReset: now + 2 * H,
+        unified7d: 0.2, unified7dReset: now + 20 * H,
+        unified7dFable: 0.1 + i * 0.2, unified7dFableReset: now + (20 + i * 10) * H };
+    });
+    return am;
+  };
+
+  // The premise: the two ids of one family genuinely go to different accounts.
+  // Paired managers, since each call walks and may settle state.
+  assert.equal(build(true).getActiveAccount(null, 'claude-fable-5', null, null, {}).name, 'five');
+  assert.equal(build(true).getActiveAccount(null, 'claude-fable-4', null, null, {}).name, 'four');
+
+  const split = build(true);
+  const splitEntry = split.getStatus().routing.find(e => e.route === 'fable');
+  assert.equal(splitEntry.familySplit, true,
+    'the entry claims one destination for a family its accounts have divided');
+  assert.equal(splitEntry.target, 'five', 'the premise: the entry answers for the representative');
+  assert.match(row(render(split, now), 'Other scopes'), /fable: [^,]+, split by model claims/,
+    'the split is invisible where it actually appears, which is the scope list');
+
+  // The silent half: an unsplit family says nothing, so the marker means "this
+  // one is divided" rather than becoming a column.
+  const whole = build(false);
+  const wholeEntry = whole.getStatus().routing.find(e => e.route === 'fable');
+  assert.equal(wholeEntry.familySplit, false);
+  const wholeOthers = row(render(whole, now), 'Other scopes') || '';
+  assert.doesNotMatch(wholeOthers, /split by model claims/,
+    'a family that routes as one is reported as divided');
+});
+
 test('one eligible account says there is nothing to choose between', () => {
   const now = Date.now();
   const am = new AccountManager(['a', 'b'].map(acct), 0.98,

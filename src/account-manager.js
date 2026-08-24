@@ -1,6 +1,6 @@
 import { refreshAccessToken, isTokenExpiringSoon, isTokenExpired } from './oauth.js';
 import { sameIdentity } from './identity.js';
-import { weeklyBucketForModel, modelGlobMatches, gatingSource, WEEKLY_BUCKET_KEYS, familyModelsMatching, globCovers, familyGlobFor } from './model.js';
+import { weeklyBucketForModel, modelGlobMatches, modelGlobOverlaps, gatingSource, WEEKLY_BUCKET_KEYS, familyModelsMatching, globCovers, familyGlobFor } from './model.js';
 import { SessionTracker } from './session-tracker.js';
 import { WindowWatcher } from './window-watcher.js';
 import { decideBand, explainBand, pressureOf, assertNever } from './band-decision.js';
@@ -1753,6 +1753,12 @@ export class AccountManager {
         // fallback and so appears on the row rather than here — reading this key
         // as every row's bucket would attribute one window's figure to another.
         bucket: this._weeklyBucketFor(model, scopeRoute ?? this._routeForModel(model)),
+        // WHAT THIS ENTRY MAY CLAIM ON BEHALF OF THE SET IT COVERS. False here
+        // is the ordinary case and says the family routes as one; true says the
+        // figures above are the representative's and other ids of this family
+        // go elsewhere. The same axis as a route spanning families, one level
+        // in: an entry answers for a set, and the set is not always uniform.
+        familySplit: this._familySplit(model),
         band: {
           kind: explained.decision.kind,
           reason: explained.decision.reason ?? null,
@@ -1834,6 +1840,29 @@ export class AccountManager {
     });
     if (owned.length) return owned;
     return named.length ? [] : [glob.replace(/\*/g, '') || 'model'];
+  }
+
+  /**
+   * Is this entry's family SERVED AS A UNIT, or split among accounts by their
+   * own `models` claims?
+   *
+   * An entry answers for a family, named by a representative id, and every
+   * figure on it — the destination most of all — is that id's. That is the
+   * truth for the whole family only while the family routes as one. A per
+   * account claim of `claude-fable-5` against another of `claude-fable-4`
+   * splits it: two ids, two accounts, and one entry advertising the first as
+   * the answer for both.
+   *
+   * A claim splits the family when it reaches into it without covering it.
+   * Where the family has no pattern of its own — the shared bucket, which is
+   * the fallback for everything not metered separately — this cannot be
+   * decided and answers false, which discloses nothing rather than guessing.
+   */
+  _familySplit(model) {
+    const famGlob = familyGlobFor(model);
+    if (!famGlob) return false;
+    return this.accounts.some(a => (a.models || []).some(
+      claim => modelGlobOverlaps(claim, famGlob) && !globCovers(claim, famGlob)));
   }
 
   /** The name of the account a request for `model` would land on right now, or
