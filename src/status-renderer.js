@@ -357,6 +357,18 @@ function decisionLines(entry, status, blocked, paint) {
     const label = entry.target === status.currentAccount ? 'current' : 'would serve now';
     out.push(`  ${paint.dim('Next request'.padEnd(13))}${paint.dim('→')} ${entry.target} ${paint.dim(`(${label}${held})`)}`);
   } else {
+    // A PAYLOAD FROM ANOTHER BUILD CAN REACH HERE; one from this build cannot.
+    // Locally the two conditions exclude each other: this block is skipped
+    // entirely for a passthrough band, `decideBand` passes through whenever the
+    // candidate set is one account or none, and any candidate at all gives the
+    // preview a destination — so a rendered block always has a target.
+    //
+    // The renderer does not only render local payloads. `tui-remote` and
+    // `teamclaude status` fetch them from other hosts, which run their own patch
+    // level, and a producer whose band and preview disagree sends exactly this
+    // shape. Printing the honest words for it costs a branch; assuming the
+    // invariant travels with the JSON costs a screen that names an account the
+    // payload does not contain.
     out.push(`  ${paint.dim('Next request'.padEnd(13))}${paint.dim('nothing eligible')}`);
   }
   // The destinations above are the representative's, and on a split family they

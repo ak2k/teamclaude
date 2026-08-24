@@ -26,6 +26,61 @@ function sampleStatus() {
   };
 }
 
+// A PAYLOAD THIS BUILD CANNOT PRODUCE, BY CONSTRUCTION AND ON PURPOSE.
+//
+// The destination rows print `nothing eligible` when an entry has no target.
+// Locally that never happens inside a rendered block: the block is skipped for a
+// passthrough band, `decideBand` passes through whenever the candidate set is
+// one account or none, and any candidate gives the preview a destination. The
+// two conditions exclude each other, so no fixture built from an AccountManager
+// can reach this row — a driven sweep of every disclosure this round added
+// found it as the one unreachable branch.
+//
+// It is kept because `tui-remote` and `teamclaude status` render payloads
+// fetched from other hosts, which run their own patch level, and a producer
+// whose band and preview disagree sends this shape.
+//
+// SO THE PAYLOAD BELOW IS HAND-BUILT AND MUST STAY HAND-BUILT. Tidying it into
+// `am.getStatus()` would make `target` non-null, the branch would stop being
+// exercised, and this test would keep passing while witnessing nothing — which
+// is the exact failure the sweep that found this branch exists to catch.
+test('a foreign payload whose band and preview disagree still renders honest words', () => {
+  const foreign = {
+    ...sampleStatus(),
+    routing: [{
+      scope: 'shared',
+      route: null,
+      model: null,
+      match: [],
+      autocreated: false,
+      target: null,          // no destination…
+      pinnedTo: null,
+      bucket: 'unified7d',
+      familySplit: false,
+      band: {
+        kind: 'sized',       // …beside a band that says two accounts were ranked
+        reason: null,
+        target: 1,
+        achieved: 1.8,
+        floor: null,
+        candidates: 2,
+        admitted: ['a', 'b'],
+        ladder: [],
+        excluded: [],
+      },
+      pick: { kind: 'none', reason: 'no-candidates', account: null, runnerUp: null, tiedWith: [], by: null, terms: [] },
+    }],
+  };
+
+  const lines = renderStatus(foreign, { color: false, now }).split('\n');
+  const next = lines.find(l => l.trim().startsWith('Next request'));
+  assert.ok(next, 'the block did not render at all, so the branch under test was skipped');
+  assert.match(next, /nothing eligible/,
+    'a payload with no destination rendered a destination anyway');
+  const newSession = lines.find(l => l.trim().startsWith('New session'));
+  assert.match(newSession, /nothing eligible/);
+});
+
 test('renderStatus prints core status', () => {
   const output = renderStatus(sampleStatus(), { color: false, now });
 
