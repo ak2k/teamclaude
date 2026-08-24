@@ -146,20 +146,49 @@ export function blockedState(patterns, { models = [], globs = [] } = {}) {
   return globs.some(g => list.some(p => modelGlobOverlaps(p, g))) ? 'partial' : 'clear';
 }
 
-// Does every model matching `glob` also match `pattern`? Decidable for the
-// shapes in use, and deliberately conservative everywhere else — an unsure
-// answer is `false`, which reports `partial` rather than claiming a route is
-// dead. `*` covers everything; a `*core*` pattern covers any glob whose own
-// core contains that core (every id matching the glob contains the core, so it
-// matches the pattern); a pattern with no wildcards covers only itself.
-function globCovers(pattern, glob) {
+/**
+ * Does every model matching `glob` also match `pattern`?
+ *
+ * WHERE THE WILDCARD SITS IS THE WHOLE QUESTION, and the first version of this
+ * threw that away: it stripped the `*`s and compared the remaining cores, so
+ * `*fable`, `fable*` and `*fable*` were indistinguishable. `*fable` matches only
+ * ids ENDING in "fable" — no id a `*fable*` route carries ends that way — and it
+ * was reported as covering the route completely. A total claim with no support.
+ *
+ * So this decomposes both sides instead. Every string matching `glob` starts
+ * with the glob's leading literal, ends with its trailing one, and contains its
+ * middles; a pattern is guaranteed to match all of them only when its own
+ * requirements are implied by those. Conservative wherever that cannot be shown
+ * — an unsure answer is `false`, which reports `partial` and understates a
+ * block, rather than calling a live route dead.
+ */
+export function globCovers(pattern, glob) {
   if (typeof pattern !== 'string' || typeof glob !== 'string') return false;
-  const core = s => s.replace(/\*/g, '').toLowerCase();
-  const p = core(pattern);
-  const g = core(glob);
-  if (!pattern.includes('*')) return !glob.includes('*') && p === g;
-  if (!p) return true; // a bare `*`
-  return g.includes(p);
+  const p = pattern.toLowerCase();
+  const g = glob.toLowerCase();
+  if (p === g) return true;
+  if (!p.includes('*')) return false; // a literal covers only itself, handled above
+  const pParts = p.split('*');
+  const gParts = g.split('*');
+  const pPrefix = pParts[0];
+  const pSuffix = pParts[pParts.length - 1];
+  const pMiddles = pParts.slice(1, -1).filter(Boolean);
+  // More than one interior literal would need them matched in order against the
+  // glob's own segmentation. Decidable, but nothing in use needs it and a wrong
+  // `true` here is the defect this function exists to stop.
+  if (pMiddles.length > 1) return false;
+  const gPrefix = gParts[0];
+  const gSuffix = gParts[gParts.length - 1];
+  // The pattern's leading and trailing requirements must be GUARANTEED by the
+  // glob's own: an id matching `claude-*` need not start with `claude-fable`,
+  // so `claude-fable*` does not cover it.
+  if (pPrefix && !gPrefix.startsWith(pPrefix)) return false;
+  if (pSuffix && !gSuffix.endsWith(pSuffix)) return false;
+  // An interior literal is guaranteed only if it sits inside a literal segment
+  // the glob requires. Spanning a wildcard would be a coincidence of one id,
+  // not a property of the glob.
+  if (pMiddles.length === 1 && !gParts.some(seg => seg.includes(pMiddles[0]))) return false;
+  return true;
 }
 
 // Streaming, byte-exact locator for a TOP-LEVEL string field of a JSON object,

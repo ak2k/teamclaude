@@ -82,6 +82,29 @@ test('blockedState separates a family fully blocked from one only partly blocked
     'a malformed entry beside a real one changes the answer');
 });
 
+// WHERE THE WILDCARD SITS is the whole question, and comparing stripped cores
+// threw it away: `*fable`, `fable*` and `*fable*` all reduced to `fable` and all
+// claimed to cover a `*fable*` route. `*fable` matches only ids ENDING in
+// "fable" — not one id that route carries — and the screen called the route dead
+// on the strength of it.
+test('globCovers answers on the pattern\'s shape, not on its letters', () => {
+  const route = { globs: ['*fable*'] };
+  assert.equal(blockedState(['*fable*'], route), 'blocked', 'the infix pattern genuinely covers it');
+  assert.equal(blockedState(['*'], route), 'blocked');
+  assert.equal(blockedState(['*fable'], route), 'partial',
+    'a suffix-only pattern matches no id this route carries, and claimed to cover all of them');
+  assert.equal(blockedState(['fable*'], route), 'partial',
+    'a prefix-only pattern claims ids that do not start with fable');
+  // The direction that must keep working: a wider infix pattern covers a
+  // narrower glob, because every id matching the narrow one contains the core.
+  assert.equal(blockedState(['*fable*'], { globs: ['*claude-fable*'] }), 'blocked');
+  assert.equal(blockedState(['*claude-fable*'], { globs: ['*fable*'] }), 'partial',
+    'the narrow pattern was read as covering the wide glob');
+  // A prefix pattern DOES cover a glob whose own prefix extends it.
+  assert.equal(blockedState(['claude-*'], { globs: ['claude-fable-*'] }), 'blocked');
+  assert.equal(blockedState(['claude-fable-*'], { globs: ['claude-*'] }), 'partial');
+});
+
 test('blockedState reserves `blocked` for a pattern that covers the whole glob', () => {
   // Coverage is decidable for the shapes in use and conservative elsewhere: an
   // unsure answer is `partial`, which understates a block rather than calling a
