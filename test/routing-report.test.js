@@ -331,6 +331,56 @@ test('a glob spanning families publishes one entry per family, each with a real 
   }
 });
 
+// AN ENTRY ANSWERS FOR ITS OWN ROUTE. Every figure on it used to be derived by
+// resolving a route FROM the representative id — the request path's question,
+// which the report already knows the answer to. When an earlier route captures
+// that id, the resolution returns a different route, and the entry published
+// that route's bucket override, that route's pin, that route's account list and
+// a band over that route's candidates, all under this route's name.
+//
+// Six fields, so six assertions: a green on one of them proves nothing about
+// the other five, and the first version of this fix threaded the route into the
+// preview while a stale identity lookup left the rest deriving.
+test('every figure on an entry is its own route\'s, not the representative\'s owner\'s', () => {
+  const now = Date.now();
+  const am = fleet({
+    accounts: ['a', 'b'],
+    routes: [
+      { name: 'exact', match: ['claude-fable-5'], accounts: ['a'], bucket: 'unified7dSonnet' },
+      { name: 'wild', match: ['*fable*'], accounts: ['b'] },
+    ],
+  });
+  for (const i of [0, 1]) {
+    quota(am, i, {
+      unified5h: 0.05 + i * 0.05, unified7d: 0.2, unified7dReset: now + 20 * H,
+      unified7dFable: 0.1 + i * 0.4, unified7dFableReset: now + (20 + i * 10) * H,
+      unified7dSonnet: 0.3, unified7dSonnetReset: now + 40 * H,
+    });
+  }
+  assert.equal(am.setRoutePin('exact', 0).ok, true);
+
+  const report = am.getStatus().routing;
+  const wild = report.find(e => e.route === 'wild');
+  const exact = report.find(e => e.route === 'exact');
+  // The premise: `exact` captures the representative id, which is what makes
+  // deriving the route from it return the wrong route.
+  assert.equal(am._routeForModel('claude-fable-5').name, 'exact');
+  assert.ok(wild, 'the live route publishes nothing, which is the defect one layer up');
+
+  assert.equal(wild.bucket, 'unified7dFable', "the entry carries the other route's bucket override");
+  assert.equal(wild.pinnedTo, null, "the entry carries the other route's pin");
+  assert.equal(wild.target, 'b', "the entry names an account its own route cannot use");
+  assert.deepEqual(wild.band.excluded.map(x => `${x.account}:${x.reason}`), ['a:route-excluded'],
+    "the entry's candidate set is the other route's");
+  assert.equal(wild.band.candidates, 1);
+  assert.equal(wild.pick.account, 'b');
+  // And the entry that legitimately owns those things still has them, so the
+  // fix cannot be "stop reading route configuration at all".
+  assert.equal(exact.bucket, 'unified7dSonnet');
+  assert.equal(exact.pinnedTo, 'a');
+  assert.equal(exact.target, 'a');
+});
+
 test('a route whose families are all captured earlier publishes no entry at all', () => {
   // Two states reached the same empty list and only one of them means "fall
   // back to the literal": a glob naming NO metered family is a shared-bucket

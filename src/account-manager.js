@@ -1,6 +1,6 @@
 import { refreshAccessToken, isTokenExpiringSoon, isTokenExpired } from './oauth.js';
 import { sameIdentity } from './identity.js';
-import { weeklyBucketForModel, modelGlobMatches, gatingSource, WEEKLY_BUCKET_KEYS, familyModelsMatching } from './model.js';
+import { weeklyBucketForModel, modelGlobMatches, gatingSource, WEEKLY_BUCKET_KEYS, familyModelsMatching, globCovers, familyGlobFor } from './model.js';
 import { SessionTracker } from './session-tracker.js';
 import { WindowWatcher } from './window-watcher.js';
 import { decideBand, explainBand, pressureOf, assertNever } from './band-decision.js';
@@ -756,15 +756,15 @@ export class AccountManager {
    * went unprojected for a round: every branch of the walk was mirrored
    * faithfully against a starting state the request itself would have changed.
    */
-  previewRouteIndex(model, observed = this._observedFleet()) {
+  previewRouteIndex(model, observed = this._observedFleet(), route = null) {
     // A PREVIEW, and its only callers are displays: the status report and the
     // TUI. So it observes without writing — asking where a request would go must
     // not be the thing that decides where the next one does. Every read below is
     // of the PROJECTED fleet: the post-prologue state a request would meet,
     // computed on copies, so nothing here consumes the session-reset event
     // `refreshExpiredQuotas` owns.
-    const observe = this._observeOpts(observed);
-    const live = this._pinnedAccountForModel(model);
+    const observe = this._observeOpts(observed, route);
+    const live = this._pinnedAccountForModel(model, null, route ?? undefined);
     const pinned = live ? observed.accounts[live.index] : null;
     if (pinned && this._isAvailable(pinned, model, null, observe)) return pinned.index;
     const current = observed.accounts[observed.currentIndex];
@@ -857,8 +857,9 @@ export class AccountManager {
    * rank an account on quota it does not have, steering Fable traffic straight
    * into the most Fable-spent account in the fleet.
    */
-  _governingBucket(account, model) {
-    return this._windowForBucket(account, this._weeklyBucketFor(model));
+  _governingBucket(account, model, route) {
+    return this._windowForBucket(account, this._weeklyBucketFor(model, route
+      ?? this._routeForModel(model)));
   }
 
   /**
@@ -1013,7 +1014,7 @@ export class AccountManager {
    *
    * @returns {{ reason: string, bucket: string|null, detail: number|null } | null}
    */
-  _availability(account, model = null, advisorModel = null, { observe = false, now = Date.now() } = {}) {
+  _availability(account, model = null, advisorModel = null, { observe = false, now = Date.now(), route = null } = {}) {
     // Manually disabled accounts are skipped entirely until re-enabled.
     if (account.disabled) return { reason: 'disabled', bucket: null, detail: null };
 
@@ -1040,14 +1041,18 @@ export class AccountManager {
     // Model-scoped: _quotaBar checks the shared 5h bucket plus only the weekly
     // bucket that governs this model, so a spent Fable/Sonnet bucket bars just
     // that family — the account still serves every other model normally.
-    const bar = this._quotaBar(account, model, { observe });
+    const bar = this._quotaBar(account, model, { observe, route });
     if (bar) return bar;
 
     // Route/ownership restriction: a configured route can pin a model pattern to
     // an exclusive set of accounts; failing that, a per-account `models` claim
     // restricts an owned model to its owners. Either way an account not eligible
     // for this model is skipped so the request never lands somewhere it can't run.
-    if (model && !this._routeAllows(account, model)) {
+    // The entry's route for the EXECUTOR's model, and never for the advisor's:
+    // the advisor may belong to a different route, so `_canServeAdvisor` below
+    // derives its own. An options bag read by whatever runs next would get this
+    // wrong silently, which is why the route is passed rather than ambient.
+    if (model && !this._routeAllows(account, model, route ?? this._routeForModel(model))) {
       return { reason: 'route-excluded', bucket: null, detail: null };
     }
 
@@ -1561,8 +1566,18 @@ export class AccountManager {
 
   /** The weekly quota bucket that governs `model` — a matching route's `bucket`
    * override wins, otherwise the model family's default bucket. */
-  _weeklyBucketFor(model) {
-    const route = this._routeForModel(model);
+  /**
+   * The weekly bucket governing a decision about `model`.
+   *
+   * `route` is the route the DECISION is about, and it is a parameter because
+   * the two callers know different things. A request arrives with an id and
+   * must find its route, so it lets this derive one. The routing report is
+   * iterating routes and already knows which — and when an earlier route
+   * captures this family's representative id, deriving gives that other route's
+   * bucket override under this route's name. Six fields were resolved that way
+   * and every one of them answered for the wrong route.
+   */
+  _weeklyBucketFor(model, route = this._routeForModel(model)) {
     return route?.bucket || weeklyBucketForModel(model);
   }
 
@@ -1570,8 +1585,7 @@ export class AccountManager {
    * list is exclusive (only listed accounts, by name or index). With no matching
    * route — or a route that lists no accounts — it falls back to the per-account
    * `models` ownership claim (deprecated — use `routes` instead). */
-  _routeAllows(account, model) {
-    const route = this._routeForModel(model);
+  _routeAllows(account, model, route = this._routeForModel(model)) {
     if (route && route.accounts.length) {
       return route.accounts.includes(account.name) || route.accounts.includes(String(account.index));
     }
@@ -1661,8 +1675,12 @@ export class AccountManager {
     // callers passing an instant and a projection taken at a different one is
     // the split this whole round has been closing, one argument list up.
     const now = observed.now;
-    const scopes = [{ scope: 'shared', route: null, model: null, match: [], autocreated: false }];
+    const scopes = [{ scope: 'shared', route: null, model: null, match: [], autocreated: false, owner: null }];
     for (const route of this.getRoutes(observed)) {
+      // The stored route this view was built from, carried rather than looked
+      // up later: the scope's own `match` is a fresh one-glob array, so any
+      // identity lookup against it silently finds nothing.
+      const owner = this.routes.find(r => r.match === route.match) ?? null;
       // ONE ENTRY PER FAMILY, not per route and not per glob. A route matching
       // two families has two governing buckets and therefore two different
       // bands and two different picks; publishing one entry for it presented
@@ -1675,7 +1693,7 @@ export class AccountManager {
         : route.match.flatMap(glob => this._scopeModelsFor(glob, route).map(model => ({ glob, model })));
       for (const { glob, model } of globs) {
         scopes.push({
-          scope: 'route', route: route.name, model,
+          scope: 'route', route: route.name, model, owner,
           // Carried rather than looked up by name later. Route names are not
           // unique — two routes may share one — so a consumer joining an entry
           // back to `routes[]` by name attaches this decision to another
@@ -1685,14 +1703,20 @@ export class AccountManager {
         });
       }
     }
-    return scopes.map(({ scope, route, model, match, autocreated }) => {
+    return scopes.map(({ scope, route, model, match, autocreated, owner: scopeRoute }) => {
       // ONE availability evaluation per account, split two ways. The candidates
       // are what the band sees and the rest are `excluded[]` with the reason
       // that removed them, so the two lists cannot disagree about an account and
       // `candidates + excluded.length === accounts.length` holds by construction
       // rather than by two filters agreeing.
+      // `scopeRoute` is the route this entry is ABOUT, handed to every
+      // derivation below rather than re-derived from the representative id —
+      // which, when an earlier route captures that id, is a different route
+      // with different accounts, a different bucket override and a different
+      // pin.
+      const opts = this._observeOpts(observed, scopeRoute);
       const verdicts = observed.accounts.map(account => ({
-        account, why: this._availability(account, model, null, this._observeOpts(observed)),
+        account, why: this._availability(account, model, null, opts),
       }));
       const candidates = verdicts.filter(v => v.why === null).map(v => v.account);
       const explained = explainBand(this._bandSnapshot(candidates, model, now));
@@ -1717,18 +1741,18 @@ export class AccountManager {
         // destination from `currentAccount` and a rule it believes routing
         // follows — which reported a disabled account as where new sessions go,
         // and ignored a manual route pin entirely.
-        target: this._routeTarget(model, observed),
+        target: this._routeTarget(model, observed, scopeRoute),
         // Whether a MANUAL ROUTE PIN binds this scope. `_selectRoute` skips the
         // session-distribution path entirely when one is set (`:421`, "which
         // must still win"), so a pin overrides load ranking for new sessions
         // whether or not distribution is on. Without this field a consumer
         // cannot tell that the pick it is reading is not what routing will do.
-        pinnedTo: (m => (m ? m.name : null))(this._pinnedAccountForModel(model)),
+        pinnedTo: (m => (m ? m.name : null))(this._pinnedAccountForModel(model, null, scopeRoute ?? undefined)),
         // The FAMILY this entry is about. An account that does not meter that
         // family is measured on the shared bucket instead, which is a per-account
         // fallback and so appears on the row rather than here — reading this key
         // as every row's bucket would attribute one window's figure to another.
-        bucket: this._weeklyBucketFor(model),
+        bucket: this._weeklyBucketFor(model, scopeRoute ?? this._routeForModel(model)),
         band: {
           kind: explained.decision.kind,
           reason: explained.decision.reason ?? null,
@@ -1740,7 +1764,7 @@ export class AccountManager {
           ladder: explained.ladder.map(row => ({
             rank: row.rank,
             account: nameOf(row.account.index),
-            bucket: this._governingBucket(observed.accounts[row.account.index], model),
+            bucket: this._governingBucket(observed.accounts[row.account.index], model, scopeRoute),
             pressure: row.pressure,
             headroom: row.headroom,
             cumulative: row.cumulative,
@@ -1789,15 +1813,33 @@ export class AccountManager {
    */
   _scopeModelsFor(glob, route) {
     const named = familyModelsMatching(glob);
-    const owned = named.filter(m => this._routeForModel(m)?.match === route.match);
+    // OWNERSHIP IS COVERAGE, NOT CAPTURE. Asking "does an earlier route capture
+    // this family's representative id" answers about ONE id: an exact route for
+    // `claude-fable-5` captures the representative while `*fable*` still carries
+    // `claude-fable-4` and serves it from another account — and the live route
+    // published nothing at all. The question is whether an earlier route's globs
+    // COVER this one, which is what decides whether any id is left for it.
+    const owned = named.filter((m) => {
+      const owner = this._routeForModel(m);
+      if (!owner || owner.match === route.match) return true;
+      // THE INTERSECTION, not the glob. An earlier route takes this family away
+      // only if it covers what this glob carries OF THAT FAMILY: `*fable*` ahead
+      // of `claude-*` takes every Fable id, because every Fable id contains
+      // "fable" — while an exact `claude-fable-5` ahead of `*fable*` takes one
+      // id and leaves the rest. Where neither can be shown, the entry is
+      // published: an unproven capture would hide a route that carries traffic.
+      const famGlob = familyGlobFor(m);
+      return !owner.match.some(g => globCovers(g, glob)
+        || (famGlob && globCovers(g, famGlob)));
+    });
     if (owned.length) return owned;
     return named.length ? [] : [glob.replace(/\*/g, '') || 'model'];
   }
 
   /** The name of the account a request for `model` would land on right now, or
    * null when nothing can serve it (every candidate disabled, spent or excluded). */
-  _routeTarget(model, observed = this._observedFleet()) {
-    const idx = this.previewRouteIndex(model, observed);
+  _routeTarget(model, observed = this._observedFleet(), route = null) {
+    const idx = this.previewRouteIndex(model, observed, route);
     return idx == null ? null : (observed.accounts[idx]?.name ?? null);
   }
 
@@ -1858,14 +1900,15 @@ export class AccountManager {
    * covers the model). For an advisor request the executor's pin wins (it is the
    * bulk of the spend); the advisor model's pin applies only when nothing pins
    * the executor. Returns null when nothing is pinned for this model. */
-  _pinnedAccountForModel(model, advisorModel = null) {
-    return this._pinnedFor(model)
+  _pinnedAccountForModel(model, advisorModel = null, route = undefined) {
+    return this._pinnedFor(model, route)
+      // The ADVISOR's route is its own. Its model may belong to a different
+      // route entirely, so it derives rather than inheriting the caller's.
       || (advisorModel ? this._pinnedFor(advisorModel) : null);
   }
 
-  _pinnedFor(model) {
+  _pinnedFor(model, route = this._routeForModel(model)) {
     if (!model || !this.routePins.size) return null;
-    const route = this._routeForModel(model);
     if (route) {
       const idx = this.routePins.get(route.name);
       return idx == null ? null : (this.accounts[idx] || null);
@@ -2130,10 +2173,13 @@ export class AccountManager {
   }
 
   /** The options every read inside an observation is made with: the projected
-   * fleet, the instant it was taken at, and the promise not to write. Built
-   * here so a new observation call site cannot pick up two of the three. */
-  _observeOpts(observed) {
-    return { observe: true, fleet: observed.accounts, now: observed.now };
+   * fleet, the instant it was taken at, the promise not to write, and — when
+   * the caller is answering ABOUT a route — that route. Built here so a new
+   * observation call site cannot pick up three of the four, and so the route,
+   * which varies per entry where the other three vary per observation, stays
+   * inside the one constructor rather than being spread in by hand. */
+  _observeOpts(observed, route = null) {
+    return { observe: true, fleet: observed.accounts, now: observed.now, route };
   }
 
   _isNearQuota(account, model = null) {
@@ -2157,7 +2203,7 @@ export class AccountManager {
    *
    * @returns {{ reason: string, bucket: string|null, detail: number } | null}
    */
-  _quotaBar(account, model = null, { observe = false } = {}) {
+  _quotaBar(account, model = null, { observe = false, route = null } = {}) {
     // `observe` means one thing and only one: DO NOT WRITE. It does not also
     // project, because the account handed in is already the projection when the
     // caller is an observer (`_observedFleet`). Projecting here as well was the
@@ -2181,7 +2227,7 @@ export class AccountManager {
     // When the family bucket isn't reported the shared one answers alone.
     // One definition, in `gatingUtilization`; the status row and the TUI tag
     // display this same value rather than deriving it again.
-    const weekly = gatingSource(q, this._governingBucket({ ...account, quota: q }, model));
+    const weekly = gatingSource(q, this._governingBucket({ ...account, quota: q }, model, route));
     if (weekly != null && weekly.value >= this.switchThreshold) {
       return { reason: 'weekly-spent', bucket: weekly.bucket, detail: weekly.value };
     }

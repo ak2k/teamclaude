@@ -104,6 +104,16 @@ export function modelsForGlob(glob) {
   return family.length ? family : [String(glob ?? '').replace(/\*/g, '') || 'model'];
 }
 
+// The glob that characterises a family whose members are recognised by name —
+// every Fable id contains "fable", so `*fable*` is exactly that family. Null for
+// the shared bucket, which is the FALLBACK for everything not metered
+// separately and therefore has no such pattern: an id belongs to it by failing
+// the others, which no glob can express.
+export function familyGlobFor(model) {
+  const family = modelFamily(model);
+  return FAMILY_WEEKLY_BUCKET[family] ? `*${family}*` : null;
+}
+
 // The representative model id for a family name (`Fable`, `opus`), or null.
 export function familyModel(family) {
   const key = String(family ?? '').toLowerCase();

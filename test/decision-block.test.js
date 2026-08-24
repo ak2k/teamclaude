@@ -618,6 +618,60 @@ test('a row measured on another window says so, and the rows on the scope\'s own
   }
 });
 
+// A ROUTE IS NOT AN ANSWER when it spans families. `claude-*` has one entry per
+// family — three buckets, three bands, three destinations — and they rendered as
+// `broad: sized, broad: sized` with nothing to tell them apart, under a header
+// naming the glob as though the destinations below covered all of it. Threading
+// the route fixed WHICH route an entry answers for; this is the other axis,
+// aggregation within one route, and it is disclosed rather than closed.
+//
+// Silent when the route has one entry: a `*fable*` route is already unambiguous
+// and a qualifier there would be decoration.
+test('a route spanning families says which family each entry is', () => {
+  const now = Date.now();
+  const build = routes => {
+    const am = new AccountManager([acct('a'), acct('b')].map(x => x), 0.98, {
+      expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 }, routes,
+    });
+    const q = (i, o) => { am.accounts[i].quota = { ...am.accounts[i].quota, ...o }; };
+    q(0, { unified5h: 0.05, unified5hReset: now + 2 * H, unified7d: 0.3, unified7dReset: now + 30 * H,
+      unified7dFable: 0.1, unified7dFableReset: now + 20 * H,
+      unified7dSonnet: 0.2, unified7dSonnetReset: now + 25 * H });
+    q(1, { unified5h: 0.1, unified5hReset: now + 2 * H, unified7d: 0.4, unified7dReset: now + 300 * H,
+      unified7dFable: 0.5, unified7dFableReset: now + 200 * H,
+      unified7dSonnet: 0.6, unified7dSonnetReset: now + 250 * H });
+    return am;
+  };
+
+  const spanning = build([{ name: 'broad', match: ['claude-*'] }]);
+  const entries = spanning.getStatus().routing.filter(e => e.route === 'broad');
+  assert.equal(entries.length, 3, 'the premise: one route, several families');
+  const lines = render(spanning, now);
+  assert.match(lines.find(l => l.startsWith('Decision')), /claude-\* \((opus|sonnet|fable)\)/,
+    'the header names the glob alone, so the destinations below claim the whole route');
+  const others = row(lines, 'Other scopes');
+  assert.match(others, /broad \(\w+\): /, 'two entries of one route render identically');
+  assert.doesNotMatch(others, /broad: /, 'an ambiguous label survived');
+
+  // THE SILENT HALF, and it has to be asserted where the qualifier is BUILT.
+  // Two single-family routes, so one wins the block and the other appears in
+  // `Other scopes` under its own plain name — measured: asserting this on the
+  // header alone left "print it unconditionally" alive, because the header
+  // builds its qualifier separately from the scope list.
+  const single = build([{ name: 'fable', match: ['*fable*'] }, { name: 'sonnet', match: ['*sonnet*'] }]);
+  const singleLines = render(single, now);
+  const header = singleLines.find(l => l.startsWith('Decision'));
+  const singleOthers = row(singleLines, 'Other scopes');
+  assert.ok(header.includes('*fable*') || header.includes('*sonnet*'),
+    'the premise: a single-family route won the block');
+  assert.doesNotMatch(header, /\((fable|sonnet|opus)\)/,
+    'an unambiguous route carries a qualifier in the header');
+  assert.match(singleOthers, /\b(fable|sonnet): /,
+    'the premise: the other single-family route is listed');
+  assert.doesNotMatch(singleOthers, /\w+ \((fable|sonnet|opus)\): /,
+    'an unambiguous route carries a qualifier in the scope list, so the exception becomes a column');
+});
+
 test('one eligible account says there is nothing to choose between', () => {
   const now = Date.now();
   const am = new AccountManager(['a', 'b'].map(acct), 0.98,

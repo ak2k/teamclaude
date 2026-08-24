@@ -1,4 +1,4 @@
-import { blockedState, familyModel, modelsForGlob, gatingUtilization } from './model.js';
+import { blockedState, familyModel, modelsForGlob, modelFamily, gatingUtilization } from './model.js';
 
 const ESC = '\x1b[';
 const RESET = `${ESC}0m`;
@@ -270,13 +270,29 @@ function decisionLines(entry, status, blocked, paint) {
   const out = [];
   const { band, pick } = entry;
   const others = (status.routing || []).filter(e => e !== entry);
+  // A ROUTE IS NOT AN ANSWER when it spans families: `claude-*` has one entry
+  // per family, each with its own bucket, band and destination, and they were
+  // rendering as `broad: sized, broad: sized` with nothing to tell them apart —
+  // while the header named the glob, which reads as though the destinations
+  // below covered all of it. Threading the route fixed which route an entry
+  // answers for; this is the other axis, aggregation WITHIN one route, and it
+  // needs the family said out loud. Silent when the route has one entry, so the
+  // qualifier means "there are others" rather than becoming decoration.
+  const scopeName = (e) => {
+    const base = e.route || 'shared';
+    if (!e.route) return base;
+    const siblings = (status.routing || []).filter(x => x.route === e.route);
+    return siblings.length > 1 ? `${base} (${modelFamily(e.model)})` : base;
+  };
   // The scope in the route's own vocabulary, read from the ENTRY rather than
   // looked up in `routes[]` by name. Route names are not unique, and a join by
   // name attached this decision to another route's globs and another route's
   // target. The entry names the single glob its own figures were computed for.
   const scope = entry.scope === 'route' ? entry.match.join(' ') : 'shared weekly';
   const auto = entry.autocreated ? `  ${paint.dim('(auto)')}` : '';
-  out.push(`${paint.bold('Decision')}  ${paint.cyan(scope)}${auto}  ${paint.dim(`[${entry.bucket}]`)}`);
+  const family = entry.route && (status.routing || []).filter(x => x.route === entry.route).length > 1
+    ? paint.dim(` (${modelFamily(entry.model)})`) : '';
+  out.push(`${paint.bold('Decision')}  ${paint.cyan(scope)}${family}${auto}  ${paint.dim(`[${entry.bucket}]`)}`);
 
   // BOTH DESTINATION ROWS REPORT WHAT THE PATH RETURNS. Neither describes a
   // rule, because a rule stated in the block is a claim the block cannot check:
@@ -397,8 +413,8 @@ function decisionLines(entry, status, blocked, paint) {
     // and says so.
     const names = others.map((e) => {
       const state = scopeState(e, blocked);
-      if (state === 'blocked') return `${e.route || 'shared'}: blocked`;
-      return `${e.route || 'shared'}: ${e.band.kind}${state === 'partial' ? ', partly blocked' : ''}`;
+      if (state === 'blocked') return `${scopeName(e)}: blocked`;
+      return `${scopeName(e)}: ${e.band.kind}${state === 'partial' ? ', partly blocked' : ''}`;
     }).join(', ');
     out.push(`  ${paint.dim('Other scopes'.padEnd(13))}${paint.dim(names)}`);
   }
