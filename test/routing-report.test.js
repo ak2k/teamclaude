@@ -341,6 +341,11 @@ test('a glob spanning families publishes one entry per family, each with a real 
 // Six fields, so six assertions: a green on one of them proves nothing about
 // the other five, and the first version of this fix threaded the route into the
 // preview while a stale identity lookup left the rest deriving.
+// SIX ASSERTIONS, ONE TEST BODY, so a reversion reports `1 fail` and not six.
+// Detection is unaffected — break any one field and this test fails — but the
+// first failing assertion aborts the rest, so the count understates the blast
+// radius and never understates whether it was caught. A reader treating `1
+// fail` as "one field moved" will under-scope the diagnosis.
 test('every figure on an entry is its own route\'s, not the representative\'s owner\'s', () => {
   const now = Date.now();
   const am = fleet({
