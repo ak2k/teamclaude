@@ -227,7 +227,11 @@ const RESET_RANK_GUARD = '    if (rankOf.get(best.index) > rankOf.get(current.in
 const RESET_RANK_ORDER = '      if (mine < theirs\n';
 const HOLD_RELEASE = '    this._releaseHold(s, hold);\n';
 const HOLD_DRAIN = '      for (const h of [...s.holds]) this._releaseHold(s, h);\n';
-const HOLD_CLAIM = '        if (hold && hold.rid === s.rid && !hold.buckets.has(bucket)) {\n';
+// Re-anchored when the claim boundary gained its released-hold test. BOTH THE
+// FIND TEXT AND EVERY REPLACEMENT MOVE TOGETHER: a replacement left at the old
+// two-term shape would silently drop the new term as well, so the row would
+// pass while measuring an intervention its name does not describe.
+const HOLD_CLAIM = '        if (hold && hold.rid === s.rid && s.holds.has(hold) && !hold.buckets.has(bucket)) {\n';
 const HOLD_OWNER_END = '    if (hold && hold.rid !== s.rid) return null;\n';
 // Re-anchored when the gate began naming the bucket its figure came from. The
 // maximum is now spelled as a comparison that carries the winner out, so the
@@ -456,7 +460,17 @@ const M = [
   // it observable again, rather than carried here as a row that measures
   // nothing. The guard itself stays: it is a precondition on a private helper.
   ['loadFor           stale hold claims a stranger\'s pin', HOLD_CLAIM,
-    '        if (hold && !hold.buckets.has(bucket)) {\n', 'src/session-tracker.js'],
+    '        if (hold && s.holds.has(hold) && !hold.buckets.has(bucket)) {\n',
+    'src/session-tracker.js'],
+  // The released-hold test, which is a SEPARATE condition on the same line: a
+  // hold whose release already ran can claim a bucket again, and no release
+  // will ever follow, so the pin reads as held for the life of the record. The
+  // claim boundary is guarded and the release boundary deliberately is not
+  // (TC-025 — guarding it loses lost-hold recovery), which is exactly why this
+  // end needs a row of its own rather than sharing the ownership one's.
+  ['loadFor           released hold claims again', HOLD_CLAIM,
+    '        if (hold && hold.rid === s.rid && !hold.buckets.has(bucket)) {\n',
+    'src/session-tracker.js'],
   // The five-hour level is never read, so no account ever has measurable
   // capacity and cold start becomes permanent.
   ['bandDecision      five-hour never read', FIVE_HOUR_READ,
