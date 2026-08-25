@@ -895,6 +895,33 @@ test('an observer answers with the state the request path would see', () => {
   assert.equal(entry.band.candidates, 2, 'the reset account is missing from the candidate set');
 });
 
+// THE OBSERVATION'S CLOCK IS THE CALLER'S, and that is the half the fixture
+// above cannot see, because it observes at the wall clock so the two agree. A
+// helper that re-projects per question would have to pick a clock, and the only
+// one available to it is `Date.now()` — so asked at an INJECTED `now`, it would
+// answer about a different moment than the fleet was projected at, which is the
+// self-contradicting state `_observedFleet` exists to prevent. Found by a
+// neutralisation sweep: re-adding the per-question projection to `_quotaBar`
+// changed nothing, since every fixture observed at the wall clock.
+test('a report answers at the clock it was asked with, not at the wall clock', () => {
+  const asked = Date.now() - 5 * 60_000;
+  const am = fleet({ accounts: ['ample', 'expiring'] });
+  quota(am, 0, { unified5h: 0.2, unified5hReset: asked + 2 * H, unified7d: 0.3, unified7dReset: asked + 300 * H });
+  // Spent, with a window that reset BETWEEN the asked-for moment and now: still
+  // spent at `asked`, already reset at the wall clock. One account, two answers,
+  // and only the caller's clock chooses.
+  quota(am, 1, { unified5h: 0.99, unified5hReset: asked + 60_000, unified7d: 0.3, unified7dReset: asked + 10 * H });
+  assert.ok(am.accounts[1].quota.unified5hReset < Date.now(),
+    'the premise: the window has expired by the wall clock');
+  assert.ok(am.accounts[1].quota.unified5hReset > asked,
+    'the premise: it has NOT expired at the moment being asked about');
+
+  const entry = am.getStatus(asked).routing.find(e => e.scope === 'shared');
+  assert.ok(entry.band.excluded.some(x => x.account === 'expiring' && x.reason === 'five-hour-spent'),
+    'the report answered about a later moment than it was asked about');
+  assert.equal(entry.band.candidates, 1, 'the spent account entered the band anyway');
+});
+
 test('a route preview does not consume the event either', () => {
   // `_routeTarget` runs the preview for every route scope, and the preview
   // consults a manual pin and can fall through to a full pick — both of which
