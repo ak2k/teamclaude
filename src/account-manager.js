@@ -1742,6 +1742,11 @@ export class AccountManager {
       //
       // Keyed on `_representativeCaptured`, the same predicate `familySplit`
       // asks, so the disclosure and the suppression cannot disagree.
+      // ONE COMPUTATION FOR BOTH RETURNS. The scope's governing bucket is the
+      // same question whether or not the figures are published, and writing it
+      // twice gave the mutation table two identical anchors — a row that then
+      // mutates whichever it finds first and reports on the other.
+      const bucket = this._weeklyBucketFor(model, scopeRoute ?? this._routeForModel(model));
       if (this._representativeCaptured(model, scopeRoute)) {
         return {
           scope,
@@ -1751,7 +1756,7 @@ export class AccountManager {
           autocreated,
           target: null,
           pinnedTo: null,
-          bucket: this._weeklyBucketFor(model, scopeRoute ?? this._routeForModel(model)),
+          bucket,
           familySplit: this._familySplit(model, scopeRoute, match[0] ?? null, autocreated),
           // The marker, and the reason a reader needs to know what is missing
           // and why. Kept as its own field rather than folded into the band, so
@@ -1835,7 +1840,7 @@ export class AccountManager {
         // family is measured on the shared bucket instead, which is a per-account
         // fallback and so appears on the row rather than here — reading this key
         // as every row's bucket would attribute one window's figure to another.
-        bucket: this._weeklyBucketFor(model, scopeRoute ?? this._routeForModel(model)),
+        bucket,
         // WHAT THIS ENTRY MAY CLAIM ON BEHALF OF THE SET IT COVERS. Null is the
         // ordinary case and says the scope answers as one; a REASON says the
         // figures above are the representative's and names why the rest may
