@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { blockedState, familyModel, isFableModel, modelGlobOverlaps, modelsForGlob, parseRequestModel, TopLevelFieldFinder } from '../src/model.js';
+import { blockedState, familyModel, isFableModel, modelGlobMatches, modelGlobOverlaps, modelsForGlob, parseRequestModel, TopLevelFieldFinder } from '../src/model.js';
 
 test('isFableModel matches the Fable family only', () => {
   assert.equal(isFableModel('claude-fable-5'), true);
@@ -110,15 +110,33 @@ test('globCovers answers on the pattern\'s shape, not on its letters', () => {
 // interior literal against the same glob segment let a pattern claim coverage it
 // does not have, and `fablex` is the witness: it matches the glob, escapes the
 // pattern, and was reported as blocked.
-test('globCovers refuses a literal that would be consumed twice', () => {
+//
+// THE SYMMETRY SET IS BOTH ENDS: a pattern can double-count its literal against
+// the glob's first segment (prefix reuse) or against its last (suffix reuse),
+// and the two were fixed a pass apart because the first fix was tested only on
+// the case that produced it. Each end is asserted here with its own escape
+// witness, which is the whole content of the claim: an id that matches the glob
+// and not the pattern proves the coverage claim false.
+test('globCovers refuses a literal that would be consumed twice, at either end', () => {
+  // Prefix reuse, and the id that escapes it.
   assert.equal(blockedState(['fable*fable*'], { globs: ['fable*'] }), 'partial');
+  assert.equal(modelGlobMatches('fable*', 'fablex'), true);
+  assert.equal(modelGlobMatches('fable*fable*', 'fablex'), false,
+    'the escape witness: it matches the glob, so the pattern does not cover it');
+  // Suffix reuse — the mirror, live for a pass after the prefix end was fixed.
+  assert.equal(blockedState(['*fable*fable'], { globs: ['*fable'] }), 'partial');
+  assert.equal(modelGlobMatches('*fable', 'xfable'), true);
+  assert.equal(modelGlobMatches('*fable*fable', 'xfable'), false,
+    'the mirror escape witness, and the reason the mirror is the same defect');
   assert.equal(blockedState(['*a*a*'], { globs: ['a*'] }), 'partial',
-    'the two-middle shape was already refused, which is why this only showed with a prefix');
+    'the two-middle shape was already refused, which is why this needs one end fixed');
   // The directions that must keep working, so the refusal is not a blanket one.
   assert.equal(blockedState(['claude-*'], { globs: ['claude-fable-*'] }), 'blocked');
   assert.equal(blockedState(['*fable*'], { globs: ['*claude-fable*'] }), 'blocked');
   assert.equal(blockedState(['fable*'], { globs: ['fable-x*'] }), 'blocked',
     'a prefix pattern still covers a glob whose own prefix extends it');
+  assert.equal(blockedState(['*fable*'], { globs: ['*fable'] }), 'blocked',
+    'and an infix pattern still covers a suffix glob: the middle is guaranteed by it');
 });
 
 test('blockedState reserves `blocked` for a pattern that covers the whole glob', () => {

@@ -197,15 +197,20 @@ export function globCovers(pattern, glob) {
   // An interior literal is guaranteed only if it sits inside a literal segment
   // the glob requires. Spanning a wildcard would be a coincidence of one id,
   // not a property of the glob.
-  // An interior literal must be guaranteed by a segment the PREFIX has not
-  // already consumed. Without that, one occurrence in the glob satisfies two of
-  // the pattern's own segments: `fable*fable*` read as covering `fable*`, while
+  // An interior literal must be guaranteed by a segment NEITHER END has already
+  // consumed. Without that, one occurrence in the glob satisfies two of the
+  // pattern's own segments: `fable*fable*` read as covering `fable*`, while
   // `fablex` matches the glob and escapes the pattern — a live route reported
-  // dead. (`*a*a*` was already refused, having two middles, which is why the
-  // shape only shows with a prefix.)
+  // dead. THE TWO ENDS ARE THE SAME BUG and were fixed apart: the mirror
+  // `*fable*fable` read as covering `*fable`, while `xfable` escapes it the
+  // same way. So the window excludes the glob's first segment when the pattern
+  // has a prefix and its last when the pattern has a suffix; an empty window
+  // means nothing is left to guarantee the middle. (`*a*a*` was already
+  // refused, having two middles, which is why the shape needs one end fixed.)
   if (pMiddles.length === 1) {
     const start = pPrefix ? 1 : 0;
-    if (!gParts.slice(start).some(seg => seg.includes(pMiddles[0]))) return false;
+    const end = pSuffix ? gParts.length - 1 : gParts.length;
+    if (!gParts.slice(start, end).some(seg => seg.includes(pMiddles[0]))) return false;
   }
   return true;
 }
