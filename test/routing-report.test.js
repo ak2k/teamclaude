@@ -673,17 +673,29 @@ test('an earlier route splits the family whichever id it took, and one id is nev
   //    for "one id cannot be divided" sits between the two checks, so only the
   //    representative check can speak for it.
   //
-  //    Reaching it needs an earlier pattern that MATCHES the id while
-  //    `globCovers` refuses to say it covers it, or the scope is dropped
-  //    entirely and publishes nothing. Two interior literals is exactly that
-  //    shape: conservatively refused, so the entry survives.
-  const exotic = [{ name: 'exotic', match: ['*claude*fable*5'] },
-    { name: 'exact', match: ['claude-fable-5'] }];
-  const taken = mk([acct('a'), acct('b')], exotic)
-    .getStatus().routing.find(e => e.route === 'exact');
-  assert.ok(taken, 'the premise: the entry is published at all, or this grades nothing');
+  //    Reaching it needs an earlier route that TAKES the representative while
+  //    the earlier-route arm cannot see it. That arm asks
+  //    `modelGlobOverlaps`, which compares literal cores: `claude-*-5` and
+  //    `*fable*` reduce to `claude--5` and `fable`, neither containing the
+  //    other, so it answers no overlap — while `claude-*-5` matches
+  //    `claude-fable-5` perfectly well and takes it. The core comparison's
+  //    imprecision is what leaves this case to the owner check.
+  //
+  //    (The fixture that used to sit here relied on `globCovers` refusing a
+  //    two-interior-literal pattern. The exact-glob guard retired that refusal:
+  //    such a route now correctly reads as covered and publishes nothing at
+  //    all, so the fixture stopped reaching the check rather than stopped
+  //    mattering.)
+  const versioned = [{ name: 'v5', match: ['claude-*-5'], accounts: ['a'] },
+    { name: 'wild', match: ['*fable*'], accounts: ['b'] }];
+  const taken = mk([acct('a'), acct('b')], versioned)
+    .getStatus().routing.find(e => e.route === 'wild');
+  const goes = mk([acct('a'), acct('b')], versioned)
+    .getActiveAccount(null, 'claude-fable-5', null, null, {});
+  assert.equal(taken.target, 'b', 'the premise: the entry sends its own traffic here');
+  assert.equal(goes.name, 'a', 'the premise: its representative is served by the earlier route');
   assert.equal(taken.familySplit, 'an earlier route',
-    'a one-id scope whose id goes to an earlier route says nothing about it');
+    'an entry named by an id its route never receives said nothing about it');
 });
 
 test('a route whose families are all captured earlier publishes no entry at all', () => {

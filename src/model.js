@@ -177,6 +177,20 @@ export function globCovers(pattern, glob) {
   const p = pattern.toLowerCase();
   const g = glob.toLowerCase();
   if (p === g) return true;
+  // A WILDCARD-FREE GLOB IS ONE ID, so COVERAGE IS MEMBERSHIP: the pattern
+  // covers it exactly when it matches it, and the structural reasoning below
+  // has nothing to add. That reasoning got this wrong in both directions —
+  // `claude-*-5` was read as covering `claude-5`, which it does not match, and
+  // `claude-fable-5*5` likewise — because it checks the pattern's ends against
+  // the glob's ends without asking whether the middle survives.
+  //
+  // THIS IS THE INVARIANT, and the three fixes before it were treating
+  // symptoms. Each named a doubled literal, because that is the shape the
+  // witness of the day happened to have; an exhaustive oracle over the shape
+  // space then showed every overstating pair in it is an exact-glob pair and
+  // only two involve a repeated literal. One rule about one id retires all of
+  // them.
+  if (!g.includes('*')) return modelGlobMatches(p, g);
   if (!p.includes('*')) return false; // a literal covers only itself, handled above
   const pParts = p.split('*');
   const gParts = g.split('*');
