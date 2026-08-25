@@ -407,9 +407,14 @@ test('a route that lists its accounts keeps its figures when its representative 
       { name: 'wild', match: ['*fable*'], accounts: ['b'] },
     ],
   });
-  // Ownership that DISCRIMINATES: `a` claims the representative and `b` does
-  // not, so the ownership question would separate the fleet if it were asked.
-  am.accounts[0].models = ['claude-fable-5'];
+  // Ownership that DISCRIMINATES ON AN ID THIS ROUTE RECEIVES: `a` claims
+  // `claude-fable-4`, which `wild` gets, and `b` does not claim it. So conjunct
+  // 3 is TRUE here and the accounts list is the only thing keeping the figures.
+  // It named the REPRESENTATIVE until the pass-13 re-key, at which point
+  // conjunct 3 went false — the representative is captured, so no claim on it
+  // can discriminate about this route — and the fixture silently stopped
+  // separating the two conjuncts it exists to separate.
+  am.accounts[0].models = ['claude-fable-4'];
   for (const i of [0, 1]) {
     quota(am, i, {
       unified5h: 0.05 + i * 0.05, unified7d: 0.2, unified7dReset: now + 20 * H,
@@ -422,8 +427,10 @@ test('a route that lists its accounts keeps its figures when its representative 
   // fixture stops testing what it claims to.
   assert.equal(am._routeForModel('claude-fable-5').name, 'exact',
     'the premise: an earlier route captures this entry\'s representative');
-  assert.ok(am.accounts.some(a => !am._accountOwnsModel(a, 'claude-fable-5')),
-    'the premise: ownership of the representative discriminates, so only the list holds the figures up');
+  assert.equal(am._routeForModel('claude-fable-4').name, 'wild',
+    'the premise: the claimed id is one THIS route receives');
+  assert.ok(am.accounts.some(x => !am._accountOwnsModel(x, 'claude-fable-4')),
+    'the premise: ownership discriminates on that id, so only the accounts list holds the figures up');
 
   assert.equal(wild.figuresAbsent, null,
     'the entry withheld figures its own accounts list makes correct');
@@ -432,6 +439,173 @@ test('a route that lists its accounts keeps its figures when its representative 
     'the candidate set is this route\'s list, not the ownership question');
   assert.equal(wild.band.candidates, 1);
   assert.equal(wild.pick.account, 'b');
+});
+
+// THE CLAIM NAMES A SIBLING AND NOT THE REPRESENTATIVE. This is the dimension
+// every earlier fixture held constant: they all varied whether the CAPTURED id
+// was claimed, so none of them could produce the state below, and two separate
+// instruments reported clean over eleven fixtures between them.
+//
+// The representative is the one id this route provably does NOT receive — that
+// is what capture means — so asking the ownership question about it asks about
+// traffic that goes somewhere else. Here nobody claims `claude-fable-5` at all,
+// so that question answers "nothing discriminates" and the entry published
+// `a` as its destination while every request it actually receives can only be
+// served by `b`. The original inversion, reached through a different door.
+test('a claim on an id the route receives suppresses, though the representative is unclaimed', () => {
+  const now = Date.now();
+  const am = fleet({
+    accounts: ['a', 'b'],
+    routes: [
+      { name: 'exact', match: ['claude-fable-5'], accounts: [] },
+      { name: 'wild', match: ['*fable*'], accounts: [] },
+    ],
+  });
+  // `b` claims a SIBLING. Nobody claims the representative.
+  am.accounts[1].models = ['claude-fable-4'];
+  for (const i of [0, 1]) {
+    quota(am, i, {
+      unified5h: 0.05 + i * 0.05, unified7d: 0.2, unified7dReset: now + 20 * H,
+      unified7dFable: 0.1 + i * 0.4, unified7dFableReset: now + (20 + i * 10) * H,
+    });
+  }
+
+  const wild = am.getStatus().routing.find(e => e.route === 'wild');
+  // The premises, asserted so the fixture cannot rot into testing nothing.
+  assert.equal(am._routeForModel('claude-fable-5').name, 'exact',
+    'the premise: the representative is captured');
+  assert.equal(am._routeForModel('claude-fable-4').name, 'wild',
+    'the premise: the sibling is an id THIS route receives');
+  assert.ok(am.accounts.every(x => am._accountOwnsModel(x, 'claude-fable-5')),
+    'the premise: the representative is unclaimed, so asking about IT finds nothing');
+
+  assert.equal(wild.figuresAbsent, 'representative-captured',
+    'the entry graded its fleet by an id it never receives and published the answer');
+  assert.equal(wild.target, null,
+    'the entry named a destination that cannot serve a single request it receives');
+});
+
+// A CLAIM CARRYING THE `[Nm]` CONTEXT SUFFIX still names the id it answers for.
+// The enumeration lists both spellings; listing only what is written would hold
+// `claude-fable-4[1m]`, never match it against the `claude-fable-4` the route
+// actually receives, conclude nothing discriminates, and publish the inversion
+// while looking fully covered.
+test('a suffixed models claim discriminates on the id it answers for', () => {
+  const now = Date.now();
+  const am = fleet({
+    accounts: ['a', 'b'],
+    routes: [
+      { name: 'exact', match: ['claude-fable-5'], accounts: [] },
+      { name: 'wild', match: ['*fable*'], accounts: [] },
+    ],
+  });
+  am.accounts[1].models = ['claude-fable-4[1m]'];
+  for (const i of [0, 1]) {
+    quota(am, i, {
+      unified5h: 0.05 + i * 0.05, unified7d: 0.2, unified7dReset: now + 20 * H,
+      unified7dFable: 0.1 + i * 0.4, unified7dFableReset: now + (20 + i * 10) * H,
+    });
+  }
+  assert.equal(am._accountOwnsModel(am.accounts[0], 'claude-fable-4'), false,
+    'the premise: the suffixed claim answers for the bare id');
+
+  const wild = am.getStatus().routing.find(e => e.route === 'wild');
+  assert.equal(wild.figuresAbsent, 'representative-captured',
+    'the suffixed spelling was enumerated verbatim, so the id it answers for was never checked');
+});
+
+// THE TEST ABOVE DOES NOT SEPARATE THE TWO SPELLINGS, and this one exists
+// because a mutation showed that. With a `*fable*` route the written
+// `claude-fable-4[1m]` matches the glob and routes to the same place as the bare
+// id, so the suppression fires whether or not the stripped spelling was
+// enumerated — the row neutralising the strip SURVIVED, which is coverage that
+// looks real and is not.
+//
+// Separating them needs a config where the written spelling goes SOMEWHERE ELSE
+// while the id it answers for still lands here. A route matching the suffix does
+// exactly that. It is an unusual configuration and it is a legal one, which is
+// the only bar a fixture has to clear.
+test('a suffixed claim is enumerated by the id it answers for, not by how it is written', () => {
+  const now = Date.now();
+  const am = fleet({
+    accounts: ['a', 'b'],
+    routes: [
+      { name: 'brackets', match: ['*[1m]'], accounts: [] },
+      { name: 'exact', match: ['claude-fable-5'], accounts: [] },
+      { name: 'wild', match: ['*fable*'], accounts: [] },
+    ],
+  });
+  am.accounts[1].models = ['claude-fable-4[1m]'];
+  for (const i of [0, 1]) {
+    quota(am, i, {
+      unified5h: 0.05 + i * 0.05, unified7d: 0.2, unified7dReset: now + 20 * H,
+      unified7dFable: 0.1 + i * 0.4, unified7dFableReset: now + (20 + i * 10) * H,
+    });
+  }
+  // The premises that make this shape separating: the WRITTEN spelling belongs
+  // to an earlier route, while the id it answers for belongs to this one.
+  assert.equal(am._routeForModel('claude-fable-4[1m]').name, 'brackets',
+    'the premise: the written spelling routes elsewhere');
+  assert.equal(am._routeForModel('claude-fable-4').name, 'wild',
+    'the premise: the id it answers for routes HERE');
+  assert.equal(am._routeForModel('claude-fable-5').name, 'exact',
+    'the premise: this route\'s representative is captured');
+
+  const wild = am.getStatus().routing.find(e => e.route === 'wild');
+  assert.equal(wild.figuresAbsent, 'representative-captured',
+    'only the written spelling was enumerated, so the id this route receives went unchecked');
+});
+
+// AN ID AN EARLIER ROUTE TAKES DECIDES NOTHING ABOUT THIS ROUTE, and the
+// enumeration has to filter on that rather than ask about every claimed id. Here
+// the ONLY claim names `claude-fable-5`, which `exact` captures, so `wild`
+// receives nothing that ownership can separate — and its figures are correct.
+// Without the received-ids filter this entry is suppressed for a claim about
+// traffic it never sees, which withholds figures that were right.
+test('a claim on an id an earlier route takes does not withhold this route\'s figures', () => {
+  const now = Date.now();
+  const am = fleet({
+    accounts: ['a', 'b'],
+    routes: [
+      { name: 'exact', match: ['claude-fable-5'], accounts: [] },
+      { name: 'wild', match: ['*fable*'], accounts: [] },
+    ],
+  });
+  am.accounts[0].models = ['claude-fable-5'];
+  for (const i of [0, 1]) {
+    quota(am, i, {
+      unified5h: 0.05 + i * 0.05, unified7d: 0.2, unified7dReset: now + 20 * H,
+      unified7dFable: 0.1 + i * 0.4, unified7dFableReset: now + (20 + i * 10) * H,
+    });
+  }
+  assert.equal(am._routeForModel('claude-fable-5').name, 'exact',
+    'the premise: the only claimed id belongs to an earlier route');
+  assert.ok(am.accounts.some(x => !am._accountOwnsModel(x, 'claude-fable-5')),
+    'the premise: that claim DOES discriminate, so only the received-ids filter excludes it');
+
+  const wild = am.getStatus().routing.find(e => e.route === 'wild');
+  assert.equal(wild.figuresAbsent, null,
+    'figures were withheld over a claim about traffic this route never receives');
+  assert.ok(wild.target, 'a live route published no destination');
+});
+
+// THE COMPLETENESS THIS PREDICATE RESTS ON, pinned rather than assumed.
+// `_ownershipDiscriminates` enumerates the ids named in `models` claims and
+// calls that the whole space where ownership can discriminate. That is only
+// true because `_accountOwnsModel` matches EXACTLY (plus the `[Nm]` strip) and
+// never globs. Start glob-matching and the enumeration silently stops being
+// complete — the suppression would then miss inversions rather than report
+// them, which is the direction nobody notices.
+test('a glob-shaped models claim names no id, so it cannot discriminate', () => {
+  const am = fleet({ accounts: ['a', 'b'], routes: [{ name: 'wild', match: ['*fable*'], accounts: [] }] });
+  am.accounts[1].models = ['*-20260101'];
+  assert.equal(am._accountOwnsModel(am.accounts[0], 'claude-fable-4-20260101'), true,
+    'a models claim matched a glob, so the claimable-id enumeration is no longer complete');
+  // And the suffix form DOES name an id, which is why the enumeration carries
+  // the stripped spelling as well as the written one.
+  am.accounts[1].models = ['claude-fable-4[1m]'];
+  assert.equal(am._accountOwnsModel(am.accounts[0], 'claude-fable-4'), false,
+    'a claim of x[1m] answers for a request of plain x, so the enumeration must hold both');
 });
 
 // THE ROUTE HAS TO REACH RANKING, not only the fields that name things. The

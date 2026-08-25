@@ -183,8 +183,17 @@ function makeAccount(acct, index) {
 // trailing [Nm] context-length suffix (e.g. "deepseek-v4-pro[1m]"); we match it
 // against a bare request too. Shared by _accountOwnsModel's two lookups so the
 // predicate can't drift.
+// The declared side without its context-length suffix. Its own function because
+// TWO things need it and a second copy is a second thing to rot: `modelMatches`
+// below, and the enumeration of ids a `models` claim can discriminate on
+// (`_claimableIds`). A claim of `x[1m]` answers for a request of plain `x`, so
+// any enumeration that lists claim strings verbatim silently misses that id.
+function bareModelId(declared) {
+  return declared.replace(/\[\d+m\]$/, '');
+}
+
 function modelMatches(declared, model) {
-  return declared === model || declared.replace(/\[\d+m\]$/, '') === model;
+  return declared === model || bareModelId(declared) === model;
 }
 
 // Follow a by-index account reference through the removal of `removed`: the
@@ -1991,21 +2000,65 @@ export class AccountManager {
   }
 
   /**
-   * Does the representative's identity actually change which accounts qualify?
+   * Every id a `models` claim could possibly discriminate on.
    *
-   * ASKED THROUGH THE MECHANISM, not beside it. `_accountOwnsModel` is the only
-   * function by which a model id reaches a per-account figure, so this asks it
-   * directly instead of re-deriving what a `models` claim means. A second copy
-   * of that rule is a second thing to rot, and the entry it would misgrade is
-   * the one nobody is looking at.
+   * COMPLETE FOR THIS QUESTION, not merely a sample, and the completeness is a
+   * property of `_accountOwnsModel` rather than an aspiration. That function
+   * discriminates only when some account's claim `modelMatches` the id, and
+   * `modelMatches` is EXACT equality plus the context-length strip — it does not
+   * glob-match. So an id no claim names literally (either as written or with
+   * `[Nm]` removed) gets `true` from every account, and cannot separate the
+   * fleet. Enumerating the claims therefore enumerates the whole space where the
+   * answer can be anything but constant.
    *
-   * It is constant-true in two directions at once, which is why the question is
-   * "is anyone DENIED" rather than "does anyone claim": with nobody claiming the
-   * id every account passes, and with everybody claiming it every account passes
-   * too. A claim held by all separates nobody.
+   * THAT IS LOAD-BEARING AND IT IS PINNED. `a glob-shaped models claim names no
+   * id` fails if `_accountOwnsModel` ever starts glob-matching, because at that
+   * moment this enumeration stops being complete and the suppression starts
+   * missing inversions in silence.
    */
-  _ownershipDiscriminates(model) {
-    return this.accounts.some(a => !this._accountOwnsModel(a, model));
+  _claimableIds() {
+    const ids = new Set();
+    for (const a of this.accounts) {
+      for (const declared of a.models || []) {
+        ids.add(declared);
+        ids.add(bareModelId(declared));
+      }
+    }
+    return ids;
+  }
+
+  /**
+   * Does ownership discriminate on any id THIS ROUTE ACTUALLY RECEIVES?
+   *
+   * RE-KEYED FROM THE REPRESENTATIVE, and that re-keying is the pass-13 P1. The
+   * first version asked this about the captured representative — an id the route
+   * by definition does NOT receive, that being what capture means. A fleet whose
+   * claims name a SIBLING and not the representative then answered "nothing
+   * discriminates", published figures, and named an account that cannot serve a
+   * single request the route receives. The original inversion, reached by a
+   * different door.
+   *
+   * So the question is asked about the ids the route is actually served: those a
+   * claim can discriminate on, that this route's globs match, and that no
+   * earlier route takes. `_routeForModel` decides the last part, so the "who
+   * gets this id" rule is the routing table's own and not a second opinion.
+   *
+   * ON THE CENSUS OBJECTION, which this round rejected twice elsewhere and which
+   * does NOT apply here. What was rejected was inferring a POSITIVE fact from
+   * census absence — declaring a route dead because no known id reaches it. This
+   * infers nothing from absence: it WIDENS suppression when it finds a
+   * discriminating id, and finding none leaves the figures published exactly as
+   * before. And for this particular question the census is not even a
+   * approximation — see `_claimableIds`, it is the complete space.
+   */
+  _ownershipDiscriminates(route) {
+    for (const id of this._claimableIds()) {
+      if (!route.match.some(g => modelGlobMatches(g, id))) continue;
+      const owner = this._routeForModel(id);
+      if (!owner || owner.match !== route.match) continue;   // an earlier route takes it
+      if (this.accounts.some(a => !this._accountOwnsModel(a, id))) return true;
+    }
+    return false;
   }
 
   /**
@@ -2021,10 +2074,14 @@ export class AccountManager {
    *      membership of that list and never consults the id, so the figures are
    *      the route's own however the entry is named. The round tested this
    *      contract directly, and suppressing it reversed a decided answer.
-   *   3. OWNERSHIP DISCRIMINATES. With the list empty the id reaches
-   *      `_accountOwnsModel`, but that is constant-true unless some account is
-   *      denied — so on a fleet declaring no `models` at all, the captured id
-   *      grades the fleet exactly as any served id would.
+   *   3. OWNERSHIP DISCRIMINATES ON AN ID THIS ROUTE RECEIVES. With the list
+   *      empty the id reaches `_accountOwnsModel`, but that is constant-true
+   *      unless some account is denied — so on a fleet declaring no `models` at
+   *      all, the figures grade the fleet exactly as any served id would.
+   *      Asked about the RECEIVED ids, never the representative: the
+   *      representative is the one id the route provably does not get, so a
+   *      fleet claiming a sibling and not the representative answered "nothing
+   *      discriminates" and published an inversion.
    *
    * WHAT THIS IS AND IS NOT. It is the condition under which the identity of the
    * representative CAN move a published figure, computed without a census of the
@@ -2053,7 +2110,7 @@ export class AccountManager {
   _captureDistortsFigures(model, route) {
     return this._representativeCaptured(model, route)
       && route.accounts.length === 0
-      && this._ownershipDiscriminates(model);
+      && this._ownershipDiscriminates(route);
   }
 
   /**

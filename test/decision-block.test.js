@@ -839,12 +839,20 @@ test('a captured scope says why it has no figures rather than counting to zero',
   // THE FIXTURE HAS TO EARN THE SUPPRESSION, and all three conditions are here
   // deliberately: `wild`'s representative is captured by `exact`, `wild` lists
   // NO accounts so the id reaches the ownership question at all, and the
-  // `models` claims below make that question discriminate. Drop any one and the
+  // `models` claim below makes that question discriminate. Drop any one and the
   // entry publishes ordinary figures — which is the whole correction this
   // fixture exists downstream of, since it originally listed its accounts and
   // was suppressed anyway.
+  //
+  // THE CLAIM NAMES A SIBLING, NOT THE REPRESENTATIVE, and that is the point of
+  // it. `claude-fable-5` is the id `exact` captured, so `wild` never receives
+  // it and a claim on it decides nothing about `wild`'s traffic. `claude-fable-4`
+  // is an id `wild` actually gets. An earlier version of this fixture claimed
+  // the representative and stopped suppressing the moment the predicate started
+  // asking about received ids — correctly, since nothing about that fleet's
+  // published figures was wrong.
   const accounts = ['a', 'b', 'c'].map(acct);
-  accounts[0].models = ['claude-fable-5'];
+  accounts[0].models = ['claude-fable-4'];
   const am = new AccountManager(accounts, 0.98, {
     expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 },
     routes: [{ name: 'exact', match: ['claude-fable-5'], accounts: ['a', 'c'] },
@@ -885,4 +893,52 @@ test('a captured scope says why it has no figures rather than counting to zero',
     'the screen describes a suppressed scope by a decision it never made');
   assert.doesNotMatch(rendered, /0 eligible/,
     'the collapsed row counted a fleet nobody asked about');
+});
+
+// AT THE DEFAULT CONFIGURATION, which is the whole point of this test existing.
+// The test above turns expiry routing ON so that some scope decides something
+// and the Decision block renders at all. With it OFF — the shipped default —
+// every scope is passthrough, the block collapses to its one-row form, and the
+// `Other scopes` line carrying the suppression notice is never emitted. The
+// routing table is then the ONLY thing on screen about the route, and it was
+// listing accounts graded for an id the route does not receive: the payload
+// withdrew the claim and the default rendering went on making it.
+//
+// So the withdrawal is attached to the routing line, which renders in every
+// configuration, and this test pins it in the one the block does not reach.
+test('the routing table withdraws a suppressed route in the default configuration', () => {
+  const now = Date.now();
+  const accounts = ['owner5', 'owner4'].map(acct);
+  // A claim on a SIBLING the wide route receives, not on the captured
+  // representative — the shape that makes the figures wrong.
+  accounts[1].models = ['claude-fable-4'];
+  const am = new AccountManager(accounts, 0.98, {
+    // No expiryRouting key at all: the stock default, and the configuration
+    // whose absence of a warning was the defect.
+    routes: [{ name: 'exact', match: ['claude-fable-5'], accounts: [] },
+      { name: 'wild', match: ['*fable*'], accounts: [] }],
+  });
+  am.accounts.forEach((x, i) => {
+    x.quota = { ...x.quota, unified5h: 0.05 + i * 0.05, unified5hReset: now + 2 * H,
+      unified7d: 0.2 + i * 0.1, unified7dReset: now + (20 + i * 10) * H,
+      unified7dFable: 0.1 + i * 0.2, unified7dFableReset: now + (20 + i * 10) * H };
+  });
+  const status = am.getStatus();
+  const wild = status.routing.find(e => e.route === 'wild');
+  assert.equal(wild.figuresAbsent, 'representative-captured', 'the premise: the wire withdrew this scope');
+
+  const rendered = renderStatus(status, { color: false, now });
+  const wildLine = rendered.split('\n').find(l => l.includes('*fable*'));
+  assert.ok(wildLine, 'the routing table renders the route at all');
+  assert.match(wildLine, /no figures: an earlier route takes the id/,
+    'the default screen says nothing about a scope whose figures were withdrawn');
+  // THE CONTROL: the accounts must be gone from that line, not merely
+  // accompanied by a caveat. Naming them beside the notice would still put an
+  // owner on screen for traffic this route cannot serve.
+  assert.doesNotMatch(wildLine, /owner5|owner4/,
+    'the line still names an owner the payload withdrew');
+  // And the route that legitimately owns its representative is untouched, so
+  // the fix is not "stop rendering accounts".
+  const exactLine = rendered.split('\n').find(l => l.includes('claude-fable-5'));
+  assert.match(exactLine, /owner5|owner4/, 'an unsuppressed route stopped naming its accounts');
 });

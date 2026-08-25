@@ -46,7 +46,7 @@ export function renderStatus(status, { color = process.stdout.isTTY, now = Date.
 
   for (const line of decisionLines(decision, status, blocked, paint)) lines.push(line);
 
-  for (const line of routingLines(status.routes, blocked, paint)) lines.push(line);
+  for (const line of routingLines(status.routes, blocked, paint, status.routing)) lines.push(line);
 
   for (const account of accounts) {
     lines.push(renderAccountHeader(account, status.currentAccount, paint, now));
@@ -575,12 +575,37 @@ function excludedRow(row, paint) {
 // listing the model globs it matches and the accounts it can use, each colored
 // by live eligibility. Auto-created routes (a family metered separately with no
 // configured route) are tagged (auto); a bucket override shows in [brackets].
-function routingLines(routes, blocked, paint) {
+// THIS LINE RENDERS IN THE DEFAULT CONFIGURATION, which is why the withdrawal
+// has to reach it. With expiry routing off every scope is passthrough, the
+// Decision block collapses to its one-row form, and the `Other scopes` line
+// that carries the suppression notice is never emitted — so the only thing on
+// screen about a suppressed route was this table, listing accounts that were
+// graded for an id the route does not receive. The payload withdrew the claim
+// and the default screen went on making it.
+//
+// THE JOIN, and its limit stated rather than assumed. A `routing[]` entry names
+// its route and carries the single glob it was built from; a `routes[]` entry
+// carries all of them. Matching on the name ALONE is the trap this codebase
+// keeps flagging — route names are not unique — so the glob has to agree too.
+// Two routes sharing BOTH a name and a glob are still indistinguishable here;
+// that is a narrower ambiguity than the one it replaces, and it is the most a
+// consumer of this payload can do without an id on the entries.
+function suppressedScopesFor(route, routing) {
+  if (!Array.isArray(routing)) return { any: false, all: false };
+  const mine = routing.filter(e => e && e.scope === 'route' && e.route === route.name
+    && Array.isArray(e.match) && (route.match || []).includes(e.match[0]));
+  if (!mine.length) return { any: false, all: false };
+  const hit = mine.filter(e => e.figuresAbsent === 'representative-captured');
+  return { any: hit.length > 0, all: hit.length === mine.length };
+}
+
+function routingLines(routes, blocked, paint, routing) {
   if (!Array.isArray(routes) || routes.length === 0) return [];
   const lines = [paint.bold('Routing')];
   for (const route of routes) {
     const globs = route.match || [];
     const match = globs.join(', ');
+    const suppressed = suppressedScopesFor(route, routing);
     // A route every one of whose models is blocked can carry no traffic at all —
     // say so, rather than listing eligible accounts it will never reach. Asked
     // of `blockedState`, the same classification the Decision block and the
@@ -589,16 +614,29 @@ function routingLines(routes, blocked, paint) {
     const state = globs.length
       ? blockedState(blocked, { models: globs.flatMap(modelsForGlob), globs })
       : 'clear';
+    // A SUPPRESSED SCOPE HAS NO ACCOUNTS TO NAME. The eligibility flags on this
+    // route were computed for the id its entry is named by, and an earlier route
+    // takes that id — so listing them here would name owners for traffic this
+    // route never sees. Blocked still wins: a route that can carry nothing at
+    // all is the stronger statement, and it is true whichever id was asked
+    // about.
     const accounts = state === 'blocked'
       ? paint.red('blocked')
-      : (route.accounts || [])
-        .map(a => (a.eligible ? paint.green(a.name) : paint.red(a.name))).join(' ') || paint.gray('(none)');
+      : suppressed.all
+        ? paint.gray('no figures: an earlier route takes the id this route is named for')
+        : (route.accounts || [])
+          .map(a => (a.eligible ? paint.green(a.name) : paint.red(a.name))).join(' ') || paint.gray('(none)');
+    // Some but not all: the accounts shown are real for the scopes that were
+    // measured, so they stay, and the line says part of it went unmeasured
+    // rather than silently mixing the two.
+    const someAbsent = suppressed.any && !suppressed.all && state !== 'blocked'
+      ? paint.dim(' (some scopes have no figures)') : '';
     const partly = state === 'partial' ? paint.dim(' (partly blocked)') : '';
     const tag = route.autocreated ? paint.dim(' (auto)') : route.bucket ? paint.dim(` [${route.bucket}]`) : '';
     const pin = route.pinned ? paint.dim(` [pinned: ${route.pinned}]`) : '';
     // padEnd on the raw text, color after, so ANSI codes don't throw off alignment.
     const label = paintRoute(paint, route.color, match.padEnd(16));
-    lines.push(`  ${label} ${paint.dim('→')} ${accounts}${partly}${tag}${pin}`);
+    lines.push(`  ${label} ${paint.dim('→')} ${accounts}${someAbsent}${partly}${tag}${pin}`);
   }
   lines.push('');
   return lines;
