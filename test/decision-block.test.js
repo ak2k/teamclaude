@@ -895,6 +895,62 @@ test('a captured scope says why it has no figures rather than counting to zero',
     'the collapsed row counted a fleet nobody asked about');
 });
 
+// A ROUTE CAN BE PARTLY SUPPRESSED, and the mixed path was the half the
+// withdrawal fix did not cover. A route with two globs has two scopes: an
+// earlier route can capture one representative and not the other, so one scope
+// publishes figures and one does not.
+//
+// The mixed line fell through to `routes[].accounts`, which `getRoutes` grades
+// against the route's STRIPPED SAMPLE — an id no claim matches — so every
+// account came back eligible and the screen named one that the measured scope
+// excludes. The caveat beside it did not save it: a name on screen is an owner
+// offered for traffic this route cannot send it, which is the rule the round's
+// own pass-14 test already states.
+test('a partly suppressed route names only accounts its measured scopes admit', () => {
+  const now = Date.now();
+  const accounts = ['a', 'b'].map(acct);
+  accounts[0].models = ['claude-fable-5', 'claude-sonnet-4-6'];
+  const am = new AccountManager(accounts, 0.98, {
+    routes: [{ name: 'exact', match: ['claude-fable-5'], accounts: [] },
+      { name: 'mixed', match: ['*fable*', '*sonnet*'], accounts: [] }],
+  });
+  am.accounts.forEach((x, i) => {
+    x.quota = { ...x.quota, unified5h: 0.05 + i * 0.05, unified5hReset: now + 2 * H,
+      unified7d: 0.2 + i * 0.2, unified7dReset: now + 40 * H,
+      unified7dFable: 0.2 + i * 0.2, unified7dFableReset: now + 40 * H,
+      unified7dSonnet: 0.2 + i * 0.2, unified7dSonnetReset: now + 40 * H };
+  });
+  const status = am.getStatus();
+  const scopes = status.routing.filter(e => e.route === 'mixed');
+  // The premise: PARTLY, not wholly. Without both halves this fixture is
+  // testing the full-withdrawal path that already worked.
+  assert.ok(scopes.some(e => e.figuresAbsent === 'representative-captured'),
+    'the premise: one scope of this route is suppressed');
+  const measured = scopes.filter(e => e.figuresAbsent == null);
+  assert.ok(measured.length, 'the premise: another scope of it published figures');
+
+  const line = renderStatus(status, { color: false, now }).split('\n')
+    .find(l => l.includes('*fable*, *sonnet*'));
+  assert.ok(line, 'the routing table renders the mixed route');
+  // Nobody the measured scopes all exclude may appear, in any colour.
+  const excludedEverywhere = ['a', 'b'].filter(n =>
+    measured.every(e => (e.band?.excluded || []).some(x => x.account === n)));
+  for (const name of excludedEverywhere) {
+    assert.doesNotMatch(line, new RegExp(`\\b${name}\\b`),
+      `the line names ${name}, which every measured scope of this route excludes`);
+  }
+  // THE POSITIVE CONTROL: it must still name somebody, or "names no excluded
+  // account" is satisfied by a renderer that stopped naming accounts at all.
+  const admitted = new Set(measured.flatMap(e => e.band?.admitted || []));
+  assert.ok(admitted.size, 'the fixture is degenerate: no measured scope admitted anyone');
+  for (const name of admitted) {
+    assert.match(line, new RegExp(`\\b${name}\\b`),
+      `the line dropped ${name}, which a measured scope admits`);
+  }
+  assert.match(line, /some scopes have no figures/,
+    'the line presents a partial answer as a whole one');
+});
+
 // AT THE DEFAULT CONFIGURATION, which is the whole point of this test existing.
 // The test above turns expiry routing ON so that some scope decides something
 // and the Decision block renders at all. With it OFF — the shipped default —

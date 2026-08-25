@@ -594,9 +594,47 @@ function suppressedScopesFor(route, routing) {
   if (!Array.isArray(routing)) return { any: false, all: false };
   const mine = routing.filter(e => e && e.scope === 'route' && e.route === route.name
     && Array.isArray(e.match) && (route.match || []).includes(e.match[0]));
-  if (!mine.length) return { any: false, all: false };
+  if (!mine.length) return { any: false, all: false, published: [] };
   const hit = mine.filter(e => e.figuresAbsent === 'representative-captured');
-  return { any: hit.length > 0, all: hit.length === mine.length };
+  return {
+    any: hit.length > 0,
+    all: hit.length === mine.length,
+    // The scopes that DID publish. A route with two globs can have one scope
+    // suppressed and one measured, and the measured one's account lists are the
+    // only per-account figures on this route anybody computed.
+    published: mine.filter(e => e.figuresAbsent == null),
+  };
+}
+
+/**
+ * Account names for a route whose scopes are PARTLY suppressed.
+ *
+ * Taken from the scopes that published, never from `routes[].accounts`. That
+ * field is graded by `getRoutes` against the route's stripped sample — an id no
+ * claim matches — so every account comes back eligible, and the line named an
+ * account that every measured scope of the same route excluded. A caveat beside
+ * a name does not fix that: the name is still on screen for traffic the route
+ * cannot send it.
+ *
+ * ONLY accounts some published scope ADMITS are named. An account excluded from
+ * every scope that was measured gets no line here at all — not even in red —
+ * which is the same rule the full-withdrawal path follows when it names nobody.
+ * The red spelling elsewhere means "this route lists it and it is not eligible
+ * right now", a statement `routes[].accounts` can make because it is the route's
+ * configured list. Here there is no such list to draw on: the names are
+ * synthesised from measured scopes, so an account those scopes all exclude has
+ * no positive claim on this route and printing it puts an owner on screen for
+ * traffic the route cannot send it.
+ */
+function partialAccountNames(published, paint) {
+  const admitted = new Set();
+  for (const entry of published) {
+    for (const name of entry.band?.admitted || []) admitted.add(name);
+  }
+  if (!published.length) return null;
+  return admitted.size
+    ? [...admitted].map(name => paint.green(name)).join(' ')
+    : paint.gray('(none)');
 }
 
 function routingLines(routes, blocked, paint, routing) {
@@ -620,15 +658,22 @@ function routingLines(routes, blocked, paint, routing) {
     // route never sees. Blocked still wins: a route that can carry nothing at
     // all is the stronger statement, and it is true whichever id was asked
     // about.
+    // PARTLY suppressed: the names come from the scopes that published, since
+    // `routes[].accounts` answers for the stripped sample and would name an
+    // account the measured scopes exclude.
+    const partial = suppressed.any && !suppressed.all
+      ? partialAccountNames(suppressed.published, paint) : null;
+    const fromRoute = (route.accounts || [])
+      .map(a => (a.eligible ? paint.green(a.name) : paint.red(a.name))).join(' ')
+      || paint.gray('(none)');
     const accounts = state === 'blocked'
       ? paint.red('blocked')
       : suppressed.all
         ? paint.gray('no figures: an earlier route takes the id this route is named for')
-        : (route.accounts || [])
-          .map(a => (a.eligible ? paint.green(a.name) : paint.red(a.name))).join(' ') || paint.gray('(none)');
-    // Some but not all: the accounts shown are real for the scopes that were
-    // measured, so they stay, and the line says part of it went unmeasured
-    // rather than silently mixing the two.
+        : (partial || fromRoute);
+    // Some but not all: the names above are the measured scopes' own, and the
+    // line still says part of this route went unmeasured rather than presenting
+    // a partial answer as a whole one.
     const someAbsent = suppressed.any && !suppressed.all && state !== 'blocked'
       ? paint.dim(' (some scopes have no figures)') : '';
     const partly = state === 'partial' ? paint.dim(' (partly blocked)') : '';
