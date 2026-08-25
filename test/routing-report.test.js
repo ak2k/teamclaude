@@ -30,6 +30,34 @@ function quota(am, index, values) {
 }
 
 /**
+ * A published entry has to AGREE with the traffic its route actually carries.
+ *
+ * ASSERTING `figuresAbsent === null` IS NOT ENOUGH, and that gap greened a live
+ * inversion twice. A test can be satisfied that figures were published while the
+ * figures say an account cannot serve a route it serves perfectly well — the
+ * state is reached, the harm is invisible. So every "this entry publishes"
+ * fixture also asks whether the answer is RIGHT, against an id the route really
+ * receives rather than against the representative it is named for.
+ *
+ * The check is the inversion's own wording: nobody entitled to serve `receivedId`
+ * may be published as `route-excluded`.
+ */
+function assertPublishedFiguresMatchTraffic(am, entry, receivedId) {
+  assert.equal(am._routeForModel(receivedId)?.name, entry.route,
+    `the fixture's premise: ${receivedId} is an id this route receives`);
+  const route = am.routes.find(r => r.match === am.routes.find(x => x.name === entry.route)?.match)
+    ?? am.routes.find(r => r.name === entry.route);
+  const barred = new Set((entry.band?.excluded || [])
+    .filter(x => x.reason === 'route-excluded').map(x => x.account));
+  const wronglyBarred = am.accounts
+    .filter(a => barred.has(a.name) && am._routeAllows(a, receivedId, route))
+    .map(a => a.name);
+  assert.deepEqual(wronglyBarred, [],
+    `published route-excluded against ${JSON.stringify(wronglyBarred)}, `
+    + `which may serve ${receivedId} — an id this route receives`);
+}
+
+/**
  * A fleet reaching all four ladder shapes plus one excluded account.
  *
  * Six accounts rather than four, because two of the shapes need an account each
@@ -439,6 +467,10 @@ test('a route that lists its accounts keeps its figures when its representative 
     'the candidate set is this route\'s list, not the ownership question');
   assert.equal(wild.band.candidates, 1);
   assert.equal(wild.pick.account, 'b');
+  // And the figures are RIGHT, not merely present: `a` is excluded by this
+  // route's own accounts list, which is a rule that holds for every id the
+  // route receives, so the exclusion is true of `claude-fable-4` too.
+  assertPublishedFiguresMatchTraffic(am, wild, 'claude-fable-4');
 });
 
 // THE CLAIM NAMES A SIBLING AND NOT THE REPRESENTATIVE. This is the dimension
@@ -592,6 +624,9 @@ test('a claim on an id this route cannot receive does not withhold its figures',
   assert.equal(wild.figuresAbsent, null,
     'figures were withheld over a claim about traffic this route cannot receive');
   assert.ok(wild.target, 'a live route published no destination');
+  // Published is not the same as correct. The sonnet claim bars nobody from the
+  // ids this route carries, so nobody may be published as barred from them.
+  assertPublishedFiguresMatchTraffic(am, wild, 'claude-fable-4');
 });
 
 // AN ID THAT MATCHES THIS ROUTE'S GLOB BUT GOES TO AN EARLIER ROUTE decides
@@ -629,6 +664,9 @@ test('a claim on an id an earlier route takes does not withhold this route\'s fi
   const wild = am.getStatus().routing.find(e => e.route === 'wild');
   assert.equal(wild.figuresAbsent, null,
     'figures were withheld over a claim about traffic an earlier route takes');
+  // `claude-fable-4` goes to the `four` route, so the id THIS route still
+  // receives is the dated shape — and nobody is barred from it.
+  assertPublishedFiguresMatchTraffic(am, wild, 'claude-fable-4-20260101');
 });
 
 // A RESTRICTED REPRESENTATIVE WITHHOLDS THE FIGURES EVEN WHEN NO CLAIM NAMES
