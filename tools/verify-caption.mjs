@@ -214,6 +214,26 @@ function textOf(caption) {
 // a scoring function mean the same thing, so the sentence is pinned and a
 // reword stops the run rather than silently grading the new sentence with the
 // old sentence's reading — which would pass, and would mean nothing.
+// BOTH BRANCHES ARE PINNED, because both are shipped sentences. The banded one
+// was replayed against the rule and never READ: reworded into "the
+// soonest-expiring account goes first and nothing else is admitted" — false
+// about the rule on every count — the gate still exited 0 and printed
+// REPRODUCES, because the replay grades `floorSteps` and nothing compared it to
+// the words on screen. A pin is the only thing that catches a rewording, since
+// no replay can notice that a sentence stopped saying what it says.
+const BANDED_PINNED = 'within the best priority tier, everything within the tolerance ratio '
+  + 'of the best unspent-weekly-per-hour; accounts with no pressure reading are admitted regardless';
+const bandedText = ruleCaption({ kind: 'banded', floor: 1 });
+if (bandedText !== BANDED_PINNED) {
+  console.error('verify-caption: the BANDED caption has been reworded since this gate was written.');
+  console.error(`  renders: ${bandedText}`);
+  console.error(`  pinned:  ${BANDED_PINNED}`);
+  console.error('  The banded section below replays the ratio rule; it cannot notice that the');
+  console.error('  sentence describing that rule has changed. Re-read the new one, decide whether');
+  console.error('  the replay still reads it, and update both together.');
+  process.exit(2);
+}
+
 const shippedText = ruleCaption({ kind: 'sized', target: 1 });
 const pinned = CAPTIONS.find(c => c.shipped).pinned;
 if (shippedText !== pinned) {

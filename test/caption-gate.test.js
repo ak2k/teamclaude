@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+import { ruleCaption } from '../src/status-renderer.js';
 
 // The caption gate is a script, so what is held here is that it still RUNS and
 // still grades: a gate nobody invokes rots into a file, and the first sign is
@@ -130,6 +131,74 @@ test('the gate grades the banded caption, not only the sized one', () => {
   const control = out.split('\n').find(l => l.startsWith('banded') && l.includes('exemption'));
   assert.match(control, /DIFFERS, as it must/,
     'a caption that dropped "admitted regardless" would grade identically');
+});
+
+// A CAPTURED STATUS IS NOT A CONFIG, and the committed sample could not show
+// it: its `routes` is empty. On the wire `routes[].accounts` is
+// `[{name, eligible}]`, while `setRoutes` expects names — handed the objects,
+// every account stringified to "[object Object]", matched nothing, and the
+// route excluded the entire fleet. The gate then refused for the wrong reason,
+// reporting a passthrough decision about a fleet it had emptied itself.
+//
+// So this fixture carries a route in the shape the wire actually sends. Keep it
+// that shape: rewriting `accounts` to bare strings here would make the test pass
+// against the bug it exists to catch.
+test('the gate accepts a captured status, whose routes carry account OBJECTS', () => {
+  const sample = JSON.parse(fs.readFileSync(SAMPLE, 'utf8'));
+  assert.deepEqual(sample.routes ?? [], [],
+    'the committed sample grew routes; this fixture no longer adds the case it was built for');
+  sample.routes = [{
+    name: 'fable',
+    match: ['*fable*'],
+    bucket: null,
+    color: null,
+    autocreated: false,
+    pinned: null,
+    accounts: sample.accounts.map(a => ({ name: a.name, eligible: true })),
+    sample: 'claude-fable-5',
+    target: sample.accounts[0].name,
+  }];
+  const routed = path.join(os.tmpdir(), `caption-routed-${process.pid}.json`);
+  fs.writeFileSync(routed, JSON.stringify(sample));
+  try {
+    const { code, out } = gate([`--sample=${routed}`, '--model=claude-fable-5', `--now=${NOW}`]);
+    assert.equal(code, 0, out);
+    assert.doesNotMatch(out, /0 of \d+ accounts are candidates/,
+      'the route excluded the whole fleet, which is what account objects used to do');
+    assert.match(out, /REPRODUCES {9}unspent-weekly-per-hour/,
+      'the gate graded nothing on a fleet it had emptied');
+  } finally {
+    fs.rmSync(routed, { force: true });
+  }
+});
+
+// A REPLAY CANNOT NOTICE A REWORDING. The banded section grades `floorSteps`
+// and never read the sentence describing it, so the caption could be rewritten
+// into something false about the rule — "the soonest-expiring account goes first
+// and nothing else is admitted" — and the gate still exited 0 printing
+// REPRODUCES. Both shipped branches are pinned now, for the reason the sized one
+// always was.
+test('the gate refuses when either shipped caption has been reworded', () => {
+  const sized = ruleCaption({ kind: 'sized', target: 1 });
+  const banded = ruleCaption({ kind: 'banded', floor: 1 });
+  // The pins are written as concatenated literals, so the sentence never appears
+  // on one line: flatten the concatenation before looking for it. Reading the
+  // file for a substring that the file cannot contain is its own small version
+  // of grading the wrong thing, and it failed here first.
+  const flat = fs.readFileSync(GATE, 'utf8')
+    .replace(/'\s*\+\s*'/g, '').replace(/\s+/g, ' ');
+  const oneLine = t => t.replace(/\s+/g, ' ');
+  assert.ok(flat.includes(oneLine(banded)),
+    'the banded caption is not pinned in the gate, so a rewording passes it silently');
+  assert.ok(flat.includes(oneLine(sized)),
+    'the sized caption pin no longer matches what renders');
+  // And the pin is the mechanism, not a comment: both texts appear as literals
+  // the gate compares against, so drift stops the run rather than being graded.
+  assert.match(flat, /BANDED caption has been reworded/,
+    'nothing fails the run when the banded caption drifts');
+  // Observed red rather than asserted: rewording the banded branch of
+  // `ruleCaption` in a scratch copy of the tree takes the gate from exit 0
+  // printing REPRODUCES to exit 2 naming the drift.
 });
 
 test('a sample read without its capture clock is refused, not guessed at', () => {

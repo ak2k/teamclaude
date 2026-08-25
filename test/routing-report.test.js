@@ -621,6 +621,46 @@ test('a route whose families are all captured earlier publishes no entry at all'
     'the second route publishes a destination for traffic it can never receive');
 });
 
+// EVERY EARLIER ROUTE, not just the one the representative resolves to. With an
+// exact route and then a CATCH-ALL ahead of a third, the representative resolves
+// to the exact route, that route covers nothing, and the entry published — while
+// the catch-all in between had taken every id the third could carry.
+//
+// Both arms, because the refutation is half the result: the same cascade with a
+// `claude-*` predecessor leaves the third route LIVE (it still receives
+// `fable-experimental`), and hiding it would be the opposite error.
+test('a route left dead by a catch-all publishes nothing; one still reachable publishes', () => {
+  const now = Date.now();
+  const build = middle => {
+    const am = fleet({
+      accounts: ['a', 'b', 'c'],
+      routes: [
+        { name: 'exact', match: ['claude-fable-5'], accounts: ['a'] },
+        { name: 'broad', match: [middle], accounts: ['b'] },
+        { name: 'third', match: ['*fable*'], accounts: ['c'] },
+      ],
+    });
+    for (const i of [0, 1, 2]) {
+      quota(am, i, { unified5h: 0.05 + i * 0.05, unified7d: 0.2 + i * 0.1,
+        unified7dReset: now + (20 + i * 10) * H,
+        unified7dFable: 0.1 + i * 0.2, unified7dFableReset: now + (20 + i * 10) * H });
+    }
+    return am;
+  };
+
+  const dead = build('*');
+  assert.equal(dead._routeForModel('fable-experimental').name, 'broad',
+    'the premise: the catch-all takes every id the third route could carry');
+  assert.deepEqual(dead.getStatus().routing.filter(e => e.route === 'third'), [],
+    'a route that can receive nothing advertises a destination');
+
+  const live = build('claude-*');
+  assert.equal(live._routeForModel('fable-experimental').name, 'third',
+    'the premise: this predecessor leaves the third route reachable');
+  assert.equal(live.getStatus().routing.filter(e => e.route === 'third').length, 1,
+    'a route that still carries traffic was hidden');
+});
+
 test('a glob naming no metered family stays one scope on the shared bucket', () => {
   const now = Date.now();
   const entries = familyFleet(now, [{ name: 'other', match: ['gpt-*'] }])

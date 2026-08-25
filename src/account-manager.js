@@ -1696,7 +1696,7 @@ export class AccountManager {
       // filed off, which is an id nobody sends and which resolves to the shared
       // bucket whatever the route actually carries.
       const globs = route.autocreated ? [{ glob: route.match[0], model: route.sample }]
-        : route.match.flatMap(glob => this._scopeModelsFor(glob, route).map(model => ({ glob, model })));
+        : route.match.flatMap(glob => this._scopeModelsFor(glob, route, owner).map(model => ({ glob, model })));
       for (const { glob, model } of globs) {
         scopes.push({
           scope: 'route', route: route.name, model, owner,
@@ -1832,7 +1832,7 @@ export class AccountManager {
    * Fable bucket and a destination for traffic first-match routing sends
    * somewhere else every time.
    */
-  _scopeModelsFor(glob, route) {
+  _scopeModelsFor(glob, route, owner = null) {
     const named = familyModelsMatching(glob);
     // OWNERSHIP IS COVERAGE, NOT CAPTURE. Asking "does an earlier route capture
     // this family's representative id" answers about ONE id: an exact route for
@@ -1840,18 +1840,24 @@ export class AccountManager {
     // `claude-fable-4` and serves it from another account — and the live route
     // published nothing at all. The question is whether an earlier route's globs
     // COVER this one, which is what decides whether any id is left for it.
+    // EVERY EARLIER ROUTE, not just the one the representative resolves to.
+    // Asking `_routeForModel` answers about the FIRST route that matches one id,
+    // so a cascade hid behind it: with an exact route and then a catch-all ahead
+    // of this one, the representative resolves to the exact route, that route
+    // covers nothing, and the entry publishes — while the catch-all in between
+    // has taken every id this glob could carry. Routes are matched in order, so
+    // the question is about the whole prefix of the list, not about one member.
+    const before = owner ? this.routes.slice(0, this.routes.indexOf(owner)) : [];
     const owned = named.filter((m) => {
-      const owner = this._routeForModel(m);
-      if (!owner || owner.match === route.match) return true;
       // THE INTERSECTION, not the glob. An earlier route takes this family away
       // only if it covers what this glob carries OF THAT FAMILY: `*fable*` ahead
       // of `claude-*` takes every Fable id, because every Fable id contains
       // "fable" — while an exact `claude-fable-5` ahead of `*fable*` takes one
-      // id and leaves the rest. Where neither can be shown, the entry is
+      // id and leaves the rest. Where no capture can be shown, the entry is
       // published: an unproven capture would hide a route that carries traffic.
       const famGlob = familyGlobFor(m);
-      return !owner.match.some(g => globCovers(g, glob)
-        || (famGlob && globCovers(g, famGlob)));
+      return !before.some(r => r.match.some(g => globCovers(g, glob)
+        || (famGlob && globCovers(g, famGlob))));
     });
     if (owned.length) return owned;
     return named.length ? [] : [glob.replace(/\*/g, '') || 'model'];
