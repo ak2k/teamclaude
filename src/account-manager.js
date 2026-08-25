@@ -2028,32 +2028,65 @@ export class AccountManager {
   }
 
   /**
-   * Does ownership discriminate on any id THIS ROUTE ACTUALLY RECEIVES?
+   * Is anyone BARRED from the representative — the id the figures were computed
+   * for?
    *
-   * RE-KEYED FROM THE REPRESENTATIVE, and that re-keying is the pass-13 P1. The
-   * first version asked this about the captured representative — an id the route
-   * by definition does NOT receive, that being what capture means. A fleet whose
-   * claims name a SIBLING and not the representative then answered "nothing
-   * discriminates", published figures, and named an account that cannot serve a
-   * single request the route receives. The original inversion, reached by a
-   * different door.
+   * The original question, kept. It nearly went away in favour of the received-id
+   * enumeration below and that would have been a trade, not a fix: this half does
+   * live work the enumeration provably cannot do. When someone is barred from the
+   * representative, the figures grade a RESTRICTED set; an id the route receives
+   * that no claim names grades the PERMISSIVE set, every account. Those differ, so
+   * the published figures are wrong for that traffic — and the id causing it is
+   * nameable from no config text, so nothing can enumerate it.
    *
-   * So the question is asked about the ids the route is actually served: those a
-   * claim can discriminate on, that this route's globs match, and that no
-   * earlier route takes. `_routeForModel` decides the last part, so the "who
-   * gets this id" rule is the routing table's own and not a second opinion.
-   *
-   * ON THE CENSUS OBJECTION, which this round rejected twice elsewhere and which
-   * does NOT apply here. What was rejected was inferring a POSITIVE fact from
-   * census absence — declaring a route dead because no known id reaches it. This
-   * infers nothing from absence: it WIDENS suppression when it finds a
-   * discriminating id, and finding none leaves the figures published exactly as
-   * before. And for this particular question the census is not even a
-   * approximation — see `_claimableIds`, it is the complete space.
+   * Measured rather than argued: with `a` claiming the representative and `b`
+   * claiming nothing, this route published `b: route-excluded` while `b` was
+   * permitted on every id the route actually receives.
    */
-  _ownershipDiscriminates(route) {
+  _representativeRestricted(model) {
+    return this.accounts.some(a => !this._accountOwnsModel(a, model));
+  }
+
+  /**
+   * Does the route's glob reach ids beyond the ones config names?
+   *
+   * A wildcard does, by construction — which is the whole reason
+   * `_representativeRestricted` is sufficient on its own without any completeness
+   * claim. A wildcard-free glob names exactly one id, so there is no unnameable
+   * remainder for it to hide.
+   */
+  _reachesBeyondNamedIds(route) {
+    return route.match.some(g => g.includes('*'));
+  }
+
+  /**
+   * Does ownership discriminate on an id THIS ROUTE ACTUALLY RECEIVES?
+   *
+   * The half that catches the pass-13 P1. The representative question above is
+   * blind to a fleet whose claims name only a SIBLING: nobody is barred from the
+   * representative, so it answers "nothing to worry about", while a claim on an id
+   * the route does receive grades that traffic a different way. Asked about the
+   * ids a claim can discriminate on, that this route's globs match, and that no
+   * earlier route takes — `_routeForModel` decides the last part, so the "who gets
+   * this id" rule is the routing table's own and not a second opinion.
+   *
+   * ON THE CENSUS OBJECTION, which this round rejected twice elsewhere. What was
+   * rejected was inferring a POSITIVE fact from census ABSENCE — declaring a route
+   * dead because no known id reaches it. This infers nothing from absence: it
+   * WIDENS suppression when it finds a discriminating id, and finding none leaves
+   * the decision to the representative question, which is where the unnameable
+   * ids are handled. Neither half claims completeness; together they are
+   * sufficient, which is the property that matters.
+   */
+  _receivedIdDiscriminates(route) {
     for (const id of this._claimableIds()) {
-      if (!route.match.some(g => modelGlobMatches(g, id))) continue;
+      // ONE TEST, NOT TWO. `_routeForModel` returns the FIRST route whose glob
+      // matches, so an id this route owns necessarily matched this route's glob
+      // — a separate glob check ahead of it can never disagree. It was written
+      // that way and the mutation table proved it: the row neutralising the glob
+      // check could not be made to fail, because the owner check already covered
+      // every case it did. A guard that never disagrees with the one beside it
+      // is one guard wearing two names.
       const owner = this._routeForModel(id);
       if (!owner || owner.match !== route.match) continue;   // an earlier route takes it
       if (this.accounts.some(a => !this._accountOwnsModel(a, id))) return true;
@@ -2074,14 +2107,14 @@ export class AccountManager {
    *      membership of that list and never consults the id, so the figures are
    *      the route's own however the entry is named. The round tested this
    *      contract directly, and suppressing it reversed a decided answer.
-   *   3. OWNERSHIP DISCRIMINATES ON AN ID THIS ROUTE RECEIVES. With the list
-   *      empty the id reaches `_accountOwnsModel`, but that is constant-true
-   *      unless some account is denied — so on a fleet declaring no `models` at
-   *      all, the figures grade the fleet exactly as any served id would.
-   *      Asked about the RECEIVED ids, never the representative: the
-   *      representative is the one id the route provably does not get, so a
-   *      fleet claiming a sibling and not the representative answered "nothing
-   *      discriminates" and published an inversion.
+   *   3. OWNERSHIP SEPARATES THE FLEET, asked TWO ways because neither alone is
+   *      enough and the second nearly replaced the first. Either some account is
+   *      barred from the REPRESENTATIVE and the route's glob reaches ids no
+   *      claim names — in which case the figures grade a restricted set while
+   *      that traffic is open to everyone — or a claim discriminates on an id
+   *      the route actually RECEIVES. On a fleet declaring no `models` at all
+   *      both are false and the figures grade the fleet exactly as any served
+   *      id would, which is why an unclaimed fleet still publishes.
    *
    * WHAT THIS IS AND IS NOT. It is the condition under which the identity of the
    * representative CAN move a published figure, computed without a census of the
@@ -2104,13 +2137,19 @@ export class AccountManager {
    *     `_accountOwnsModel` true for every account and the captured id grade
    *     the fleet exactly as a served one would.
    *
-   * Each conjunct also has its own neutralisation row, so a simplification is
-   * caught by the sweep and not only by a test name someone might re-point.
+   * AND DO NOT COLLAPSE CONJUNCT 3's TWO HALVES INTO EITHER ONE. This was tried
+   * and shipped wrong: re-keying to the received ids and DROPPING the
+   * representative question fixed the sibling-claim inversion and opened another
+   * one in the same commit, because a restricted representative differs from an
+   * unnamed received id and no enumeration can reach the unnamed one. The
+   * reverse collapse fails the sibling-claim case. Each half has its own
+   * neutralisation row and its own fixture.
    */
   _captureDistortsFigures(model, route) {
     return this._representativeCaptured(model, route)
       && route.accounts.length === 0
-      && this._ownershipDiscriminates(route);
+      && ((this._representativeRestricted(model) && this._reachesBeyondNamedIds(route))
+        || this._receivedIdDiscriminates(route));
   }
 
   /**

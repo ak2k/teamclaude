@@ -556,13 +556,95 @@ test('a suffixed claim is enumerated by the id it answers for, not by how it is 
     'only the written spelling was enumerated, so the id this route receives went unchecked');
 });
 
-// AN ID AN EARLIER ROUTE TAKES DECIDES NOTHING ABOUT THIS ROUTE, and the
-// enumeration has to filter on that rather than ask about every claimed id. Here
-// the ONLY claim names `claude-fable-5`, which `exact` captures, so `wild`
-// receives nothing that ownership can separate — and its figures are correct.
-// Without the received-ids filter this entry is suppressed for a claim about
-// traffic it never sees, which withholds figures that were right.
+// A CLAIM ON AN ID THIS ROUTE CANNOT RECEIVE DECIDES NOTHING ABOUT IT. The
+// enumeration filters on what the route is actually served rather than asking
+// about every claimed id anywhere on the fleet. Here the only claim names a
+// SONNET id: `wild` matches `*fable*` and can never receive it, nobody is barred
+// from the representative, and the figures are correct.
+//
+// THE FIXTURE DELIBERATELY AVOIDS CLAIMING THE REPRESENTATIVE. An earlier
+// version claimed it, which made this entry suppress through the OTHER half of
+// the question — so it stopped isolating the filter it was written for, and it
+// asserted the wrong answer besides. See the test below for why claiming the
+// representative is a suppression rather than a publication.
+test('a claim on an id this route cannot receive does not withhold its figures', () => {
+  const now = Date.now();
+  const am = fleet({
+    accounts: ['a', 'b'],
+    routes: [
+      { name: 'exact', match: ['claude-fable-5'], accounts: [] },
+      { name: 'wild', match: ['*fable*'], accounts: [] },
+    ],
+  });
+  am.accounts[0].models = ['claude-sonnet-4-6'];
+  for (const i of [0, 1]) {
+    quota(am, i, {
+      unified5h: 0.05 + i * 0.05, unified7d: 0.2, unified7dReset: now + 20 * H,
+      unified7dFable: 0.1 + i * 0.4, unified7dFableReset: now + (20 + i * 10) * H,
+    });
+  }
+  assert.ok(am.accounts.some(x => !am._accountOwnsModel(x, 'claude-sonnet-4-6')),
+    'the premise: the claim DOES discriminate, so only the received-ids filter excludes it');
+  assert.ok(am.accounts.every(x => am._accountOwnsModel(x, 'claude-fable-5')),
+    'the premise: nobody is barred from the representative, so the other half stays silent');
+
+  const wild = am.getStatus().routing.find(e => e.route === 'wild');
+  assert.equal(wild.figuresAbsent, null,
+    'figures were withheld over a claim about traffic this route cannot receive');
+  assert.ok(wild.target, 'a live route published no destination');
+});
+
+// AN ID THAT MATCHES THIS ROUTE'S GLOB BUT GOES TO AN EARLIER ROUTE decides
+// nothing about it either, and that is a SECOND filter from the one above. The
+// sonnet fixture is excluded by the glob test before ownership is consulted at
+// all; here `claude-fable-4` matches `*fable*` perfectly well and is excluded
+// because the route named `four` takes it first. Removing the glob filter and
+// removing the owner filter are different mistakes, so they get different
+// fixtures — a single test covering "cannot receive" would leave one of them
+// free.
 test('a claim on an id an earlier route takes does not withhold this route\'s figures', () => {
+  const now = Date.now();
+  const am = fleet({
+    accounts: ['a', 'b'],
+    routes: [
+      { name: 'exact', match: ['claude-fable-5'], accounts: [] },
+      { name: 'four', match: ['claude-fable-4'], accounts: [] },
+      { name: 'wild', match: ['*fable*'], accounts: [] },
+    ],
+  });
+  am.accounts[0].models = ['claude-fable-4'];
+  for (const i of [0, 1]) {
+    quota(am, i, {
+      unified5h: 0.05 + i * 0.05, unified7d: 0.2, unified7dReset: now + 20 * H,
+      unified7dFable: 0.1 + i * 0.4, unified7dFableReset: now + (20 + i * 10) * H,
+    });
+  }
+  assert.equal(am._routeForModel('claude-fable-4').name, 'four',
+    'the premise: an earlier route takes the claimed id');
+  assert.ok(am.accounts.some(x => !am._accountOwnsModel(x, 'claude-fable-4')),
+    'the premise: that claim DOES discriminate, so only the owner filter excludes it');
+  assert.ok(am.accounts.every(x => am._accountOwnsModel(x, 'claude-fable-5')),
+    'the premise: nobody is barred from the representative, so the other half stays silent');
+
+  const wild = am.getStatus().routing.find(e => e.route === 'wild');
+  assert.equal(wild.figuresAbsent, null,
+    'figures were withheld over a claim about traffic an earlier route takes');
+});
+
+// A RESTRICTED REPRESENTATIVE WITHHOLDS THE FIGURES EVEN WHEN NO CLAIM NAMES
+// ANYTHING THIS ROUTE RECEIVES, and this is the case a received-ids enumeration
+// provably cannot reach.
+//
+// `a` claims the representative and `b` claims nothing. The figures are computed
+// for the representative, so they grade a RESTRICTED set — `b` barred. But every
+// id this route actually receives is named by no claim at all, and an unnamed id
+// is permitted to EVERYONE. So the published `b: route-excluded` is false for all
+// of this route's real traffic, and the id that proves it (`claude-fable-4`, or
+// any dated variant) appears in no config text for an enumeration to find.
+//
+// MEASURED, NOT ARGUED: a predicate that traded the representative question for
+// the received-ids enumeration published exactly that false exclusion here.
+test('a restricted representative withholds figures even when no claim names a received id', () => {
   const now = Date.now();
   const am = fleet({
     accounts: ['a', 'b'],
@@ -574,19 +656,24 @@ test('a claim on an id an earlier route takes does not withhold this route\'s fi
   am.accounts[0].models = ['claude-fable-5'];
   for (const i of [0, 1]) {
     quota(am, i, {
-      unified5h: 0.05 + i * 0.05, unified7d: 0.2, unified7dReset: now + 20 * H,
-      unified7dFable: 0.1 + i * 0.4, unified7dFableReset: now + (20 + i * 10) * H,
+      unified5h: 0.05 + i * 0.05, unified7d: 0.6 - i * 0.4, unified7dReset: now + 40 * H,
+      unified7dFable: 0.6 - i * 0.4, unified7dFableReset: now + 40 * H,
     });
   }
-  assert.equal(am._routeForModel('claude-fable-5').name, 'exact',
-    'the premise: the only claimed id belongs to an earlier route');
-  assert.ok(am.accounts.some(x => !am._accountOwnsModel(x, 'claude-fable-5')),
-    'the premise: that claim DOES discriminate, so only the received-ids filter excludes it');
+  const wild = am.routes.find(r => r.name === 'wild');
+  // The premises: barred from the representative, permitted on what it receives.
+  assert.equal(am._accountOwnsModel(am.accounts[1], 'claude-fable-5'), false,
+    'the premise: b is barred from the representative');
+  assert.equal(am._routeAllows(am.accounts[1], 'claude-fable-4', wild), true,
+    'the premise: b IS permitted on an id this route receives');
+  assert.ok(am.accounts.every(x => am._accountOwnsModel(x, 'claude-fable-4')),
+    'the premise: no claim names that id, which is why nothing can enumerate it');
 
-  const wild = am.getStatus().routing.find(e => e.route === 'wild');
-  assert.equal(wild.figuresAbsent, null,
-    'figures were withheld over a claim about traffic this route never receives');
-  assert.ok(wild.target, 'a live route published no destination');
+  const entry = am.getStatus().routing.find(e => e.route === 'wild');
+  assert.equal(entry.figuresAbsent, 'representative-captured',
+    'the entry published figures graded by an id whose restrictions do not apply to its traffic');
+  assert.deepEqual(entry.band.excluded, [],
+    'the entry published route-excluded against an account entitled to serve it');
 });
 
 // THE COMPLETENESS THIS PREDICATE RESTS ON, pinned rather than assumed.
