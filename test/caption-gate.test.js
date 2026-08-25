@@ -196,9 +196,47 @@ test('the gate refuses when either shipped caption has been reworded', () => {
   // the gate compares against, so drift stops the run rather than being graded.
   assert.match(flat, /BANDED caption has been reworded/,
     'nothing fails the run when the banded caption drifts');
-  // Observed red rather than asserted: rewording the banded branch of
-  // `ruleCaption` in a scratch copy of the tree takes the gate from exit 0
-  // printing REPRODUCES to exit 2 naming the drift.
+  // The behaviour itself is asserted below rather than observed by hand.
+});
+
+// THE PIN IS A BEHAVIOUR AND THE TEST ABOVE GRADES ITS TEXT. Disabling the
+// comparison — `if (false && bandedText !== BANDED_PINNED)` — leaves every
+// literal and the message in the file, so all three assertions above still
+// pass while the gate no longer refuses anything. A neutralisation sweep found
+// that; the comment here used to say the red had been "observed" by hand,
+// which is the same evidence with nobody re-running it.
+test('the banded pin refuses a reworded caption rather than only mentioning it', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'caption-pin-'));
+  try {
+    fs.cpSync(path.join(HERE, '..', 'src'), path.join(dir, 'src'), { recursive: true });
+    fs.mkdirSync(path.join(dir, 'tools'));
+    const script = path.join(dir, 'tools', 'verify-caption.mjs');
+    fs.copyFileSync(GATE, script);
+    // Reword what the gate pins, in the copy only.
+    const renderer = path.join(dir, 'src', 'status-renderer.js');
+    const before = fs.readFileSync(renderer, 'utf8');
+    const said = 'everything within the tolerance ratio';
+    assert.equal(before.split(said).length - 1, 1,
+      'the premise: one place says it, so the rewording below is the caption');
+    fs.writeFileSync(renderer, before.replace(said, 'NOTHING within the tolerance ratio'));
+
+    let code = 0;
+    let out = '';
+    try {
+      out = execFileSync(process.execPath,
+        [script, `--sample=${SAMPLE}`, '--model=claude-fable-5', `--now=${NOW}`],
+        { encoding: 'utf8' });
+    } catch (err) {
+      code = err.status;
+      out = `${err.stdout || ''}${err.stderr || ''}`;
+    }
+    assert.equal(code, 2, 'the gate graded a tree whose banded caption no longer says what it grades');
+    assert.match(out, /BANDED caption has been reworded/);
+    assert.match(out, /NOTHING within the tolerance ratio/,
+      'the refusal must print what it found, or a reader cannot see what drifted');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('a sample read without its capture clock is refused, not guessed at', () => {

@@ -664,6 +664,26 @@ test('an earlier route splits the family whichever id it took, and one id is nev
     .getStatus().routing.find(e => e.route === 'wild');
   assert.equal(spread.familySplit, 'model claims',
     'the same claims still split a scope wide enough to be divided');
+
+  // 5. THE ONE SCOPE ONLY THE REPRESENTATIVE CHECK REACHES, and it needed
+  //    finding: adding the earlier-route arm above made every previous fixture
+  //    for that check pass with it disabled, because the new arm answers them
+  //    with the same string. A neutralisation sweep is what noticed. The gap it
+  //    left is a ONE-ID scope whose id an earlier route took — the early return
+  //    for "one id cannot be divided" sits between the two checks, so only the
+  //    representative check can speak for it.
+  //
+  //    Reaching it needs an earlier pattern that MATCHES the id while
+  //    `globCovers` refuses to say it covers it, or the scope is dropped
+  //    entirely and publishes nothing. Two interior literals is exactly that
+  //    shape: conservatively refused, so the entry survives.
+  const exotic = [{ name: 'exotic', match: ['*claude*fable*5'] },
+    { name: 'exact', match: ['claude-fable-5'] }];
+  const taken = mk([acct('a'), acct('b')], exotic)
+    .getStatus().routing.find(e => e.route === 'exact');
+  assert.ok(taken, 'the premise: the entry is published at all, or this grades nothing');
+  assert.equal(taken.familySplit, 'an earlier route',
+    'a one-id scope whose id goes to an earlier route says nothing about it');
 });
 
 test('a route whose families are all captured earlier publishes no entry at all', () => {
