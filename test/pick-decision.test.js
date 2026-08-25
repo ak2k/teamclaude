@@ -318,8 +318,16 @@ test('the winner is lexicographically minimal over every term', () => {
   const rand = rng(987654321);
   let loadDecided = 0;
   let pressureCompared = 0;
+  let measuredFleets = 0;
   for (let trial = 0; trial < 5000; trial += 1) {
     const n = 1 + Math.floor(rand() * 5);
+    // ALL OR NOTHING PER FLEET. The load term is pairwise-conditional on both
+    // sides being measured, so a MIXED fleet has no total order to be minimal
+    // in — that is the reviewed non-transitivity, which is asserted as its own
+    // KNOWN PROPERTY rather than smuggled in here. Drawing the regime per fleet
+    // keeps this a minimality claim about the terms that actually applied.
+    const measured = rand() < 0.5;
+    if (measured) measuredFleets += 1;
     const accounts = [];
     for (let i = 0; i < n; i += 1) {
       accounts.push({
@@ -331,6 +339,7 @@ test('the winner is lexicographically minimal over every term', () => {
         // them, which is a minimality claim about a term the run barely
         // evaluated.
         load: rand() < 0.6 ? 0 : Math.floor(rand() * 2) * 1000,
+        observed: measured ? 1 : 0,
         sessions: rand() < 0.6 ? 0 : 1,
         inFlight: rand() < 0.8 ? 0 : 1,
         pressure: rand() < 0.2 ? OFF : { kind: 'known', value: Math.floor(rand() * 4) * 1e-6 },
@@ -338,8 +347,12 @@ test('the winner is lexicographically minimal over every term', () => {
       });
     }
     const decision = decidePick({ accounts });
-    const key = a => [a.priority, a.load, a.sessions, a.inFlight, pressureRank(a.pressure), a.reset];
-    const PRESSURE_SLOT = 4;
+    // The key mirrors what the comparison actually consults: on an unmeasured
+    // fleet the load slot is not a term at all.
+    const key = a => (measured
+      ? [a.priority, a.load, a.sessions, a.inFlight, pressureRank(a.pressure), a.reset]
+      : [a.priority, a.sessions, a.inFlight, pressureRank(a.pressure), a.reset]);
+    const PRESSURE_SLOT = measured ? 4 : 3;
     const winner = accounts.find(a => a.index === decision.index);
     for (const other of accounts) {
       const w = key(winner);
@@ -356,7 +369,11 @@ test('the winner is lexicographically minimal over every term', () => {
     }
     if (decision.by === 'load') loadDecided += 1;
   }
-  assert.ok(loadDecided > 500, `load decided only ${loadDecided} times, so the term is barely exercised`);
+  // A RATE, not a count. Half the fleets are unmeasured by construction now, so
+  // the term cannot decide in them, and an absolute floor would be a number
+  // refitted to the regime split rather than a claim about exercise.
+  assert.ok(loadDecided > measuredFleets * 0.1,
+    `load decided ${loadDecided} of ${measuredFleets} measured fleets, so the term is barely exercised`);
   assert.ok(pressureCompared > 500,
     `only ${pressureCompared} comparisons reached the pressure slot, so its position in the key is untested`);
 });
@@ -508,10 +525,16 @@ test('with expiry routing off, no account has a pressure to rank on', () => {
 // `by` says the winner is minimal on a term; it does not say the term separated
 // the winner from the account behind it. These hold the difference.
 
+// `observed: 1` by default, because these fixtures assert a TOTAL ORDER and the
+// load term only participates in one when both sides have been measured. On an
+// unobserved fleet the term is inapplicable rather than zero, which is the
+// reviewed slice's rule, and a fixture that left it unset was asserting order
+// over a term the comparison skips.
 const flat = (index, over = {}) => ({
   index,
   priority: 0,
   load: 0,
+  observed: 1,
   sessions: 0,
   inFlight: 0,
   pressure: { kind: 'known', value: 1 },
@@ -588,3 +611,152 @@ test('every term is consulted before two accounts are called tied', () => {
       `${term} does not separate the field, so a difference on it reads as a tie`);
   }
 });
+
+
+// ── PORTED VERBATIM from the reviewed slice (upstream/load-weighted-selection
+// 530d16b), which survived a full adversarial round and the transitivity
+// ruling. `cand`/`snap` are the slice's own helpers, kept so the fixtures are
+// the reviewed ones rather than a restatement of them.
+const cand = (index, over = {}) => ({
+  index, priority: 0, load: 0, observed: 0, sessions: 0, inFlight: 0,
+  pressure: { kind: 'absent', reason: 'expiry-routing-off' }, reset: -Infinity, ...over,
+});
+const snap = (...accounts) => ({ accounts });
+
+
+// F1. The account that has not reported a turn yet is not idle, it is unmeasured,
+// and the two correlate the opposite way: a session's first turn lands after it
+// has already been routed. Ranking an unmeasured account first on `load` sent
+// new work to the busiest account on the fleet. The fixture is the reviewer's.
+test('an unmeasured account does not win the load term against a measured one', () => {
+  const s = snap(
+    cand(0, { load: 100000, observed: 1, sessions: 1 }),
+    cand(1, { load: 0, observed: 0, sessions: 8 }),
+  );
+  const d = decidePick(s);
+  assert.equal(d.index, 0, 'the measured account holding one session, not the unmeasured eight');
+  assert.equal(d.by, 'sessions', 'load did not apply, so the count decided as it did before');
+  assert.ok(!decidingTerms(s, d).includes('load'));
+});
+
+
+test('the gate holds across the whole restart burst, not just one fixture', () => {
+  for (const sessions of [2, 4, 8, 16, 64]) {
+    const d = decidePick(snap(
+      cand(0, { load: 100000, observed: 1, sessions: 1 }),
+      cand(1, { load: 0, observed: 0, sessions }),
+    ));
+    assert.equal(d.index, 0, `unmeasured account holding ${sessions} sessions`);
+  }
+});
+
+// The gate is on `observed`, not on `load > 0`: an account that HAS reported and
+// is genuinely carrying nothing should still win the term.
+
+
+// The gate is on `observed`, not on `load > 0`: an account that HAS reported and
+// is genuinely carrying nothing should still win the term.
+test('a measured but idle account still wins the load term', () => {
+  const d = decidePick(snap(
+    cand(0, { load: 90000, observed: 3 }),
+    cand(1, { load: 0, observed: 3 }),
+  ));
+  assert.deepEqual(d, { kind: 'picked', index: 1, by: 'load' });
+});
+
+// The suite gap the reviewer named: every earlier case was all-measured or
+// all-unmeasured, so nothing bound the mixed fleet, which is the only fleet the
+// gate changes.
+
+
+// KNOWN PROPERTY, and the cost of the gate. A term that applies to some pairs
+// and not others is not a total order: before the gate every term applied to
+// every pair, so the winner did not depend on the order candidates arrived in.
+// With `load` conditional, three accounts can form a cycle and all three can win
+// depending on that order. Bounded to MIXED fleets (with every candidate
+// measured, or none, the chain is a total order again) and to which of several
+// reasonable accounts is picked rather than to picking a bad one. Asserted so
+// that closing it fails here and has to be argued rather than noticed.
+test('KNOWN PROPERTY: the gate makes the comparison non-transitive on a mixed fleet', () => {
+  const a = cand(0, { observed: 1, load: 10, sessions: 5 });
+  const b = cand(1, { observed: 1, load: 20, sessions: 1 });
+  const c = cand(2, { observed: 0, load: 0, sessions: 3 });
+  // The specific winners below are ORDER-SPECIFIC, which is the property itself
+  // rather than an accident of the fixture: orderings 021 and 201 pick a
+  // different account from 120 and 210. Asserting a particular winner for a
+  // particular ordering is therefore asserting the cycle, not a stable rule, and
+  // the `winners.size` check below is the part that does not depend on order.
+  const pair = (x, y) => decidePick(snap(x, y)).index;
+  assert.equal(pair(a, b), 0, 'both measured, so load applies');
+  assert.equal(pair(b, c), 1, 'mixed, so the count decides');
+  assert.equal(pair(a, c), 2, 'mixed, so the count decides, the other way');
+
+  const winners = new Set();
+  for (const order of [[a, b, c], [a, c, b], [b, a, c], [b, c, a], [c, a, b], [c, b, a]]) {
+    winners.add(decidePick(snap(...order)).index);
+  }
+  assert.equal(winners.size, 3, 'every candidate wins under some ordering');
+
+  // With the third account measured too, the term applies everywhere and the
+  // order stops mattering.
+  const measured = { ...c, observed: 1 };
+  const total = new Set();
+  for (const order of [[a, b, measured], [measured, b, a], [b, measured, a]]) {
+    total.add(decidePick(snap(...order)).index);
+  }
+  assert.equal(total.size, 1, 'a total order once nothing is gated out');
+});
+
+// The TEMPORAL half of the same property, and the half that is easier to miss:
+// the cycle also shows up across CONSECUTIVE snapshots at a FIXED candidate
+// order, as reports arrive and accounts cross from unreported to reported. Four
+// accounts, two reports landing one after the other, and the winner bounces
+// 3 -> 2 -> 3 without any candidate being reordered.
+//
+// TWO BOUNDS, both asserted below. It is confined to accounts TIED for the
+// fewest sessions on the fleet, so the bounce chooses between defensible
+// options rather than moving toward a loaded account. And it can only affect
+// where a NEW session starts: an established session whose bucket holds a
+// usable pin is returned that pin and never reaches this comparison at all.
+
+
+// The TEMPORAL half of the same property, and the half that is easier to miss:
+// the cycle also shows up across CONSECUTIVE snapshots at a FIXED candidate
+// order, as reports arrive and accounts cross from unreported to reported. Four
+// accounts, two reports landing one after the other, and the winner bounces
+// 3 -> 2 -> 3 without any candidate being reordered.
+//
+// TWO BOUNDS, both asserted below. It is confined to accounts TIED for the
+// fewest sessions on the fleet, so the bounce chooses between defensible
+// options rather than moving toward a loaded account. And it can only affect
+// where a NEW session starts: an established session whose bucket holds a
+// usable pin is returned that pin and never reaches this comparison at all.
+test('KNOWN PROPERTY: the same cycle appears over time at a fixed candidate order', () => {
+  const step = (o0, l0, o2, l2) => snap(
+    cand(0, { observed: o0, load: l0, sessions: 3 }),
+    cand(1, { observed: 1, load: 2, sessions: 1 }),
+    cand(2, { observed: o2, load: l2, sessions: 1 }),
+    cand(3, { observed: 1, load: 1, sessions: 1 }),
+  );
+  const sequence = [
+    step(0, 0, 0, 0),   // initial: a0 and a2 have reported nothing
+    step(1, 1, 0, 0),   // a0's first report lands
+    step(1, 1, 1, 2),   // a2's first report lands
+  ];
+  const winners = sequence.map(s => decidePick(s).index);
+  assert.deepEqual(winners, [3, 2, 3], 'the winner bounces and returns');
+  assert.notEqual(winners[0], winners[1]);
+  assert.equal(winners[0], winners[2], 'which is a bounce rather than a drift');
+
+  // BOUND ONE: every winner ties the fleet's fewest sessions, so each is a
+  // defensible destination for a new session.
+  for (const [i, s] of sequence.entries()) {
+    const winner = s.accounts.find(a => a.index === winners[i]);
+    const fewest = Math.min(...s.accounts.map(a => a.sessions));
+    assert.equal(winner.sessions, fewest, `step ${i} picked an account above the minimum`);
+  }
+});
+
+// BOUND TWO, driven rather than asserted: a request whose bucket already holds a
+// usable pin is served that pin and the load-weighted comparison is never
+// consulted, so no amount of bouncing can relocate an established session.

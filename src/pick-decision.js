@@ -18,12 +18,32 @@
 // one for every upstream user, and "independent of probe state" would stop
 // being one proof and become an axis crossed with every load shape.
 //
-// COLD START IS STRUCTURAL, NOT A MODE. Load is inserted ahead of the session
-// count rather than replacing it. A fleet that has observed nothing scores every
-// account zero, the term cannot discriminate, and the remaining tiebreaks decide
-// exactly as they did before this existed. There is no flag to get wrong and no
-// bootstrap constant to hide a fitted number in: the mechanism is off until the
-// signal exists because an absent signal makes it inert.
+// COLD START IS STRUCTURAL, NOT A MODE. Load ranks only between two accounts
+// that have BOTH been observed; against an unobserved account the term does not
+// apply and ranking falls through to the session count, which is the rule that
+// preceded it. A fleet that has observed nothing therefore decides exactly as it
+// did before this existed. There is no flag to get wrong and no bootstrap
+// constant to hide a fitted number in: the mechanism is off until the signal
+// exists because an absent signal makes it inapplicable.
+//
+// WHY UNOBSERVED IS NOT TREATED AS IDLE. An unreported quota window ranks FIRST
+// elsewhere in this codebase, because being used is how a window becomes known
+// and the cost of guessing wrong is one request. Load is the opposite case, and
+// copying that bias here was a defect rather than a design: an account is
+// unobserved exactly when its sessions have not reported a turn YET, which
+// correlates with recently started rather than idle. Ranking it first sent new
+// work to the busiest account on the fleet. Reproduced on the shape a restart
+// takes, where one account has had a turn recorded and the others have not:
+//
+//     measured    load 100000, observed 1, sessions  1
+//     unmeasured  load      0, observed 0, sessions 16
+//     ranking absence first picks the unmeasured account, on `load`, at every
+//     session count from 2 to 16; the rule this replaced picks the measured one
+//
+// Gating on `observed` rather than on `load > 0` is deliberate: a genuinely idle
+// account that HAS reported turns has load 0 honestly, and should keep winning
+// the term. Zero and unknown are different states and only `observed` separates
+// them, which is why it is carried.
 import { assertNever } from './band-decision.js';
 
 /**
@@ -32,16 +52,15 @@ import { assertNever } from './band-decision.js';
  * the leading term and survives behind it, so an account that is busy but
  * UNMEASURED still ranks behind an account that is genuinely idle.
  *
- * `observed` is how many usage reports back `load`. It is NOT ranked on, and
- * that is a decision rather than an oversight: an account whose load is
- * unmeasured should attract work, because being used is how its load becomes
- * known, and the session count behind `load` already stops it from attracting
- * everything. It is here because `load: 0` is otherwise ambiguous in the one
- * direction that hides a silent revert. Zero is enormously plausible, so if the
- * token read were lost every account would score zero, selection would fall
- * back to counting sessions, the fallback would be correct behaviour, and the
+ * `observed` is how many usage reports back `load`. It is never ranked ON, and
+ * it GATES: `load` is compared only between two accounts that both have it above
+ * zero. That is what keeps `load: 0` from meaning two different things. Zero is
+ * enormously plausible for a genuinely idle account, so without the gate a lost
+ * token read would score every account zero, selection would fall back to
+ * counting sessions, the fallback would look like correct behaviour, and the
  * fleet would be indistinguishable from one that had never recorded a token.
- * Carrying the count makes "the signal arrived" a property a test can hold.
+ * With the gate, the same two states stay separable at the point where the
+ * difference decides something.
  *
  * @typedef {{
  *   index: number,
@@ -129,10 +148,14 @@ export function pressureRank(pressure) {
  *
  * @type {{ term: PickTerm, of: (a: PickAccount) => number }[]}
  */
+// `applies` makes a term PAIRWISE conditional. Only `load` has one: it needs a
+// measurement on BOTH sides to mean anything, and an absent measurement makes
+// the term inapplicable rather than making the account score zero.
 const TERMS = [
   { term: 'priority', of: a => a.priority },
-  // Ahead of `sessions`, which it does not replace. See the header.
-  { term: 'load', of: a => a.load },
+  // Ahead of `sessions`, which it does not replace, and only where both sides
+  // have been measured. See the header.
+  { term: 'load', of: a => a.load, applies: (a, b) => a.observed > 0 && b.observed > 0 },
   { term: 'sessions', of: a => a.sessions },
   { term: 'in-flight', of: a => a.inFlight },
   { term: 'pressure', of: a => pressureRank(a.pressure) },
@@ -149,7 +172,8 @@ export function decidePick(snapshot) {
 
   let best = accounts[0];
   for (const account of accounts.slice(1)) {
-    for (const { of } of TERMS) {
+    for (const { of, applies } of TERMS) {
+      if (applies && !applies(account, best)) continue;
       const mine = of(account);
       const theirs = of(best);
       if (mine === theirs) continue;
@@ -182,7 +206,8 @@ export function decidingTerms(snapshot, decision) {
       const winner = snapshot.accounts.find(a => a.index === decision.index);
       if (!winner) return [];
       return TERMS
-        .filter(({ of }) => snapshot.accounts.some(a => of(a) !== of(winner)))
+        .filter(({ of, applies }) => snapshot.accounts.some(
+          a => (!applies || applies(a, winner)) && of(a) !== of(winner)))
         .map(({ term }) => term);
     }
     default: return assertNever(decision, 'decidingTerms');
@@ -220,7 +245,8 @@ export function tiedWith(snapshot, decision) {
       const winner = snapshot.accounts.find(a => a.index === decision.index);
       if (!winner) return [];
       return snapshot.accounts
-        .filter(a => a.index !== winner.index && TERMS.every(({ of }) => of(a) === of(winner)))
+        .filter(a => a.index !== winner.index
+          && TERMS.every(({ of, applies }) => (applies && !applies(a, winner)) || of(a) === of(winner)))
         .map(a => a.index);
     }
     default: return assertNever(decision, 'tiedWith');
