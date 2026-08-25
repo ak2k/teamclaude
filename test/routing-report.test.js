@@ -473,6 +473,28 @@ test('a route that lists its accounts keeps its figures when its representative 
   assertPublishedFiguresMatchTraffic(am, wild, 'claude-fable-4');
 });
 
+// THE SERVED-SIBLING GUARD HAS TO BE ABLE TO FAIL, and none of the fixtures
+// using it can make it fail — they are all cases where publishing is correct, so
+// it currently guards without ever firing. That is the shape this round keeps
+// catching: a check nobody has watched fail is a check nobody knows is
+// connected. So it is fired here deliberately, against a hand-made entry that
+// bars an account entitled to serve the id, rather than left to be trusted.
+test('the served-sibling guard rejects an entry that bars an entitled account', () => {
+  const am = fleet({ accounts: ['a', 'b'], routes: [{ name: 'wild', match: ['*fable*'], accounts: [] }] });
+  assert.equal(am._routeForModel('claude-fable-4').name, 'wild');
+  assert.equal(am._routeAllows(am.accounts[1], 'claude-fable-4', am.routes[0]), true,
+    'the premise: b is entitled to serve this id');
+  const barsAnEntitledAccount = {
+    route: 'wild',
+    band: { excluded: [{ account: 'b', reason: 'route-excluded' }] },
+  };
+  assert.throws(
+    () => assertPublishedFiguresMatchTraffic(am, barsAnEntitledAccount, 'claude-fable-4'),
+    /may serve claude-fable-4/,
+    'the guard accepted an entry publishing route-excluded against an entitled account',
+  );
+});
+
 // THE CLAIM NAMES A SIBLING AND NOT THE REPRESENTATIVE. This is the dimension
 // every earlier fixture held constant: they all varied whether the CAPTURED id
 // was claimed, so none of them could produce the state below, and two separate
