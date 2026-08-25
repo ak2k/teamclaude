@@ -732,6 +732,36 @@ test('a family is measured by its own pattern, not by whether it meters a bucket
     'and the same for Sonnet, so this is about the family and not about one id');
 });
 
+// THE ONE FAMILY WITH NO PATTERN keeps the scope glob, and that remnant needs
+// its own fixture or it is a branch nobody grades — a sweep found it surviving
+// once the named families stopped using it. An id belongs to 'other' by failing
+// every named family, which no glob expresses, so the scope's own glob is the
+// best available characterisation and is not wrong the way `claude-*` was wrong
+// for Opus: there is nothing narrower to be right about.
+test('a family with no pattern of its own is still measured by its scope', () => {
+  const now = Date.now();
+  const withClaims = (name, models) => ({ name, type: 'apikey', apiKey: `k-${name}`, models });
+  const build = (claims) => {
+    const am = new AccountManager(
+      [withClaims('a', claims[0]), withClaims('b', claims[1])], 0.98, {
+        expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 },
+        routes: [{ name: 'gpt', match: ['gpt-*'] }],
+      });
+    am.accounts.forEach((x, i) => {
+      x.quota = { ...x.quota, unified5h: 0.05 + i * 0.05, unified5hReset: now + 2 * H,
+        unified7d: 0.2 + i * 0.1, unified7dReset: now + (20 + i * 10) * H };
+    });
+    return am.getStatus().routing.find(e => e.route === 'gpt');
+  };
+  const split = build([['gpt-4o'], ['gpt-4o-mini']]);
+  assert.equal(split.model, 'gpt-', 'the premise: no metered family, so the scope is its own literal');
+  assert.equal(split.familySplit, 'model claims',
+    'a scope whose family has no pattern was left unmeasurable and undisclosed');
+  // The negative pole: claims that cannot reach this scope do not divide it.
+  assert.equal(build([['claude-fable-5'], ['claude-fable-4']]).familySplit, null,
+    'claims that name no id this scope carries were read as dividing it');
+});
+
 // A ROUTE WITH AN EXPLICIT ACCOUNTS LIST PINS WHAT IT CARRIES. `_routeAllows`
 // decides before any claim does, so the scope goes where the list says whatever
 // the accounts claim; reporting a claim-division there describes a split the
