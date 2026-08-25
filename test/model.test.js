@@ -105,6 +105,22 @@ test('globCovers answers on the pattern\'s shape, not on its letters', () => {
   assert.equal(blockedState(['claude-fable-*'], { globs: ['claude-*'] }), 'partial');
 });
 
+// ONE OCCURRENCE CANNOT SATISFY TWO SEGMENTS. `fable*fable*` requires "fable"
+// twice; `fable*` guarantees it once. Reading the pattern's prefix and its
+// interior literal against the same glob segment let a pattern claim coverage it
+// does not have, and `fablex` is the witness: it matches the glob, escapes the
+// pattern, and was reported as blocked.
+test('globCovers refuses a literal that would be consumed twice', () => {
+  assert.equal(blockedState(['fable*fable*'], { globs: ['fable*'] }), 'partial');
+  assert.equal(blockedState(['*a*a*'], { globs: ['a*'] }), 'partial',
+    'the two-middle shape was already refused, which is why this only showed with a prefix');
+  // The directions that must keep working, so the refusal is not a blanket one.
+  assert.equal(blockedState(['claude-*'], { globs: ['claude-fable-*'] }), 'blocked');
+  assert.equal(blockedState(['*fable*'], { globs: ['*claude-fable*'] }), 'blocked');
+  assert.equal(blockedState(['fable*'], { globs: ['fable-x*'] }), 'blocked',
+    'a prefix pattern still covers a glob whose own prefix extends it');
+});
+
 test('blockedState reserves `blocked` for a pattern that covers the whole glob', () => {
   // Coverage is decidable for the shapes in use and conservative elsewhere: an
   // unsure answer is `partial`, which understates a block rather than calling a

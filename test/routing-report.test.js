@@ -552,6 +552,59 @@ test('the last resort reopens an account THIS route allows', () => {
     'the last resort reopened an account this route cannot use');
 });
 
+// THREE CAUSES, ONE FIELD. `familySplit` says the figures on this entry are its
+// representative's and names why the rest of the scope may differ. Two of the
+// three were invisible until pass 8 found them: a family with no pattern of its
+// own could not be measured at all, and an earlier ROUTE taking the
+// representative was never asked about — the entry then answered, correctly, for
+// an id its own route never receives.
+test('an entry says WHY its representative may not answer for the scope', () => {
+  const now = Date.now();
+  const withClaims = (name, models) => ({ name, type: 'apikey', apiKey: `k-${name}`, models });
+  const fill = (am) => {
+    am.accounts.forEach((a, i) => {
+      a.quota = { ...a.quota, unified5h: 0.05 + i * 0.05, unified5hReset: now + 2 * H,
+        unified7d: 0.2 + i * 0.1, unified7dReset: now + (20 + i * 10) * H,
+        unified7dFable: 0.1 + i * 0.2, unified7dFableReset: now + (20 + i * 10) * H };
+    });
+    return am;
+  };
+
+  // 1. An earlier route takes the representative. The entry is right about
+  //    where ITS traffic goes and named after an id that goes elsewhere.
+  const captured = fill(new AccountManager([acct('a'), acct('b')], 0.98, {
+    expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 },
+    routes: [{ name: 'exact', match: ['claude-fable-5'], accounts: ['a'] },
+      { name: 'wild', match: ['*fable*'], accounts: ['b'] }],
+  }));
+  const wild = captured.getStatus().routing.find(e => e.route === 'wild');
+  const served = fill(new AccountManager([acct('a'), acct('b')], 0.98, {
+    expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 },
+    routes: [{ name: 'exact', match: ['claude-fable-5'], accounts: ['a'] },
+      { name: 'wild', match: ['*fable*'], accounts: ['b'] }],
+  })).getActiveAccount(null, 'claude-fable-5', null, null, {});
+  assert.equal(wild.model, 'claude-fable-5', 'the premise: the entry is named by the captured id');
+  assert.equal(served.name, 'a', 'the premise: that id is served by the OTHER route');
+  assert.equal(wild.target, 'b', 'the premise: this route sends its own traffic elsewhere');
+  assert.equal(wild.familySplit, 'an earlier route',
+    'the entry answers under an id its route never receives and says nothing about it');
+
+  // 2. A family with no pattern of its own is still divisible.
+  const opus = fill(new AccountManager(
+    [withClaims('five', ['claude-opus-4-5']), withClaims('one', ['claude-opus-4-1'])], 0.98, {
+      expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 },
+      routes: [{ name: 'broad', match: ['claude-*'] }],
+    }));
+  const entries = opus.getStatus().routing.filter(e => e.route === 'broad');
+  const shared = entries.find(e => e.bucket === 'unified7d');
+  const fable = entries.find(e => e.bucket === 'unified7dFable');
+  assert.equal(shared.familySplit, 'model claims',
+    'the shared bucket has no family glob, so its division was unmeasurable');
+  // And the measurement stays specific: Opus claims do not divide Fable.
+  assert.equal(fable.familySplit, null,
+    'claims that cannot reach this family are reported as dividing it');
+});
+
 test('a route whose families are all captured earlier publishes no entry at all', () => {
   // Two states reached the same empty list and only one of them means "fall
   // back to the literal": a glob naming NO metered family is a shared-bucket

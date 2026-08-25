@@ -197,12 +197,20 @@ const END_IN_FINALLY = '        accountManager.endSession(sessionId, ctx.hold);\
 const FORWARD_AWAIT = '        await forwardRequest(req, res, body, accountManager, upstream, 0, hooks, reqId, ctx, logDir, sx);\n';
 const REC_STREAM = '      accountManager.recordTokenUsage(accountIndex, sessionId, model, merged);';
 const REC_BODY = '      accountManager.recordTokenUsage(accountIndex, sessionId, model, json.usage);';
+// Re-anchored TWICE. First when the band's clock became a parameter; then when
+// the entry's ROUTE became one, which severed it again — and that time the two
+// rows went NEVER APPLIED for a full run because I re-anchored my other table
+// and inferred this one was safe on the grounds that its anchors live in
+// `tools/`. These two anchor in `src/account-manager.js`, inside the very
+// function the edit changed, so the coverage that stopped measuring was the
+// coverage of that edit. Inference about where anchors live is not a check.
+//
 // Re-anchored when the band's clock became a parameter: an observation hands in
 // the instant its projection was taken at, so the call no longer reads
 // `Date.now()` here. The interventions are unchanged — one severs the decision
 // from its application, the other freezes the clock — but the anchor had to
 // follow the text, and until it did both rows measured nothing and said so.
-const BAND_APPLY = '    const decision = decideBand(this._bandSnapshot(candidates, model, now));\n';
+const BAND_APPLY = '    const decision = decideBand(this._bandSnapshot(candidates, model, now, route));\n';
 const SIZED_BRANCH = '  const sizing = sizeByCapacity(tier, pressures, snapshot);\n';
 const UNMEASURED_BOTH = '    const unmeasured = entry.headroom.kind === \'absent\' || entry.pressure.kind === \'absent\';\n';
 // Re-anchored when the admission loop began recording its steps: the stop went
@@ -382,10 +390,10 @@ const M = [
   // anything calls it; these sever the call site instead, which is the failure
   // that ships green.
   ['bandDecision      call site ignores the decision', BAND_APPLY,
-    '    const decision = decideBand(this._bandSnapshot(candidates, model, now));\n'
+    '    const decision = decideBand(this._bandSnapshot(candidates, model, now, route));\n'
     + '    void decision;\n    return candidates;\n', 'src/account-manager.js'],
   ['bandDecision      snapshot ignores the clock', BAND_APPLY,
-    '    const decision = decideBand(this._bandSnapshot(candidates, model, 0));\n',
+    '    const decision = decideBand(this._bandSnapshot(candidates, model, 0, route));\n',
     'src/account-manager.js'],
   // The capacity rule never runs and every fleet degrades to the ratio. This is
   // the fallback path made universal, so it is exactly what a build that

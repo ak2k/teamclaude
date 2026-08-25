@@ -1766,12 +1766,14 @@ export class AccountManager {
         // fallback and so appears on the row rather than here — reading this key
         // as every row's bucket would attribute one window's figure to another.
         bucket: this._weeklyBucketFor(model, scopeRoute ?? this._routeForModel(model)),
-        // WHAT THIS ENTRY MAY CLAIM ON BEHALF OF THE SET IT COVERS. False here
-        // is the ordinary case and says the family routes as one; true says the
-        // figures above are the representative's and other ids of this family
-        // go elsewhere. The same axis as a route spanning families, one level
-        // in: an entry answers for a set, and the set is not always uniform.
-        familySplit: this._familySplit(model),
+        // WHAT THIS ENTRY MAY CLAIM ON BEHALF OF THE SET IT COVERS. Null is the
+        // ordinary case and says the scope answers as one; a REASON says the
+        // figures above are the representative's and names why the rest may
+        // differ — divided among accounts by their own claims, or the
+        // representative taken by an earlier route. One field carrying its
+        // reason rather than a boolean beside an explanation, so the two cannot
+        // drift.
+        familySplit: this._familySplit(model, scopeRoute, match[0] ?? null),
         band: {
           kind: explained.decision.kind,
           reason: explained.decision.reason ?? null,
@@ -1871,11 +1873,24 @@ export class AccountManager {
    * the fallback for everything not metered separately — this cannot be
    * decided and answers false, which discloses nothing rather than guessing.
    */
-  _familySplit(model) {
-    const famGlob = familyGlobFor(model);
-    if (!famGlob) return false;
-    return this.accounts.some(a => (a.models || []).some(
-      claim => modelGlobOverlaps(claim, famGlob) && !globCovers(claim, famGlob)));
+  _familySplit(model, route = undefined, glob = null) {
+    // THE REPRESENTATIVE IS NOT ALWAYS OURS. An earlier route can take the very
+    // id this entry is named by while this route still carries the rest of the
+    // family — so the figures are right for the route and the NAME on them is
+    // an id the route never receives. Asked first because it is the stronger
+    // statement: not "some ids go elsewhere" but "this one does".
+    const owner = this._routeForModel(model);
+    if (route && owner && owner.match !== route.match) return 'an earlier route';
+    // A family with no pattern of its own — the shared bucket, the fallback for
+    // everything not metered separately — is still divisible; it is only
+    // uncharacterisable BY FAMILY. The scope's own glob is what its ids have in
+    // common, so claims are measured against that instead, and an Opus split
+    // reads exactly as a Fable one does.
+    const scopeGlob = familyGlobFor(model) ?? glob;
+    if (!scopeGlob) return null;
+    const divided = this.accounts.some(a => (a.models || []).some(
+      claim => modelGlobOverlaps(claim, scopeGlob) && !globCovers(claim, scopeGlob)));
+    return divided ? 'model claims' : null;
   }
 
   /** The name of the account a request for `model` would land on right now, or

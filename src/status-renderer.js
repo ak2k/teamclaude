@@ -376,8 +376,13 @@ function decisionLines(entry, status, blocked, paint) {
   // ladder's bucket is: an always-present qualifier is a column, and a column
   // is ignored.
   if (entry.familySplit) {
-    out.push(`  ${paint.dim('Scope'.padEnd(13))}`
-      + paint.dim(`answers for ${entry.model}; other ids in this family are claimed by other accounts`));
+    // Two different facts, said differently: an earlier route taking this very
+    // id is not the same as the family being divided among accounts, and a
+    // reader acts on them differently.
+    const why = entry.familySplit === 'an earlier route'
+      ? `answers for ${entry.model}, which an earlier route receives; this route carries the rest`
+      : `answers for ${entry.model}; other ids in this scope are claimed by other accounts`;
+    out.push(`  ${paint.dim('Scope'.padEnd(13))}${paint.dim(why)}`);
   }
 
   out.push(`  ${paint.dim('Band'.padEnd(13))}${bandSummary(band)}`);
@@ -437,7 +442,7 @@ function decisionLines(entry, status, blocked, paint) {
       // is where it lands: claims that split a family leave its entry with one
       // candidate, so the entry collapses to passthrough and never wins the
       // block. Disclosing it only there would disclose it exactly never.
-      const split = e.familySplit ? ', split by model claims' : '';
+      const split = e.familySplit ? `, split by ${e.familySplit}` : '';
       if (state === 'blocked') return `${scopeName(e)}: blocked${split}`;
       return `${scopeName(e)}: ${e.band.kind}${state === 'partial' ? ', partly blocked' : ''}${split}`;
     }).join(', ');

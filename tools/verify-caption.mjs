@@ -255,7 +255,17 @@ if (!sample.expiryRouting) refuse(`${SAMPLE} carries no expiryRouting block; it 
 const am = new AccountManager(
   sample.accounts.map(a => ({ name: a.name, type: 'apikey', apiKey: 'sample', priority: a.priority || 0 })),
   sample.switchThreshold,
-  { expiryRouting: sample.expiryRouting, routes: sample.routes?.filter(r => !r.autocreated) });
+  {
+    expiryRouting: sample.expiryRouting,
+    // A CAPTURED STATUS IS NOT A CONFIG. `routes[].accounts` on the wire is
+    // `[{name, eligible}]`, and `setRoutes` expects names — handed the objects,
+    // every account stringifies to "[object Object]", matches nothing, and the
+    // route excludes the entire fleet. The committed sample carries no routes,
+    // so the gate could not be fed a real capture without silently grading an
+    // empty fleet.
+    routes: sample.routes?.filter(r => !r.autocreated)
+      .map(r => ({ ...r, accounts: (r.accounts || []).map(a => (typeof a === 'string' ? a : a.name)) })),
+  });
 sample.accounts.forEach((a, i) => {
   am.accounts[i].quota = { ...a.quota };
   am.accounts[i].status = a.status || 'active';

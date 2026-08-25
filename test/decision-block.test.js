@@ -710,7 +710,7 @@ test('a family split by per-account model claims says so where it lands', () => 
 
   const split = build(true);
   const splitEntry = split.getStatus().routing.find(e => e.route === 'fable');
-  assert.equal(splitEntry.familySplit, true,
+  assert.equal(splitEntry.familySplit, 'model claims',
     'the entry claims one destination for a family its accounts have divided');
   assert.equal(splitEntry.target, 'five', 'the premise: the entry answers for the representative');
   assert.match(row(render(split, now), 'Other scopes'), /fable: [^,]+, split by model claims/,
@@ -720,7 +720,7 @@ test('a family split by per-account model claims says so where it lands', () => 
   // one is divided" rather than becoming a column.
   const whole = build(false);
   const wholeEntry = whole.getStatus().routing.find(e => e.route === 'fable');
-  assert.equal(wholeEntry.familySplit, false);
+  assert.equal(wholeEntry.familySplit, null);
   const wholeOthers = row(render(whole, now), 'Other scopes') || '';
   assert.doesNotMatch(wholeOthers, /split by model claims/,
     'a family that routes as one is reported as divided');
