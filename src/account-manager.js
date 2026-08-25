@@ -1,6 +1,6 @@
 import { refreshAccessToken, isTokenExpiringSoon, isTokenExpired } from './oauth.js';
 import { sameIdentity } from './identity.js';
-import { weeklyBucketForModel, modelGlobMatches, modelGlobOverlaps, gatingSource, WEEKLY_BUCKET_KEYS, familyModelsMatching, globCovers, familyGlobFor } from './model.js';
+import { weeklyBucketForModel, modelGlobMatches, modelGlobOverlaps, gatingSource, WEEKLY_BUCKET_KEYS, familyModelsMatching, globCovers, familyGlobFor, familyPatternFor } from './model.js';
 import { SessionTracker } from './session-tracker.js';
 import { WindowWatcher } from './window-watcher.js';
 import { decideBand, explainBand, pressureOf, assertNever } from './band-decision.js';
@@ -1855,12 +1855,24 @@ export class AccountManager {
       // "fable" — while an exact `claude-fable-5` ahead of `*fable*` takes one
       // id and leaves the rest. Where no capture can be shown, the entry is
       // published: an unproven capture would hide a route that carries traffic.
-      const famGlob = familyGlobFor(m);
+      // The family by its OWN pattern, not by whether it meters its own weekly
+      // bucket: `familyGlobFor` answers null for Opus, so an earlier `*opus*`
+      // route was never seen to have taken the Opus family at all.
+      const famGlob = familyPatternFor(m);
       return !before.some(r => r.match.some(g => globCovers(g, glob)
         || (famGlob && globCovers(g, famGlob))));
     });
     if (owned.length) return owned;
-    return named.length ? [] : [glob.replace(/\*/g, '') || 'model'];
+    if (named.length) return [];
+    // THE SAME QUESTION AT THE OTHER DOOR. A glob naming no metered family
+    // falls back to its own literal core, and that path never asked whether an
+    // earlier route had already taken it — so a `gpt-*` route behind a
+    // catch-all published a scope, a band and a destination while every real
+    // `gpt-4o` request went to the catch-all's account. `*fable*` in the
+    // identical shape was suppressed, which is what makes this a door and not a
+    // policy: one path asks the coverage question and the other did not.
+    const literal = glob.replace(/\*/g, '') || 'model';
+    return before.some(r => r.match.some(g => globCovers(g, glob))) ? [] : [literal];
   }
 
   /**
@@ -1881,26 +1893,33 @@ export class AccountManager {
    * decided and answers null, which discloses nothing rather than guessing.
    */
   _familySplit(model, route = undefined, glob = null) {
+    // A SCOPE OF ONE ID CANNOT BE DIVIDED, and this guard has to sit ABOVE
+    // EVERY ARM to say so. It was placed between them, so it protected the
+    // claims arm and never the representative one, and a scope whose match is a
+    // single literal id could still be told its family was split — the
+    // over-correction fixed on one arm only. There is nothing to divide here
+    // whoever does the dividing: one id has one destination. If that id goes to
+    // an earlier route the entry is not SPLIT but DEAD, which is a different
+    // fact and is disclosed by the scope determination rather than here.
+    if (glob && !glob.includes('*')) return null;
     // THE REPRESENTATIVE IS NOT ALWAYS OURS. An earlier route can take the very
     // id this entry is named by while this route still carries the rest of the
     // family — so the figures are right for the route and the NAME on them is
-    // an id the route never receives. Asked first because it is the stronger
-    // statement: not "some ids go elsewhere" but "this one does".
+    // an id the route never receives. Asked first among the divisions because
+    // it is the stronger statement: not "some ids go elsewhere" but "this one
+    // does".
     const owner = this._routeForModel(model);
     if (route && owner && owner.match !== route.match) return 'an earlier route';
-    // A SCOPE OF ONE ID CANNOT BE DIVIDED. An exact `claude-fable-5` route
-    // carries that id and nothing else, so its destination is right for its
-    // entire scope however the rest of the family is served. Measured against
-    // the family's `*fable*` instead, a sibling's `claude-fable-4` claim read
-    // as a split — a warning on the one scope shape that cannot have the
-    // defect. The check above still covers the id going elsewhere itself.
-    if (glob && !glob.includes('*')) return null;
-    // A family with no pattern of its own — the shared bucket, the fallback for
-    // everything not metered separately — is still divisible; it is only
-    // uncharacterisable BY FAMILY. The scope's own glob is what its ids have in
-    // common, so claims are measured against that instead, and an Opus split
-    // reads exactly as a Fable one does.
-    const scopeGlob = familyGlobFor(model) ?? glob;
+    // THE FAMILY IS MEASURED BY ITS OWN PATTERN, and asking the BUCKET question
+    // instead is what made this field noisy. `familyGlobFor` says which families
+    // meter their own weekly bucket, so it answers null for Opus and Haiku —
+    // and the scope's glob was then substituted, which is a wider set than the
+    // family. An earlier `claude-fable-5` route bites into a `claude-*` scope
+    // and takes no Opus id whatever, so every Opus entry under a shared scope
+    // was told its family was divided. `familyPatternFor` names the family
+    // itself, and the substitution survives only for 'other', the one family
+    // that genuinely has no pattern.
+    const scopeGlob = familyPatternFor(model) ?? glob;
     if (!scopeGlob) return null;
     const reaches = g => modelGlobOverlaps(g, scopeGlob) && !globCovers(g, scopeGlob);
     // ONE PREDICATE, TWO ACTORS. Reaching in without covering divides the
@@ -1912,6 +1931,11 @@ export class AccountManager {
     const idx = route ? this.routes.indexOf(route) : -1;
     const before = idx > 0 ? this.routes.slice(0, idx) : [];
     if (before.some(r => r.match.some(reaches))) return 'an earlier route';
+    // A ROUTE WITH AN EXPLICIT ACCOUNTS LIST PINS EVERY ID IT CARRIES, so no
+    // account's `models` claim can divide it: `_routeAllows` decides first and
+    // sends the whole scope to that list whatever the claims say. Asking the
+    // claims anyway reported a division the route makes impossible.
+    if (route && route.accounts.length) return null;
     return this.accounts.some(a => (a.models || []).some(reaches)) ? 'model claims' : null;
   }
 

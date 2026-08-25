@@ -698,6 +698,98 @@ test('an earlier route splits the family whichever id it took, and one id is nev
     'an entry named by an id its route never receives said nothing about it');
 });
 
+// WHAT A FAMILY IS, versus which families meter their own weekly bucket. Two
+// questions, one helper answering both, and the wrong one was being asked: an
+// exhaustive measurement of this field found 210 disclosures on scopes that
+// cannot be divided, and half of them were Opus entries measured against their
+// SCOPE's glob because `familyGlobFor` answers null for a family with no bucket.
+test('a family is measured by its own pattern, not by whether it meters a bucket', () => {
+  const now = Date.now();
+  const fill = (am) => {
+    am.accounts.forEach((a, i) => {
+      a.quota = { ...a.quota, unified5h: 0.05 + i * 0.05, unified5hReset: now + 2 * H,
+        unified7d: 0.2 + i * 0.1, unified7dReset: now + (20 + i * 10) * H,
+        unified7dFable: 0.1 + i * 0.2, unified7dFableReset: now + (20 + i * 10) * H };
+    });
+    return am;
+  };
+  const am = fill(new AccountManager([acct('a'), acct('b')], 0.98, {
+    expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 },
+    routes: [{ name: 'exact', match: ['claude-fable-5'], accounts: ['a'] },
+      { name: 'broad', match: ['claude-*'], accounts: ['b'] }],
+  }));
+  const entries = am.getStatus().routing.filter(e => e.route === 'broad');
+  const of = family => entries.find(e => e.model.includes(family));
+
+  // The Fable entry genuinely shares its family with the earlier route.
+  assert.equal(of('fable').familySplit, 'an earlier route',
+    'the family the earlier route reaches into is disclosed');
+  // The Opus one does not. Every Opus id is this route's, and `claude-*` is not
+  // the Opus family — it is merely the scope those ids happen to arrive under.
+  assert.equal(of('opus').familySplit, null,
+    'an Opus entry was told its family was split by a route that takes no Opus id');
+  assert.equal(of('sonnet').familySplit, null,
+    'and the same for Sonnet, so this is about the family and not about one id');
+});
+
+// A ROUTE WITH AN EXPLICIT ACCOUNTS LIST PINS WHAT IT CARRIES. `_routeAllows`
+// decides before any claim does, so the scope goes where the list says whatever
+// the accounts claim; reporting a claim-division there describes a split the
+// route makes impossible.
+test('claims cannot divide a scope whose route names its accounts', () => {
+  const now = Date.now();
+  const withClaims = (name, models) => ({ name, type: 'apikey', apiKey: `k-${name}`, models });
+  const build = (accounts) => {
+    const am = new AccountManager(
+      [withClaims('a', ['claude-fable-5']), withClaims('b', ['claude-fable-4'])], 0.98, {
+        expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 },
+        routes: [{ name: 'fable', match: ['*fable*'], ...(accounts ? { accounts } : {}) }],
+      });
+    am.accounts.forEach((x, i) => {
+      x.quota = { ...x.quota, unified5h: 0.05 + i * 0.05, unified5hReset: now + 2 * H,
+        unified7d: 0.2 + i * 0.1, unified7dReset: now + (20 + i * 10) * H,
+        unified7dFable: 0.1 + i * 0.2, unified7dFableReset: now + (20 + i * 10) * H };
+    });
+    return am.getStatus().routing.find(e => e.route === 'fable');
+  };
+  assert.equal(build(['b']).familySplit, null,
+    'the route pins every id it carries, so no claim can divide the scope');
+  // The contrast, so this is a statement about the route and not a blanket
+  // silencing of the claims arm.
+  assert.equal(build(null).familySplit, 'model claims',
+    'the same claims still divide the same scope when the route names no accounts');
+});
+
+// ONE COVERAGE QUESTION, TWO DOORS. A glob naming a metered family asks whether
+// an earlier route already took it; a glob naming none fell back to its own
+// literal and never asked. So `gpt-*` behind a catch-all published a scope with
+// a destination while every real request went to the catch-all — and `*fable*`
+// in the identical shape was correctly suppressed. The contrast is what makes
+// it a missing question rather than a policy.
+test('a route the catch-all has already taken publishes nothing, family or not', () => {
+  const now = Date.now();
+  const build = (glob) => {
+    const am = new AccountManager([acct('a'), acct('b'), acct('c')], 0.98, {
+      expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 },
+      routes: [{ name: 'all', match: ['*'], accounts: ['a'] },
+        { name: 'later', match: [glob], accounts: ['c'] }],
+    });
+    am.accounts.forEach((x, i) => {
+      x.quota = { ...x.quota, unified5h: 0.05 + i * 0.05, unified5hReset: now + 2 * H,
+        unified7d: 0.2 + i * 0.1, unified7dReset: now + (20 + i * 10) * H,
+        unified7dFable: 0.1 + i * 0.2, unified7dFableReset: now + (20 + i * 10) * H };
+    });
+    return am;
+  };
+  for (const [glob, probe] of [['gpt-*', 'gpt-4o'], ['*fable*', 'claude-fable-5']]) {
+    const entries = build(glob).getStatus().routing.filter(e => e.route === 'later');
+    const served = build(glob).getActiveAccount(null, probe, null, null, {});
+    assert.equal(served.name, 'a', `the premise: ${probe} is served by the catch-all`);
+    assert.deepEqual(entries, [],
+      `the ${glob} route advertises a destination for traffic it never receives`);
+  }
+});
+
 test('a route whose families are all captured earlier publishes no entry at all', () => {
   // Two states reached the same empty list and only one of them means "fall
   // back to the literal": a glob naming NO metered family is a shared-bucket

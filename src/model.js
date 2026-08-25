@@ -114,6 +114,24 @@ export function familyGlobFor(model) {
   return FAMILY_WEEKLY_BUCKET[family] ? `*${family}*` : null;
 }
 
+// The glob that names a family BY ITS IDS, for every family this proxy
+// recognises by name — `*opus*` as much as `*fable*`.
+//
+// `familyGlobFor` above answers a different question, WHICH FAMILIES METER
+// THEIR OWN WEEKLY BUCKET, and it was being used as an identity test. Opus and
+// Haiku have no bucket of their own, so it answered null for them, and the
+// caller then measured an Opus entry against its SCOPE's glob instead — a
+// `claude-*` scope, which an earlier `claude-fable-5` route does bite into
+// while taking no Opus id at all. That one substitution accounted for 102 of
+// the 210 spurious disclosures an exhaustive measurement found.
+//
+// Null ONLY for 'other', which genuinely has no pattern: an id belongs to it by
+// failing every named family, and no glob expresses that.
+export function familyPatternFor(model) {
+  const family = modelFamily(model);
+  return family === 'other' ? null : `*${family}*`;
+}
+
 // The representative model id for a family name (`Fable`, `opus`), or null.
 export function familyModel(family) {
   const key = String(family ?? '').toLowerCase();
