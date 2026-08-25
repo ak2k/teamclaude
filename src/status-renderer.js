@@ -22,7 +22,8 @@ export function renderStatus(status, { color = process.stdout.isTTY, now = Date.
   // and the full block would be a caption for a rule that never ran, a list of
   // ranks the code never computed, and two destination rows restating `Active`.
   if (decision && decision.band.kind === 'passthrough') {
-    lines.push(`${paint.dim('Selection'.padEnd(12))} ${selectionSummary(decision)}`);
+    lines.push(`${paint.dim('Selection'.padEnd(12))} `
+      + `${selectionSummary(decision, status.sessions?.distribute !== false)}`);
   }
   // Only when something is blocked: a always-visible "Blocked" row would be
   // noise for the common case, but its ABSENCE is what made a blocked model
@@ -149,14 +150,23 @@ function scopeState(entry, blocked) {
  * candidate set arrives here too, and a caption that assumed one candidate
  * would assert an eligible account on a fully throttled fleet, which is the
  * state where the operator most needs the truth.
+ *
+ * TWO RULES ARE OFF ON THE STOCK FLEET, not one. Expiry routing is off by
+ * default and so is session distribution, and this row spoke only about the
+ * first: it opened with `load-ranked` on the DEFAULT configuration, where a new
+ * session follows the current account and nothing is ranked by load at all. The
+ * expanded block already says `distribution off; not load-ranked`, so the
+ * collapsed form was the one place the screen contradicted itself — and it is
+ * the form the stock fleet always gets.
  */
-function selectionSummary(entry) {
+function selectionSummary(entry, distributing) {
   const n = entry.band.candidates;
+  const ranking = distributing ? 'load-ranked' : 'distribution off; not load-ranked';
   switch (entry.band.reason) {
     case 'disabled':
-      return `load-ranked · expiry routing off · ${n} account${n === 1 ? '' : 's'} eligible`;
+      return `${ranking} · expiry routing off · ${n} account${n === 1 ? '' : 's'} eligible`;
     case 'no-known-pressure':
-      return `load-ranked · no quota window reported yet · ${n} eligible`;
+      return `${ranking} · no quota window reported yet · ${n} eligible`;
     case 'single-candidate':
       if (n > 0) return 'one eligible account; nothing to choose between';
       // NOTHING ELIGIBLE IS NOT NOTHING SERVED. With every account barred, a
@@ -170,16 +180,17 @@ function selectionSummary(entry) {
         ? `nothing under the threshold; the next request reopens ${entry.target}`
         : 'no eligible account right now';
     default:
-      return `load-ranked · ${n} eligible`;
+      return `${ranking} · ${n} eligible`;
   }
 }
 
 /**
  * The rule the band is running, in one sentence.
  *
- * Exported because `tools/verify-caption.mjs` grades this exact string against
- * the decision it describes: the sentence that prints and the sentence that is
- * checked have to be the same object, or the gate guards a caption nobody sees.
+ * Exported because the caption is graded against the decision it describes, by
+ * the suite and by the branch's own caption gate: the sentence that prints and
+ * the sentence that is checked have to be the same object, or what is checked
+ * is a caption nobody sees.
  *
  * The three `banded` reasons share a caption because the rule that is RUNNING
  * is the same ratio rule in all three; only the reason it is running differs,

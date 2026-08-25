@@ -511,15 +511,31 @@ test('a route scope answers Next request with that route, not the current accoun
     'the named account is not in the admitted set of the scope it is named under');
 });
 
+// TWO RULES ARE OFF ON THE STOCK FLEET and the row spoke about one. Both poles
+// are asserted, because the assertion that missed this read `/load-ranked · …/`
+// — which the corrected sentence still contains, as `not load-ranked`. A
+// substring both wordings satisfy cannot grade either one.
 test('expiry routing off collapses to one row instead of a block', () => {
   const now = Date.now();
-  const am = new AccountManager(['a', 'b'].map(acct), 0.98);
-  am.accounts[0].quota = { ...am.accounts[0].quota, unified7d: 0.1, unified7dReset: now + 20 * H };
-  const lines = render(am, now);
+  const build = (distributeSessions) => {
+    const am = new AccountManager(['a', 'b'].map(acct), 0.98, { distributeSessions });
+    am.accounts[0].quota = { ...am.accounts[0].quota, unified7d: 0.1, unified7dReset: now + 20 * H };
+    return am;
+  };
+  const lines = render(build(false), now);   // the stock fleet: both rules off
 
   assert.ok(!lines.some(l => l.startsWith('Decision')),
     'a fleet with the feature off renders a block about a rule that never ran');
-  assert.match(row(lines, 'Selection'), /load-ranked · expiry routing off · 2 accounts eligible/);
+  const off = row(lines, 'Selection');
+  assert.match(off, /distribution off; not load-ranked · expiry routing off · 2 accounts eligible/);
+  assert.doesNotMatch(off, /(^|\s)Selection\s+load-ranked/,
+    'the default fleet claimed a ranking that never runs on it');
+
+  // The other pole: with distribution on, load ranking is what happens and the
+  // row says so, so the correction is about the state and not a blanket hedge.
+  const on = row(render(build(true), now), 'Selection');
+  assert.match(on, /^Selection\s+load-ranked · expiry routing off · 2 accounts eligible/);
+  assert.doesNotMatch(on, /distribution off/);
 });
 
 test('a fully barred fleet says nothing is eligible rather than claiming one account', () => {
@@ -792,9 +808,10 @@ test('the caption is the rule that is running, with the configured target in it'
 });
 
 test('the caption a reader sees is the caption the gate grades', () => {
-  // `tools/verify-caption.mjs` pins this exact sentence and refuses to run when
-  // it changes. Holding it here too means a reword fails the suite as well as
-  // the gate, rather than only being caught by a tool somebody has to remember.
+  // The caption is also pinned outside the suite, by a review-time gate that
+  // refuses to run when the sentence changes. Holding it here too means a
+  // reword fails the suite as well, rather than depending on a tool somebody
+  // has to remember to run — and the suite is the copy that always ships.
   assert.equal(
     ruleCaption({ kind: 'sized', target: 1 }),
     'within the best priority tier, most unspent weekly quota per hour '
