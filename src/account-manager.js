@@ -1632,7 +1632,14 @@ export class AccountManager {
       // representative rather than a model id; the auto-created entries below
       // carry a real one.
       sample: sampleModelFor(r),
-      target: this._routeTarget(sampleModelFor(r), observed),
+      // THE ROUTE, not just its sample. Without it every derivation here
+      // re-derives the route from the model — and `_routeForModel` answers
+      // about the FIRST route matching that id, which for a later route is
+      // some earlier one. A route whose glob strips to a capturable id
+      // (`claude-fable-5*` -> `claude-fable-5`) then published the EARLIER
+      // route's destination, in the same response where `routing[]` published
+      // its own. The round threaded `routing[]` and stopped here.
+      target: this._routeTarget(sampleModelFor(r), observed, r),
     }));
 
     const detected = [];
@@ -1967,7 +1974,11 @@ export class AccountManager {
     const inRoute = a => !route.accounts.length
       || route.accounts.includes(a.name) || route.accounts.includes(String(a.index));
     return observed.accounts.filter(inRoute)
-      .map(a => ({ name: a.name, eligible: this._isAvailable(a, sample, null, this._observeOpts(observed)) }));
+      // The route here too: the eligibility half of the same defect. Asked
+      // without it, an account this route may use was reported ineligible
+      // because an EARLIER route disallows it — the flag said "b cannot serve
+      // this" about the one account the route lists.
+      .map(a => ({ name: a.name, eligible: this._isAvailable(a, sample, null, this._observeOpts(observed, route)) }));
   }
 
   /** A representative model id for a route name (configured or auto fable/sonnet),
