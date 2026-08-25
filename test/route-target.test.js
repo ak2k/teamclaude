@@ -103,6 +103,13 @@ test('a later route publishes its OWN destination and its own eligibility', () =
     'routes[] published the EARLIER route\'s destination for a live later route');
   assert.deepEqual(later.accounts, [{ name: 'b', eligible: true }],
     'routes[] called this route\'s only account ineligible, by another route\'s rules');
-  assert.equal(entry.target, later.target,
-    'two payloads in one response disagree about where this route sends traffic');
+  // The routing[] entry for this scope is SUPPRESSED — its representative is
+  // the id the exact route captured — so the two payloads no longer answer the
+  // same question and cannot be compared field to field. That is the point of
+  // the pair: `routes[]` answers a ROUTE-level question, which the threading
+  // makes answerable, while `routing[]` declines a per-account answer it can
+  // only compute for an id this route never receives.
+  assert.equal(entry.figuresAbsent, 'representative-captured');
+  assert.equal(entry.target, null,
+    'the suppressed entry still names a destination, so the two payloads can disagree again');
 });

@@ -824,3 +824,38 @@ test('the caption a reader sees is the caption the gate grades', () => {
   assert.equal(ruleCaption({ kind: 'passthrough' }), null,
     'a decision that ran no rule has a rule caption');
 });
+
+// A SCOPE WITH NO FIGURES IS NOT A FLEET WITH NO ACCOUNTS. When an earlier
+// route takes the id a scope is named for, the entry publishes no per-account
+// figures — and the collapsed row's default branch would have reported that as
+// "0 eligible", which is a claim about the fleet rather than about the question
+// nobody asked.
+test('a captured scope says why it has no figures rather than counting to zero', () => {
+  const now = Date.now();
+  // Expiry routing ON and a third account, so SOME scope decides something and
+  // the block renders at all — a fleet where every scope is passthrough
+  // collapses to the one-row form and this line never appears.
+  const am = new AccountManager(['a', 'b', 'c'].map(acct), 0.98, {
+    expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 },
+    routes: [{ name: 'exact', match: ['claude-fable-5'], accounts: ['a', 'c'] },
+      { name: 'wild', match: ['*fable*'], accounts: ['b'] }],
+  });
+  am.accounts.forEach((x, i) => {
+    x.quota = { ...x.quota, unified5h: 0.05 + i * 0.05, unified5hReset: now + 2 * H,
+      unified7d: 0.2 + i * 0.1, unified7dReset: now + (20 + i * 10) * H,
+      unified7dFable: 0.1 + i * 0.2, unified7dFableReset: now + (20 + i * 10) * H };
+  });
+  const status = am.getStatus();
+  const wild = status.routing.find(e => e.route === 'wild');
+  assert.equal(wild.figuresAbsent, 'representative-captured', 'the premise: this scope is suppressed');
+
+  const lines = renderStatus(status, { color: false, now }).split('\n');
+  const rendered = lines.join('\n');
+  // It surfaces on the `Other scopes` line, because a scope that decided
+  // nothing never wins the block — which is exactly why the line has to say
+  // something better than the band variant `passthrough`.
+  assert.match(rendered, /no figures, an earlier route takes its id/,
+    'the screen describes a suppressed scope by a decision it never made');
+  assert.doesNotMatch(rendered, /0 eligible/,
+    'the collapsed row counted a fleet nobody asked about');
+});

@@ -1717,6 +1717,69 @@ export class AccountManager {
       }
     }
     return scopes.map(({ scope, route, model, match, autocreated, owner: scopeRoute }) => {
+      // A CAPTURED REPRESENTATIVE PUBLISHES NO PER-ACCOUNT FIGURES. Every
+      // figure below is computed FOR THE MODEL, and when an earlier route has
+      // taken this entry's representative the model is an id this route never
+      // receives — so availability, the band, the ladder and the pick are all
+      // answers about somebody else's traffic. That is not a rounding error: it
+      // published `route-excluded` against the ONE account serving this route
+      // and named a destination serving none of it, which is a line an operator
+      // acts on.
+      //
+      // ABSENCE WITH A STATED REASON, never a silent one. An absence whose
+      // cause cannot be told from the payload is how a display ends up deriving
+      // its own answer (TC-026), so the marker says which determination removed
+      // the figures.
+      //
+      // NOT SUBSTITUTION. The tempting fix is to evaluate against an id this
+      // route DOES receive, and it needs a census of the ids that exist — the
+      // same census measured unsafe twice this round: it holds only
+      // `FAMILY_MODELS` plus ids named literally in routes and claims, so with
+      // an exact `claude-fable-5` route ahead of `*fable*` it sees one Fable id,
+      // calls the entry dead, and goes silent on a genuine split. A wrong
+      // number is worse than a stated absence, and the round-4 fix at the root
+      // (a route's sample becoming a resolvable id) changes the basis anyway.
+      //
+      // Keyed on `_representativeCaptured`, the same predicate `familySplit`
+      // asks, so the disclosure and the suppression cannot disagree.
+      if (this._representativeCaptured(model, scopeRoute)) {
+        return {
+          scope,
+          route,
+          model,
+          match,
+          autocreated,
+          target: null,
+          pinnedTo: null,
+          bucket: this._weeklyBucketFor(model, scopeRoute ?? this._routeForModel(model)),
+          familySplit: this._familySplit(model, scopeRoute, match[0] ?? null, autocreated),
+          // The marker, and the reason a reader needs to know what is missing
+          // and why. Kept as its own field rather than folded into the band, so
+          // a consumer asking "are these figures real" does not have to infer
+          // it from a band variant.
+          figuresAbsent: 'representative-captured',
+          band: {
+            kind: 'passthrough',
+            reason: 'representative-captured',
+            target: null,
+            achieved: null,
+            floor: null,
+            candidates: 0,
+            admitted: [],
+            ladder: [],
+            excluded: [],
+          },
+          pick: {
+            kind: 'none',
+            reason: 'representative-captured',
+            account: null,
+            runnerUp: null,
+            tiedWith: [],
+            by: null,
+            terms: [],
+          },
+        };
+      }
       // ONE availability evaluation per account, split two ways. The candidates
       // are what the band sees and the rest are `excluded[]` with the reason
       // that removed them, so the two lists cannot disagree about an account and
@@ -1781,6 +1844,9 @@ export class AccountManager {
         // reason rather than a boolean beside an explanation, so the two cannot
         // drift.
         familySplit: this._familySplit(model, scopeRoute, match[0] ?? null, autocreated),
+        // Figures below are this entry's own; the suppression branch above is
+        // the only path that publishes none.
+        figuresAbsent: null,
         band: {
           kind: explained.decision.kind,
           reason: explained.decision.reason ?? null,
@@ -1883,6 +1949,24 @@ export class AccountManager {
   }
 
   /**
+   * Is the id this entry is NAMED FOR taken by a route ahead of it?
+   *
+   * ONE PREDICATE, TWO CONSUMERS, and that is the point of it existing. The
+   * disclosure (`familySplit`) and the suppression of per-account figures are
+   * the same determination: an entry named for a captured id is speaking under
+   * a name it never receives, so its figures are computed for the wrong id and
+   * its disclosure must say so. Written twice they would drift, and the drift
+   * would be an entry that discloses the capture and publishes figures anyway —
+   * which is precisely what it did before.
+   *
+   * Identity, not name: route names are not unique.
+   */
+  _representativeCaptured(model, route) {
+    const owner = this._routeForModel(model);
+    return Boolean(route && owner && owner.match !== route.match);
+  }
+
+  /**
    * Is this entry's family SERVED AS A UNIT, or split among accounts by their
    * own `models` claims?
    *
@@ -1911,12 +1995,9 @@ export class AccountManager {
     if (glob && !glob.includes('*')) return null;
     // THE REPRESENTATIVE IS NOT ALWAYS OURS. An earlier route can take the very
     // id this entry is named by while this route still carries the rest of the
-    // family — so the figures are right for the route and the NAME on them is
-    // an id the route never receives. Asked first among the divisions because
-    // it is the stronger statement: not "some ids go elsewhere" but "this one
-    // does".
-    const owner = this._routeForModel(model);
-    if (route && owner && owner.match !== route.match) return 'an earlier route';
+    // family. Asked first among the divisions because it is the stronger
+    // statement: not "some ids go elsewhere" but "this one does".
+    if (this._representativeCaptured(model, route)) return 'an earlier route';
     // THE FAMILY IS MEASURED BY ITS OWN PATTERN, and asking the BUCKET question
     // instead is what made this field noisy. `familyGlobFor` says which families
     // meter their own weekly bucket, so it answers null for Opus and Haiku —

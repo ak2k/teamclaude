@@ -167,6 +167,12 @@ function selectionSummary(entry, distributing) {
       return `${ranking} · expiry routing off · ${n} account${n === 1 ? '' : 's'} eligible`;
     case 'no-known-pressure':
       return `${ranking} · no quota window reported yet · ${n} eligible`;
+    // NOT A RANKING STATE AT ALL. This scope is named for an id a route ahead
+    // of it takes, so no per-account figures were computed for it — and saying
+    // "0 eligible" about that would report an empty fleet rather than an
+    // unasked question. The count is deliberately absent from the sentence.
+    case 'representative-captured':
+      return 'no figures: an earlier route takes the id this scope is named for';
     case 'single-candidate':
       if (n > 0) return 'one eligible account; nothing to choose between';
       // NOTHING ELIGIBLE IS NOT NOTHING SERVED. With every account barred, a
@@ -455,6 +461,14 @@ function decisionLines(entry, status, blocked, paint) {
       // block. Disclosing it only there would disclose it exactly never.
       const split = e.familySplit ? `, split by ${e.familySplit}` : '';
       if (state === 'blocked') return `${scopeName(e)}: blocked${split}`;
+      // A SUPPRESSED SCOPE IS NOT A BAND VARIANT. Its band reads `passthrough`
+      // because there was nothing to rank, and printing that word here would
+      // describe a decision this scope never made. It has one fact worth the
+      // line: nobody computed figures for it, because the id it is named for
+      // belongs to a route ahead of it.
+      if (e.figuresAbsent === 'representative-captured') {
+        return `${scopeName(e)}: no figures, an earlier route takes its id`;
+      }
       return `${scopeName(e)}: ${e.band.kind}${state === 'partial' ? ', partly blocked' : ''}${split}`;
     }).join(', ');
     out.push(`  ${paint.dim('Other scopes'.padEnd(13))}${paint.dim(names)}`);

@@ -372,13 +372,23 @@ test('every figure on an entry is its own route\'s, not the representative\'s ow
   assert.equal(am._routeForModel('claude-fable-5').name, 'exact');
   assert.ok(wild, 'the live route publishes nothing, which is the defect one layer up');
 
+  // WHAT A CAPTURED ENTRY PUBLISHES NOW. The figures were this route's own
+  // after the threading, and they were still computed FOR AN ID THIS ROUTE
+  // NEVER RECEIVES — which published `route-excluded` against the only account
+  // serving the route. So they are not published at all, with the reason.
+  assert.equal(wild.figuresAbsent, 'representative-captured',
+    'the entry publishes per-account figures for an id its route never receives');
+  assert.equal(wild.familySplit, 'an earlier route');
+  assert.equal(wild.target, null, 'the entry names a destination for traffic it does not receive');
+  assert.equal(wild.pinnedTo, null);
+  assert.deepEqual(wild.band.excluded, [], 'a suppressed entry still names accounts');
+  assert.deepEqual(wild.band.admitted, []);
+  assert.equal(wild.band.candidates, 0);
+  assert.equal(wild.pick.account, null);
+  // The one figure that survives is the one that is about the SCOPE rather than
+  // about accounts, and it is still this route's own: the earlier route's
+  // Sonnet override does not reach it.
   assert.equal(wild.bucket, 'unified7dFable', "the entry carries the other route's bucket override");
-  assert.equal(wild.pinnedTo, null, "the entry carries the other route's pin");
-  assert.equal(wild.target, 'b', "the entry names an account its own route cannot use");
-  assert.deepEqual(wild.band.excluded.map(x => `${x.account}:${x.reason}`), ['a:route-excluded'],
-    "the entry's candidate set is the other route's");
-  assert.equal(wild.band.candidates, 1);
-  assert.equal(wild.pick.account, 'b');
   // And the entry that legitimately owns those things still has them, so the
   // fix cannot be "stop reading route configuration at all".
   assert.equal(exact.bucket, 'unified7dSonnet');
@@ -401,6 +411,23 @@ test('every figure on an entry is its own route\'s, not the representative\'s ow
 // A correct label on a wrong computation is the shape this round exists to
 // remove, and it survived because the label and the computation live in
 // different functions.
+// WHAT THESE FOUR NOW GRADE, and it is not what they were written for.
+//
+// Each fixture below was built to catch the route failing to reach one ranking
+// site — the band's snapshot, the preview's band, the pick's final tiebreak,
+// the last resort — by making the entry's own window and its CAPTOR'S window
+// order the fleet oppositely. Every one of them needs a CAPTURED
+// representative, because that is the only state in which deriving the route
+// from the model differs from being handed it.
+//
+// A captured entry now publishes no per-account figures at all, so the ladder,
+// the admitted set, the pick and the destination these asserted are gone by
+// design. The invariant they graded still holds in the code and is no longer
+// OBSERVABLE in this payload: the threading remains as defence, and its
+// mutation-table rows are expected to report SURVIVES for exactly that reason.
+// The fixtures are kept intact, with their measured premises, because they are
+// the shapes that produce the state — and what they assert now is that the
+// state produces an absence with a reason rather than somebody else's numbers.
 test('the band ranks on the window this route governs, not its representative owner\'s', () => {
   const now = Date.now();
   const am = fleet({
@@ -431,16 +458,13 @@ test('the band ranks on the window this route governs, not its representative ow
   assert.equal(am._routeForModel('claude-fable-5').bucket, 'unified7dSonnet');
 
   const wild = am.getStatus().routing.find(e => e.route === 'wild');
-  assert.equal(wild.bucket, 'unified7dFable');
-  assert.deepEqual(wild.band.ladder.map(r => r.account), ['fable-best', 'sonnet-best'],
-    'the ladder is ordered by the other route\'s window');
-  assert.deepEqual(wild.band.admitted, ['fable-best'],
-    'the band admitted the account that wins on a window this route does not govern');
-  assert.equal(wild.pick.account, 'fable-best');
-  // And the entry agrees with itself: pick and target named different accounts
-  // when the two were computed against different windows.
-  assert.equal(wild.pick.account, wild.target,
-    'the pick and the destination on one entry disagree, so one of them is computed elsewhere');
+  assert.equal(wild.bucket, 'unified7dFable',
+    'the scope-level figure is still this route\'s own, not its captor\'s override');
+  assert.equal(wild.figuresAbsent, 'representative-captured');
+  assert.deepEqual(wild.band.ladder, [], 'a captured entry publishes a ranking of accounts');
+  assert.deepEqual(wild.band.admitted, []);
+  assert.equal(wild.pick.account, null);
+  assert.equal(wild.target, null);
 });
 
 // THREE MORE SITES THE FIRST ARM DOES NOT REACH, each found by mutating the
@@ -475,8 +499,9 @@ test('the preview bands on this route\'s window, so the destination follows it',
   });
 
   const wild = am.getStatus().routing.find(e => e.route === 'wild');
-  assert.equal(wild.target, 'fable-best',
-    'the destination was banded on the window the other route governs');
+  assert.equal(wild.figuresAbsent, 'representative-captured');
+  assert.equal(wild.target, null,
+    'the entry names a destination computed for an id it never receives');
 });
 
 test('the final tiebreak reads the reset of THIS route\'s window', () => {
@@ -514,14 +539,11 @@ test('the final tiebreak reads the reset of THIS route\'s window', () => {
   });
 
   const wild = am.getStatus().routing.find(e => e.route === 'wild');
-  const [first, second] = wild.band.ladder.filter(r => r.pressure.kind === 'known');
-  assert.equal(first.pressure.kind, 'known');
-  assert.ok(Math.abs(first.pressure.value - second.pressure.value) < 1e-12,
-    'the premise: the two accounts must TIE on pressure, or the reset never decides');
-  assert.equal(wild.pick.account, 'late',
-    'the report\'s tiebreak read a reset from the window the other route governs');
-  assert.equal(wild.target, 'late',
-    'the preview\'s tiebreak read a reset from the window the other route governs');
+  assert.equal(wild.figuresAbsent, 'representative-captured');
+  assert.deepEqual(wild.band.ladder, [],
+    'the tie this fixture builds is between accounts this route may not even serve');
+  assert.equal(wild.pick.account, null);
+  assert.equal(wild.target, null);
 });
 
 test('the last resort reopens an account THIS route allows', () => {
@@ -547,9 +569,10 @@ test('the last resort reopens an account THIS route allows', () => {
   }
 
   const wild = am.getStatus().routing.find(e => e.route === 'wild');
-  assert.equal(wild.band.candidates, 0, 'the premise: nothing is eligible, so the last resort answers');
-  assert.equal(wild.target, 'wild-only',
-    'the last resort reopened an account this route cannot use');
+  assert.equal(wild.figuresAbsent, 'representative-captured');
+  assert.equal(wild.band.candidates, 0);
+  assert.equal(wild.target, null,
+    'a captured entry names the account a last resort would reopen for another route\'s id');
 });
 
 // THREE CAUSES, ONE FIELD. `familySplit` says the figures on this entry are its
@@ -585,9 +608,12 @@ test('an entry says WHY its representative may not answer for the scope', () => 
   })).getActiveAccount(null, 'claude-fable-5', null, null, {});
   assert.equal(wild.model, 'claude-fable-5', 'the premise: the entry is named by the captured id');
   assert.equal(served.name, 'a', 'the premise: that id is served by the OTHER route');
-  assert.equal(wild.target, 'b', 'the premise: this route sends its own traffic elsewhere');
   assert.equal(wild.familySplit, 'an earlier route',
     'the entry answers under an id its route never receives and says nothing about it');
+  // The disclosure and the suppression are one determination, so they arrive
+  // together or the entry is claiming figures it has just disowned.
+  assert.equal(wild.figuresAbsent, 'representative-captured');
+  assert.equal(wild.target, null);
 
   // 2. A family with no pattern of its own is still divisible.
   const opus = fill(new AccountManager(
@@ -635,10 +661,15 @@ test('an earlier route splits the family whichever id it took, and one id is nev
   const four = mk([acct('a'), acct('b')], siblingRoutes)
     .getActiveAccount(null, 'claude-fable-4', null, null, {});
   assert.equal(wild.model, 'claude-fable-5', 'the premise: the entry is named by an id it does own');
-  assert.equal(wild.target, 'b', 'the premise: its own traffic goes here');
   assert.equal(four.name, 'a', 'the premise: a sibling of the family is served elsewhere');
   assert.equal(wild.familySplit, 'an earlier route',
     'the entry answers for a family it shares with a route ahead of it');
+  // This pole's representative is NOT captured — `claude-fable-4` is the id
+  // taken — so the entry keeps its figures and names its own destination. That
+  // is the line between the two disclosures: sibling taken, figures stand;
+  // representative taken, figures go.
+  assert.equal(wild.figuresAbsent, null);
+  assert.equal(wild.target, 'b', 'the premise: its own traffic goes here');
 
   // 2. The negative pole for capture: an earlier route that cannot reach this
   //    family divides nothing, so the disclosure is not blanket.
@@ -692,10 +723,14 @@ test('an earlier route splits the family whichever id it took, and one id is nev
     .getStatus().routing.find(e => e.route === 'wild');
   const goes = mk([acct('a'), acct('b')], versioned)
     .getActiveAccount(null, 'claude-fable-5', null, null, {});
-  assert.equal(taken.target, 'b', 'the premise: the entry sends its own traffic here');
   assert.equal(goes.name, 'a', 'the premise: its representative is served by the earlier route');
   assert.equal(taken.familySplit, 'an earlier route',
     'an entry named by an id its route never receives said nothing about it');
+  // Captured, so the figures go with the disclosure. This pole is the pair's
+  // other side: the one above keeps its figures because the id taken was a
+  // SIBLING, this one loses them because the id taken is the entry's own name.
+  assert.equal(taken.figuresAbsent, 'representative-captured');
+  assert.equal(taken.target, null);
 });
 
 // WHAT A FAMILY IS, versus which families meter their own weekly bucket. Two
