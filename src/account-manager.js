@@ -1778,7 +1778,14 @@ export class AccountManager {
             target: null,
             achieved: null,
             floor: null,
-            candidates: 0,
+            // NULL, NOT ZERO. Zero is a figure, and on a live route it is a
+            // false one: it reads as "nothing can serve this scope" when the
+            // scope is served perfectly well by whoever takes the ids it
+            // actually receives. This entry's whole claim is that no figures
+            // were computed, so the count of candidates is UNMEASURED rather
+            // than measured-and-none — the same distinction every other scalar
+            // here already makes.
+            candidates: null,
             admitted: [],
             ladder: [],
             excluded: [],
@@ -2026,6 +2033,22 @@ export class AccountManager {
    * produced. Deciding that needs the id census this round measured unsafe
    * twice, so the residual is a narrow over-suppression, disclosed rather than
    * closed — and it errs toward absence-with-a-reason over a wrong number.
+   *
+   * DO NOT SIMPLIFY THIS TO TWO TERMS. Both of the tempting drops have a
+   * counterexample in the suite, and neither is belt-and-braces:
+   *
+   *   drop conjunct 2 → `a route that lists its accounts keeps its figures when
+   *     its representative is captured` goes red. That entry's figures are not
+   *     merely defensible, they are TRUE: it names `b`, and `b` is exactly who
+   *     serves the traffic that route receives.
+   *   drop conjunct 3 → `the band ranks on the window this route governs` goes
+   *     red. That fixture has an EMPTY accounts list, so conjunct 2 does not
+   *     save it; what saves it is that nobody declares `models`, which makes
+   *     `_accountOwnsModel` true for every account and the captured id grade
+   *     the fleet exactly as a served one would.
+   *
+   * Each conjunct also has its own neutralisation row, so a simplification is
+   * caught by the sweep and not only by a test name someone might re-point.
    */
   _captureDistortsFigures(model, route) {
     return this._representativeCaptured(model, route)

@@ -859,6 +859,23 @@ test('a captured scope says why it has no figures rather than counting to zero',
   const wild = status.routing.find(e => e.route === 'wild');
   assert.equal(wild.figuresAbsent, 'representative-captured', 'the premise: this scope is suppressed');
 
+  // WHAT A SUPPRESSED ENTRY PUBLISHES, asserted here because this is the only
+  // fixture in the suite where suppression genuinely applies — the tests that
+  // used to grade this shape were built on captured entries whose figures are
+  // correct, and they went back to grading those figures.
+  //
+  // `candidates` is NULL and not 0, and the difference is the entry's whole
+  // claim. Zero is a figure: on this fleet it would say nothing can serve the
+  // scope, while `b` serves it perfectly well. Not measured is not the same as
+  // measured and none, and every other scalar on this band already says so.
+  assert.equal(wild.band.candidates, null,
+    'a suppressed entry counts a fleet nobody measured');
+  assert.equal(wild.target, null);
+  assert.equal(wild.pick.account, null);
+  assert.deepEqual(wild.band.admitted, []);
+  assert.deepEqual(wild.band.ladder, []);
+  assert.deepEqual(wild.band.excluded, []);
+
   const lines = renderStatus(status, { color: false, now }).split('\n');
   const rendered = lines.join('\n');
   // It surfaces on the `Other scopes` line, because a scope that decided
