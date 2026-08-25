@@ -445,23 +445,22 @@ const M = [
     '    return now - pin.at <= this.activeTtlMs;\n', 'src/session-tracker.js'],
   ['loadFor           hold never released', HOLD_RELEASE, '', 'src/session-tracker.js'],
   ['loadFor           lost hold never drained', HOLD_DRAIN, '', 'src/session-tracker.js'],
-  // Hold OWNERSHIP, both ends. A record can be evicted while its request is in
-  // flight, so a hold outlives the record that issued it; without these a stale
-  // release drains a live replacement and a stale claim adds a phantom count to
-  // it. Three rows, because the guard exists at three reachable points and one
-  // guarded entrance is not a guarded room.
+  // Hold OWNERSHIP. A record can be evicted while its request is in flight, so
+  // a hold outlives the record that issued it; without this a stale release
+  // drains a live replacement.
   ['loadFor           stale hold ends a stranger\'s request', HOLD_OWNER_END, '',
     'src/session-tracker.js'],
-  // NO ROW for the same test inside `_releaseHold`. It is an equivalent mutant:
-  // both callers are safe by construction — `endRequest` has already returned on
-  // a foreign hold, and the zero-count drain iterates `s.holds`, which contains
-  // only this record's own — so nothing can kill it and it printed SURVIVES on
-  // every run. Registered in RESIDUALS as TC-005 with the condition that makes
-  // it observable again, rather than carried here as a row that measures
-  // nothing. The guard itself stays: it is a precondition on a private helper.
-  ['loadFor           stale hold claims a stranger\'s pin', HOLD_CLAIM,
-    '        if (hold && s.holds.has(hold) && !hold.buckets.has(bucket)) {\n',
-    'src/session-tracker.js'],
+  // NO ROW for the same test inside `_releaseHold`, and SINCE THIS CYCLE none
+  // for it at the claim boundary either. Both are equivalent mutants by one
+  // argument: `s.holds` has exactly one insertion site, `beginRequest`, which
+  // stamps the record's own rid, so membership in that set already implies
+  // ownership. The release side was always so; the claim side became so when
+  // the released-hold test was added beside it, and the seam is what noticed —
+  // the row went from dying to SURVIVES on the first run after that change,
+  // which is the intended way to learn that a row has stopped measuring.
+  // Registered in RESIDUALS as TC-005, with the tripwire that restores both: a
+  // SECOND insertion site into any record's `holds`. Both guards stay in
+  // source; they are preconditions, not dead code.
   // The released-hold test, which is a SEPARATE condition on the same line: a
   // hold whose release already ran can claim a bucket again, and no release
   // will ever follow, so the pin reads as held for the life of the record. The
