@@ -1740,14 +1740,23 @@ export class AccountManager {
       // number is worse than a stated absence, and the round-4 fix at the root
       // (a route's sample becoming a resolvable id) changes the basis anyway.
       //
-      // Keyed on `_representativeCaptured`, the same predicate `familySplit`
-      // asks, so the disclosure and the suppression cannot disagree.
+      // CAPTURE IS NOT ENOUGH ON ITS OWN, and this is where that was learned.
+      // Keying only on `_representativeCaptured` suppressed entries whose
+      // figures were correct: a route that LISTS its accounts never consults the
+      // id, and a fleet declaring no `models` grades identically for any id. So
+      // the condition is `_captureDistortsFigures`, which asks whether the
+      // representative can move a figure and not merely whether it is somebody
+      // else's. The disclosure still fires on capture alone — being named for an
+      // id you never receive is worth saying whether or not it changes a number,
+      // and the two questions share their first conjunct so they cannot disagree
+      // about whether a capture happened.
+      //
       // ONE COMPUTATION FOR BOTH RETURNS. The scope's governing bucket is the
       // same question whether or not the figures are published, and writing it
       // twice gave the mutation table two identical anchors — a row that then
       // mutates whichever it finds first and reports on the other.
       const bucket = this._weeklyBucketFor(model, scopeRoute ?? this._routeForModel(model));
-      if (this._representativeCaptured(model, scopeRoute)) {
+      if (this._captureDistortsFigures(model, scopeRoute)) {
         return {
           scope,
           route,
@@ -1956,19 +1965,72 @@ export class AccountManager {
   /**
    * Is the id this entry is NAMED FOR taken by a route ahead of it?
    *
-   * ONE PREDICATE, TWO CONSUMERS, and that is the point of it existing. The
-   * disclosure (`familySplit`) and the suppression of per-account figures are
-   * the same determination: an entry named for a captured id is speaking under
-   * a name it never receives, so its figures are computed for the wrong id and
-   * its disclosure must say so. Written twice they would drift, and the drift
-   * would be an entry that discloses the capture and publishes figures anyway —
-   * which is precisely what it did before.
+   * THE DISCLOSURE'S QUESTION, and the first of the three the suppression asks.
+   * `familySplit` says "an earlier route" on exactly this determination, and
+   * `_captureDistortsFigures` starts from it rather than restating it, so an
+   * entry cannot disclose the capture while the suppression disagrees that
+   * there was one.
+   *
+   * Capture alone does NOT mean the figures are wrong — see
+   * `_captureDistortsFigures` for the two further conditions and why each is
+   * needed. Being named for somebody else's id is worth disclosing whether or
+   * not it changes a number.
    *
    * Identity, not name: route names are not unique.
    */
   _representativeCaptured(model, route) {
     const owner = this._routeForModel(model);
     return Boolean(route && owner && owner.match !== route.match);
+  }
+
+  /**
+   * Does the representative's identity actually change which accounts qualify?
+   *
+   * ASKED THROUGH THE MECHANISM, not beside it. `_accountOwnsModel` is the only
+   * function by which a model id reaches a per-account figure, so this asks it
+   * directly instead of re-deriving what a `models` claim means. A second copy
+   * of that rule is a second thing to rot, and the entry it would misgrade is
+   * the one nobody is looking at.
+   *
+   * It is constant-true in two directions at once, which is why the question is
+   * "is anyone DENIED" rather than "does anyone claim": with nobody claiming the
+   * id every account passes, and with everybody claiming it every account passes
+   * too. A claim held by all separates nobody.
+   */
+  _ownershipDiscriminates(model) {
+    return this.accounts.some(a => !this._accountOwnsModel(a, model));
+  }
+
+  /**
+   * Would publishing per-account figures for this entry answer about an id the
+   * route never receives — AND get a different answer for having done so?
+   *
+   * THREE CONJUNCTS, because capture alone suppressed entries whose figures were
+   * right. Each one is here because removing it re-admits a measured case:
+   *
+   *   1. THE REPRESENTATIVE IS CAPTURED. Without this there is no wrong id in
+   *      play at all; the entry is named for something it receives.
+   *   2. THE ROUTE LISTS NO ACCOUNTS. With a list, `_routeAllows` returns
+   *      membership of that list and never consults the id, so the figures are
+   *      the route's own however the entry is named. The round tested this
+   *      contract directly, and suppressing it reversed a decided answer.
+   *   3. OWNERSHIP DISCRIMINATES. With the list empty the id reaches
+   *      `_accountOwnsModel`, but that is constant-true unless some account is
+   *      denied — so on a fleet declaring no `models` at all, the captured id
+   *      grades the fleet exactly as any served id would.
+   *
+   * WHAT THIS IS AND IS NOT. It is the condition under which the identity of the
+   * representative CAN move a published figure, computed without a census of the
+   * ids the route receives. It is not a proof that some figure does move: an
+   * entry can pass all three and still coincide with what a served id would have
+   * produced. Deciding that needs the id census this round measured unsafe
+   * twice, so the residual is a narrow over-suppression, disclosed rather than
+   * closed — and it errs toward absence-with-a-reason over a wrong number.
+   */
+  _captureDistortsFigures(model, route) {
+    return this._representativeCaptured(model, route)
+      && route.accounts.length === 0
+      && this._ownershipDiscriminates(model);
   }
 
   /**

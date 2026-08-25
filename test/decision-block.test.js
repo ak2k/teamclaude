@@ -835,10 +835,20 @@ test('a captured scope says why it has no figures rather than counting to zero',
   // Expiry routing ON and a third account, so SOME scope decides something and
   // the block renders at all — a fleet where every scope is passthrough
   // collapses to the one-row form and this line never appears.
-  const am = new AccountManager(['a', 'b', 'c'].map(acct), 0.98, {
+  //
+  // THE FIXTURE HAS TO EARN THE SUPPRESSION, and all three conditions are here
+  // deliberately: `wild`'s representative is captured by `exact`, `wild` lists
+  // NO accounts so the id reaches the ownership question at all, and the
+  // `models` claims below make that question discriminate. Drop any one and the
+  // entry publishes ordinary figures — which is the whole correction this
+  // fixture exists downstream of, since it originally listed its accounts and
+  // was suppressed anyway.
+  const accounts = ['a', 'b', 'c'].map(acct);
+  accounts[0].models = ['claude-fable-5'];
+  const am = new AccountManager(accounts, 0.98, {
     expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 },
     routes: [{ name: 'exact', match: ['claude-fable-5'], accounts: ['a', 'c'] },
-      { name: 'wild', match: ['*fable*'], accounts: ['b'] }],
+      { name: 'wild', match: ['*fable*'], accounts: [] }],
   });
   am.accounts.forEach((x, i) => {
     x.quota = { ...x.quota, unified5h: 0.05 + i * 0.05, unified5hReset: now + 2 * H,
