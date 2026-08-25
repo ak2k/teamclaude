@@ -423,3 +423,36 @@ test('a released hold cannot claim a bucket again', () => {
   assert.equal(s.pinHolds.get('unified7dFable'), undefined,
     'a released hold claimed a bucket nothing can ever release');
 });
+
+// WHY THE CLAIM CARRIES TWO CONDITIONS THAT CANNOT BE TOLD APART. `holds` is
+// per record and `beginRequest` is the only thing that adds to it, stamping the
+// record's own `rid` on the way in. So membership in `holds` IMPLIES a matching
+// rid, and severing the rid test alone at the claim changes no behaviour: the
+// reversion matrix reports it as covered by nothing, correctly. The rid test
+// stays because the two answer different questions if `holds` handling ever
+// changes, and the implication is asserted here so that "redundant" is a
+// property this suite holds rather than a claim in a comment.
+//
+// Ported from the S4b slice at a6f67b7 (test/per-pin-holds.test.js), where the
+// same argument was reached from the other direction: that matrix carries a
+// documented NON-row for the claim-boundary rid test, measured green at
+// 699/699, beside this test binding the implication it rests on. TC-005 records
+// the equivalence for both boundaries; this is what keeps it from being prose.
+test('every outstanding hold carries the rid of the record holding it', () => {
+  const { clock, now } = fixedClock();
+  const st = new SessionTracker({ now });
+  const a = st.beginRequest('s1', clock.t);
+  const b = st.beginRequest('s1', clock.t);
+  st.beginRequest('s2', clock.t);
+  // A dropped record and its replacement, so two rids are live in the tracker.
+  st.sessions.delete('s2');
+  st.beginRequest('s2', clock.t);
+
+  for (const [id, rec] of st.sessions) {
+    for (const hold of rec.holds) {
+      assert.equal(hold.rid, rec.rid, `a hold in ${id}'s set carries a foreign rid`);
+    }
+  }
+  assert.equal(a.rid, b.rid, 'two requests on one record share its rid');
+  assert.ok(st.sessions.get('s1').holds.has(a));
+});

@@ -232,6 +232,10 @@ const HOLD_DRAIN = '      for (const h of [...s.holds]) this._releaseHold(s, h);
 // two-term shape would silently drop the new term as well, so the row would
 // pass while measuring an intervention its name does not describe.
 const HOLD_CLAIM = '        if (hold && hold.rid === s.rid && s.holds.has(hold) && !hold.buckets.has(bucket)) {\n';
+// The rid stamp itself. Ported with the invariant test it kills: the two rows
+// withdrawn above rest on "membership in `holds` implies the record's rid",
+// and severing the stamp is the observable half of that claim.
+const RID_STAMP = '    const hold = { rid: s.rid, buckets: new Set() };\n';
 const HOLD_OWNER_END = '    if (hold && hold.rid !== s.rid) return null;\n';
 // Re-anchored when the gate began naming the bucket its figure came from. The
 // maximum is now spelled as a comparison that carries the winner out, so the
@@ -461,6 +465,17 @@ const M = [
   // Registered in RESIDUALS as TC-005, with the tripwire that restores both: a
   // SECOND insertion site into any record's `holds`. Both guards stay in
   // source; they are preconditions, not dead code.
+  //
+  // AND THE IMPLICATION IS NOW BOUND rather than argued. "Membership implies
+  // the rid" was the whole case for withdrawing those rows, and nothing tested
+  // it — "cannot break today" and "we would notice if it did" are different
+  // claims. `every outstanding hold carries the rid of the record holding it`
+  // in test/session-tracker.test.js asserts it directly, and the row below severs
+  // the stamp that makes it true, so the property has a killer of its own.
+  // Both halves ported from the S4b slice at a6f67b7, which reached the same
+  // pairing from the other direction.
+  ['loadFor           beginRequest stamps a constant rid', RID_STAMP,
+    '    const hold = { rid: 1, buckets: new Set() };\n', 'src/session-tracker.js'],
   // The released-hold test, which is a SEPARATE condition on the same line: a
   // hold whose release already ran can claim a bucket again, and no release
   // will ever follow, so the pin reads as held for the life of the record. The
