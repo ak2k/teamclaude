@@ -146,7 +146,8 @@ export function pressureRank(pressure) {
  * generalises the reset tiebreak rather than reversing it, and `reset` stays
  * behind it to settle exact pressure ties.
  *
- * @type {{ term: PickTerm, of: (a: PickAccount) => number }[]}
+ * @type {{ term: PickTerm, of: (a: PickAccount) => number,
+ *          applies?: (a: PickAccount, b: PickAccount) => boolean }[]}
  */
 // `applies` makes a term PAIRWISE conditional. Only `load` has one: it needs a
 // measurement on BOTH sides to mean anything, and an absent measurement makes
