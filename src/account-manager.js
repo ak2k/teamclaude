@@ -1874,10 +1874,11 @@ export class AccountManager {
    * splits it: two ids, two accounts, and one entry advertising the first as
    * the answer for both.
    *
-   * A claim splits the family when it reaches into it without covering it.
+   * Something splits the family when it reaches into it without covering it,
+   * and TWO THINGS CAN: a route ahead of this one, or an account's claim.
    * Where the family has no pattern of its own — the shared bucket, which is
    * the fallback for everything not metered separately — this cannot be
-   * decided and answers false, which discloses nothing rather than guessing.
+   * decided and answers null, which discloses nothing rather than guessing.
    */
   _familySplit(model, route = undefined, glob = null) {
     // THE REPRESENTATIVE IS NOT ALWAYS OURS. An earlier route can take the very
@@ -1887,6 +1888,13 @@ export class AccountManager {
     // statement: not "some ids go elsewhere" but "this one does".
     const owner = this._routeForModel(model);
     if (route && owner && owner.match !== route.match) return 'an earlier route';
+    // A SCOPE OF ONE ID CANNOT BE DIVIDED. An exact `claude-fable-5` route
+    // carries that id and nothing else, so its destination is right for its
+    // entire scope however the rest of the family is served. Measured against
+    // the family's `*fable*` instead, a sibling's `claude-fable-4` claim read
+    // as a split — a warning on the one scope shape that cannot have the
+    // defect. The check above still covers the id going elsewhere itself.
+    if (glob && !glob.includes('*')) return null;
     // A family with no pattern of its own — the shared bucket, the fallback for
     // everything not metered separately — is still divisible; it is only
     // uncharacterisable BY FAMILY. The scope's own glob is what its ids have in
@@ -1894,9 +1902,17 @@ export class AccountManager {
     // reads exactly as a Fable one does.
     const scopeGlob = familyGlobFor(model) ?? glob;
     if (!scopeGlob) return null;
-    const divided = this.accounts.some(a => (a.models || []).some(
-      claim => modelGlobOverlaps(claim, scopeGlob) && !globCovers(claim, scopeGlob)));
-    return divided ? 'model claims' : null;
+    const reaches = g => modelGlobOverlaps(g, scopeGlob) && !globCovers(g, scopeGlob);
+    // ONE PREDICATE, TWO ACTORS. Reaching in without covering divides the
+    // family whoever does it, and an earlier route does it invisibly to the
+    // check above: an exact route ahead of this one takes a SIBLING id, the
+    // representative still resolves here, and the family is served from two
+    // places with one entry speaking for both. Routes match in order, so only
+    // the ones ahead of this one can have taken anything.
+    const idx = route ? this.routes.indexOf(route) : -1;
+    const before = idx > 0 ? this.routes.slice(0, idx) : [];
+    if (before.some(r => r.match.some(reaches))) return 'an earlier route';
+    return this.accounts.some(a => (a.models || []).some(reaches)) ? 'model claims' : null;
   }
 
   /** The name of the account a request for `model` would land on right now, or

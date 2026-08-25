@@ -605,6 +605,67 @@ test('an entry says WHY its representative may not answer for the scope', () => 
     'claims that cannot reach this family are reported as dividing it');
 });
 
+// THE SYMMETRY SET FOR CAPTURE is which id an earlier route took: the
+// representative, or a SIBLING of it. The first was fixed in pass 8 by asking
+// where the representative resolves, and that question cannot see the second —
+// the representative still resolves here, so the entry answered for a family it
+// shares with a route ahead of it and said nothing. The symmetry set for
+// division is positive and negative: a split reported where there is one, and
+// none reported where the scope cannot have one.
+test('an earlier route splits the family whichever id it took, and one id is never split', () => {
+  const now = Date.now();
+  const withClaims = (name, models) => ({ name, type: 'apikey', apiKey: `k-${name}`, models });
+  const fill = (am) => {
+    am.accounts.forEach((a, i) => {
+      a.quota = { ...a.quota, unified5h: 0.05 + i * 0.05, unified5hReset: now + 2 * H,
+        unified7d: 0.2 + i * 0.1, unified7dReset: now + (20 + i * 10) * H,
+        unified7dFable: 0.1 + i * 0.2, unified7dFableReset: now + (20 + i * 10) * H };
+    });
+    return am;
+  };
+  const mk = (accounts, routes) => fill(new AccountManager(accounts, 0.98, {
+    expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 }, routes }));
+
+  // 1. A SIBLING id taken earlier. `claude-fable-4` is not the representative,
+  //    so where the representative resolves is no evidence at all.
+  const siblingRoutes = [{ name: 'sibling', match: ['claude-fable-4'], accounts: ['a'] },
+    { name: 'wild', match: ['*fable*'], accounts: ['b'] }];
+  const wild = mk([acct('a'), acct('b')], siblingRoutes)
+    .getStatus().routing.find(e => e.route === 'wild');
+  const four = mk([acct('a'), acct('b')], siblingRoutes)
+    .getActiveAccount(null, 'claude-fable-4', null, null, {});
+  assert.equal(wild.model, 'claude-fable-5', 'the premise: the entry is named by an id it does own');
+  assert.equal(wild.target, 'b', 'the premise: its own traffic goes here');
+  assert.equal(four.name, 'a', 'the premise: a sibling of the family is served elsewhere');
+  assert.equal(wild.familySplit, 'an earlier route',
+    'the entry answers for a family it shares with a route ahead of it');
+
+  // 2. The negative pole for capture: an earlier route that cannot reach this
+  //    family divides nothing, so the disclosure is not blanket.
+  const apart = mk([acct('a'), acct('b')],
+    [{ name: 'other', match: ['*opus*'], accounts: ['a'] },
+      { name: 'wild', match: ['*fable*'], accounts: ['b'] }])
+    .getStatus().routing.find(e => e.route === 'wild');
+  assert.equal(apart.familySplit, null, 'a route ahead that shares no id takes nothing');
+
+  // 3. A SCOPE OF ONE ID CANNOT BE DIVIDED, and reported that it was: measured
+  //    against the family's `*fable*`, a sibling's claim looked like a split of
+  //    a scope the sibling never reaches.
+  const claims = [withClaims('a', ['claude-fable-5']), withClaims('b', ['claude-fable-4'])];
+  const exact = mk(claims, [{ name: 'exact', match: ['claude-fable-5'] }])
+    .getStatus().routing.find(e => e.route === 'exact');
+  assert.deepEqual(exact.match, ['claude-fable-5'], 'the premise: the scope is one id');
+  assert.equal(exact.familySplit, null, 'one id, one destination, nothing to divide');
+
+  // 4. The positive pole for division, on the same claims: a WILD scope over
+  //    that family is genuinely split by them, so the refusal above is about
+  //    the scope's shape and not about the claims.
+  const spread = mk(claims, [{ name: 'wild', match: ['*fable*'] }])
+    .getStatus().routing.find(e => e.route === 'wild');
+  assert.equal(spread.familySplit, 'model claims',
+    'the same claims still split a scope wide enough to be divided');
+});
+
 test('a route whose families are all captured earlier publishes no entry at all', () => {
   // Two states reached the same empty list and only one of them means "fall
   // back to the literal": a glob naming NO metered family is a shared-bucket
