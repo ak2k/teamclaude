@@ -606,8 +606,8 @@ export class AccountManager {
    * @param {number} now
    * @returns {import('./pick-decision.js').PickSnapshot}
    */
-  _pickSnapshot(candidates, model, now, { excludingSession = null } = {}) {
-    const pressures = this._pickPressures(candidates, model, now);
+  _pickSnapshot(candidates, model, now, { excludingSession = null, route = undefined } = {}) {
+    const pressures = this._pickPressures(candidates, model, now, route);
     return {
       accounts: candidates.map((a, i) => {
         // `excludingSession` is the eviction a NEW session would cause, which
@@ -625,7 +625,7 @@ export class AccountManager {
           sessions: measured.sessions,
           inFlight: a.inFlight || 0,
           pressure: pressures[i],
-          reset: this._governingWeeklyReset(a, model) || -Infinity,
+          reset: this._governingWeeklyReset(a, model, route) || -Infinity,
         };
       }),
     };
@@ -647,11 +647,11 @@ export class AccountManager {
    * @param {number} now
    * @returns {import('./pick-decision.js').PickPressure[]}
    */
-  _pickPressures(candidates, model, now) {
+  _pickPressures(candidates, model, now, route = undefined) {
     if (!this.expiryRouting.enabled) {
       return candidates.map(() => ({ kind: 'absent', reason: 'expiry-routing-off' }));
     }
-    return this._bandSnapshot(candidates, model, now).accounts.map(a => pressureOf(a, now));
+    return this._bandSnapshot(candidates, model, now, route).accounts.map(a => pressureOf(a, now));
   }
 
   /** Record that a session's request was served by an account (always on, even
@@ -919,8 +919,8 @@ export class AccountManager {
    * that bucket reports none. Used to spend the soonest-expiring quota first;
    * unknown sorts first, so an account whose governing window is unreported is
    * probed rather than ranked on a window that is not its own. */
-  _governingWeeklyReset(account, model) {
-    return account.quota[`${this._governingBucket(account, model)}Reset`] || null;
+  _governingWeeklyReset(account, model, route = undefined) {
+    return account.quota[`${this._governingBucket(account, model, route)}Reset`] || null;
   }
 
   /** True when the family-specific weekly bucket that governs `model` is spent.
@@ -1267,7 +1267,7 @@ export class AccountManager {
     const fleet = opts.fleet || this.accounts;
     return this._topPressureBand(
       fleet.filter(a => !exclude?.has(a.index) && this._isAvailable(a, model, advisorModel, opts)),
-      model, opts.now);
+      model, opts.now, opts.route);
   }
 
   /**
@@ -1312,13 +1312,13 @@ export class AccountManager {
    * best pressure", it does not mean that. Rank pressure, or state why
    * admission alone is the property you need.
    */
-  _topPressureBand(candidates, model = null, now = Date.now()) {
+  _topPressureBand(candidates, model = null, now = Date.now(), route = undefined) {
     // One clock for the whole band: pressure rises continuously as a window
     // nears its reset, so scoring accounts at different instants would break an
     // exact tie on the microseconds between two Date.now() reads. Read once
     // here — or handed in by an observation, whose instant this must share —
     // and passed to the decision, which never reads a clock of its own.
-    const decision = decideBand(this._bandSnapshot(candidates, model, now));
+    const decision = decideBand(this._bandSnapshot(candidates, model, now, route));
     return this._applyBand(decision, candidates);
   }
 
@@ -1371,7 +1371,7 @@ export class AccountManager {
    * @param {number} now
    * @returns {import('./band-decision.js').BandSnapshot}
    */
-  _bandSnapshot(candidates, model, now) {
+  _bandSnapshot(candidates, model, now, route = undefined) {
     return {
       now,
       enabled: !!this.expiryRouting.enabled,
@@ -1379,7 +1379,7 @@ export class AccountManager {
       switchThreshold: this.switchThreshold,
       coverage: this.expiryRouting.coverage,
       accounts: candidates.map(a => {
-        const key = this._governingBucket(a, model);
+        const key = this._governingBucket(a, model, route);
         const used = a.quota[key];
         const reset = a.quota[`${key}Reset`];
         // `unified5h` is read by its own name rather than through
@@ -1725,7 +1725,7 @@ export class AccountManager {
         account, why: this._availability(account, model, null, opts),
       }));
       const candidates = verdicts.filter(v => v.why === null).map(v => v.account);
-      const explained = explainBand(this._bandSnapshot(candidates, model, now));
+      const explained = explainBand(this._bandSnapshot(candidates, model, now, scopeRoute));
       // The SAME projection selection applies, not a copy of it. The report
       // describing a candidate set selection would not have used is the failure
       // this shares a method to make unconstructible.
@@ -1736,7 +1736,8 @@ export class AccountManager {
       // a prediction the request destroys on its way to being served. Null
       // below the cap, where admitting a session costs nothing.
       const evicted = this.sessionTracker.victimForNewSession();
-      const pickSnapshot = this._pickSnapshot(banded, model, now, { excludingSession: evicted });
+      const pickSnapshot = this._pickSnapshot(banded, model, now,
+        { excludingSession: evicted, route: scopeRoute });
       const pick = decidePick(pickSnapshot);
       const nameOf = index => observed.accounts[index]?.name ?? null;
 
@@ -2324,7 +2325,7 @@ export class AccountManager {
     // Date.now() reads. An observation hands in its own instant, which is the
     // one its projection was taken at.
     const now = opts.now ?? Date.now();
-    const pressures = this._pickPressures(candidates, model, now);
+    const pressures = this._pickPressures(candidates, model, now, opts.route);
     candidates.forEach((account, i) => {
       const priority = account.priority || 0;
       const pressure = pressureRank(pressures[i]);
@@ -2332,7 +2333,7 @@ export class AccountManager {
       // Sonnet have their own), so a Fable request spends the account whose Fable
       // window refreshes soonest while preserving accounts that reset later for
       // Opus/Sonnet. Unknown reset sorts first so we probe and fill it in.
-      const weeklyReset = this._governingWeeklyReset(account, model) || -Infinity;
+      const weeklyReset = this._governingWeeklyReset(account, model, opts.route) || -Infinity;
       if (priority < bestPriority
           || (priority === bestPriority && pressure < bestPressure)
           || (priority === bestPriority && pressure === bestPressure && weeklyReset < bestReset)) {
@@ -2420,7 +2421,9 @@ export class AccountManager {
       if (account.disabled || account.status === 'error') continue;
       // A routed/owned model must not fall back to an ineligible account —
       // neither the executor's nor an advisor's.
-      if (model && !this._routeAllows(account, model)) continue;
+      // The entry's route for the EXECUTOR's model; the advisor's is its own,
+      // as in `_availability`.
+      if (model && !this._routeAllows(account, model, opts.route ?? this._routeForModel(model))) continue;
       if (advisorModel && !this._routeAllows(account, advisorModel)) continue;
       const resetTime = account.rateLimitedUntil
         || account.quota.unified5hReset

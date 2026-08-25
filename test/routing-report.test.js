@@ -386,6 +386,172 @@ test('every figure on an entry is its own route\'s, not the representative\'s ow
   assert.equal(exact.target, 'a');
 });
 
+// THE ROUTE HAS TO REACH RANKING, not only the fields that name things. The
+// first threading carried it to the bucket, the pin, the account allowance and
+// the preview, and stopped: `_bandSnapshot` still resolved each account's
+// governing window from the model id, so a shadowed Fable route RANKED its
+// candidates on the earlier route's Sonnet override while every label on the
+// entry said Fable.
+//
+// Measured at c97a4ec before this fix, on the fixture below: the entry's bucket
+// and every ladder row read `unified7dFable`, the band admitted `sonnet-best`,
+// the pick named `sonnet-best` — and `target` said `fable-best`, because the
+// preview WAS threaded. The entry contradicted itself and the suite was green.
+//
+// A correct label on a wrong computation is the shape this round exists to
+// remove, and it survived because the label and the computation live in
+// different functions.
+test('the band ranks on the window this route governs, not its representative owner\'s', () => {
+  const now = Date.now();
+  const am = fleet({
+    accounts: ['fable-best', 'sonnet-best'],
+    expiryRouting: { enabled: true, coverage: 0.5, tolerance: 1.5 },
+    routes: [
+      { name: 'exact', match: ['claude-fable-5'], bucket: 'unified7dSonnet' },
+      { name: 'wild', match: ['*fable*'] },
+    ],
+  });
+  // The two windows rank the fleet OPPOSITE ways, so which one the band reads
+  // decides the admitted set and the destination. Without that, both readings
+  // agree and the arm grades nothing.
+  quota(am, 0, {
+    unified5h: 0.05, unified7d: 0.5, unified7dReset: now + 300 * H,
+    unified7dFable: 0.1, unified7dFableReset: now + 20 * H,
+    unified7dSonnet: 0.9, unified7dSonnetReset: now + 400 * H,
+  });
+  quota(am, 1, {
+    unified5h: 0.05, unified7d: 0.5, unified7dReset: now + 300 * H,
+    unified7dFable: 0.9, unified7dFableReset: now + 400 * H,
+    unified7dSonnet: 0.1, unified7dSonnetReset: now + 20 * H,
+  });
+
+  // Premises: the representative really is shadowed by a route with a bucket
+  // override, and the two windows really do disagree about the ranking.
+  assert.equal(am._routeForModel('claude-fable-5').name, 'exact');
+  assert.equal(am._routeForModel('claude-fable-5').bucket, 'unified7dSonnet');
+
+  const wild = am.getStatus().routing.find(e => e.route === 'wild');
+  assert.equal(wild.bucket, 'unified7dFable');
+  assert.deepEqual(wild.band.ladder.map(r => r.account), ['fable-best', 'sonnet-best'],
+    'the ladder is ordered by the other route\'s window');
+  assert.deepEqual(wild.band.admitted, ['fable-best'],
+    'the band admitted the account that wins on a window this route does not govern');
+  assert.equal(wild.pick.account, 'fable-best');
+  // And the entry agrees with itself: pick and target named different accounts
+  // when the two were computed against different windows.
+  assert.equal(wild.pick.account, wild.target,
+    'the pick and the destination on one entry disagree, so one of them is computed elsewhere');
+});
+
+// THREE MORE SITES THE FIRST ARM DOES NOT REACH, each found by mutating the
+// threading and watching the suite stay green. The ladder test above covers the
+// report's own snapshot; these cover the preview's band, the pick's final
+// tiebreak, and the last resort — every remaining place the route decides
+// something and used to be resolved from the model id.
+test('the preview bands on this route\'s window, so the destination follows it', () => {
+  const now = Date.now();
+  const am = fleet({
+    accounts: ['idle', 'fable-best', 'sonnet-best'],
+    expiryRouting: { enabled: true, coverage: 0.5, tolerance: 1.5 },
+    routes: [
+      { name: 'exact', match: ['claude-fable-5'], bucket: 'unified7dSonnet' },
+      { name: 'wild', match: ['*fable*'] },
+    ],
+  });
+  // The current account is out of the way, so the destination comes from the
+  // band rather than from the sticky walk — with it eligible, the preview
+  // returns it whatever the band decided and this arm grades nothing.
+  am.accounts[0].disabled = true;
+  quota(am, 0, { unified5h: 0.05, unified7d: 0.5, unified7dReset: now + 500 * H });
+  quota(am, 1, {
+    unified5h: 0.05, unified7d: 0.5, unified7dReset: now + 300 * H,
+    unified7dFable: 0.1, unified7dFableReset: now + 20 * H,
+    unified7dSonnet: 0.9, unified7dSonnetReset: now + 400 * H,
+  });
+  quota(am, 2, {
+    unified5h: 0.05, unified7d: 0.5, unified7dReset: now + 300 * H,
+    unified7dFable: 0.9, unified7dFableReset: now + 400 * H,
+    unified7dSonnet: 0.1, unified7dSonnetReset: now + 20 * H,
+  });
+
+  const wild = am.getStatus().routing.find(e => e.route === 'wild');
+  assert.equal(wild.target, 'fable-best',
+    'the destination was banded on the window the other route governs');
+});
+
+test('the final tiebreak reads the reset of THIS route\'s window', () => {
+  const now = Date.now();
+  const am = fleet({
+    // Three, not two: the preview returns an eligible CURRENT account without
+    // ranking, so with only the tied pair the destination never reaches the
+    // tiebreak and the `target` assertion below grades nothing. Measured — the
+    // mutation that reads the wrong window in `_pickBestAvailable` survived
+    // until this account existed.
+    accounts: ['idle', 'soon', 'late'],
+    expiryRouting: { enabled: true, coverage: 5, tolerance: 1.5 },
+    routes: [
+      { name: 'exact', match: ['claude-fable-5'], bucket: 'unified7dSonnet' },
+      { name: 'wild', match: ['*fable*'] },
+    ],
+  });
+  // Equal PRESSURE on the Fable window — (1-u)/seconds identical — so the pick
+  // falls through to its last term, the governing window's reset. The Sonnet
+  // window orders the two resets the OPPOSITE way, which is what makes the
+  // arm able to tell the windows apart: my first version had both windows
+  // ordering them the same, so reading the wrong one landed on the same
+  // answer and the mutation survived.
+  am.accounts[0].disabled = true;
+  quota(am, 0, { unified5h: 0.05, unified7d: 0.5, unified7dReset: now + 500 * H });
+  quota(am, 1, {
+    unified5h: 0.05, unified7d: 0.5, unified7dReset: now + 300 * H,
+    unified7dFable: 0.5, unified7dFableReset: now + 10 * H,
+    unified7dSonnet: 0.5, unified7dSonnetReset: now + 20 * H,
+  });
+  quota(am, 2, {
+    unified5h: 0.05, unified7d: 0.5, unified7dReset: now + 300 * H,
+    unified7dFable: 0.75, unified7dFableReset: now + 5 * H,
+    unified7dSonnet: 0.5, unified7dSonnetReset: now + 400 * H,
+  });
+
+  const wild = am.getStatus().routing.find(e => e.route === 'wild');
+  const [first, second] = wild.band.ladder.filter(r => r.pressure.kind === 'known');
+  assert.equal(first.pressure.kind, 'known');
+  assert.ok(Math.abs(first.pressure.value - second.pressure.value) < 1e-12,
+    'the premise: the two accounts must TIE on pressure, or the reset never decides');
+  assert.equal(wild.pick.account, 'late',
+    'the report\'s tiebreak read a reset from the window the other route governs');
+  assert.equal(wild.target, 'late',
+    'the preview\'s tiebreak read a reset from the window the other route governs');
+});
+
+test('the last resort reopens an account THIS route allows', () => {
+  const now = Date.now();
+  const secs = ms => String(Math.floor(ms / 1000));
+  const am = fleet({
+    accounts: ['exact-only', 'wild-only'],
+    routes: [
+      { name: 'exact', match: ['claude-fable-5'], accounts: ['exact-only'] },
+      { name: 'wild', match: ['*fable*'], accounts: ['wild-only'] },
+    ],
+  });
+  // Both barred, both carrying a five-hour reset that has already passed with no
+  // utilization beside it — the reachable last-resort state.
+  for (const i of [0, 1]) {
+    am.updateQuota(i, {
+      'anthropic-ratelimit-unified-5h-reset': secs(now - 30 * 60e3),
+      'anthropic-ratelimit-unified-7d_oi-utilization': '0.995',
+      'anthropic-ratelimit-unified-7d_oi-reset': secs(now + 100 * H),
+      'anthropic-ratelimit-unified-7d-utilization': '0.995',
+      'anthropic-ratelimit-unified-7d-reset': secs(now + 100 * H),
+    });
+  }
+
+  const wild = am.getStatus().routing.find(e => e.route === 'wild');
+  assert.equal(wild.band.candidates, 0, 'the premise: nothing is eligible, so the last resort answers');
+  assert.equal(wild.target, 'wild-only',
+    'the last resort reopened an account this route cannot use');
+});
+
 test('a route whose families are all captured earlier publishes no entry at all', () => {
   // Two states reached the same empty list and only one of them means "fall
   // back to the literal": a glob naming NO metered family is a shared-bucket
