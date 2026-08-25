@@ -395,3 +395,31 @@ test('the load metric counts only sessions that are still active', () => {
   clock.t += SESSION_ACTIVE_TTL_MS + 1;
   assert.equal(st.activeCountFor(1, clock.t), 0, 'a session idle past the active window still counts as load');
 });
+
+// THE CLAIM BOUNDARY, ported with the guard from the reviewed slice
+// (upstream/load-weighted-selection 530d16b). A hold that has already been
+// RELEASED must not be able to claim a bucket again: the release path removed it
+// from `holds` and would refuse it a second time, so the claim would never be
+// released and the pin would read as held for the life of the record — the exact
+// failure the counter exists to prevent.
+//
+// Unreachable from production today, for the reason RESIDUALS TC-024 records:
+// `server.js` releases through one site with the hold it was given. This drives
+// the tracker directly, which is the only way to reach it, and says so rather
+// than implying the path is live.
+test('a released hold cannot claim a bucket again', () => {
+  const t = new SessionTracker();
+  const hold = t.beginRequest('s1');
+  t.touch('s1', 0, ['unified7d'], t._now(), hold);
+  const s = t.sessions.get('s1');
+  assert.equal(s.pinHolds.get('unified7d'), 1, 'the premise: the live hold did claim the bucket');
+
+  t.endRequest('s1', hold);
+  assert.equal(s.pinHolds.get('unified7d'), undefined, 'the premise: releasing gave the claim back');
+  assert.ok(!s.holds.has(hold), 'the premise: the hold is no longer the record\'s');
+
+  // The same hold, presented again after release, on a bucket it has not claimed.
+  t.touch('s1', 0, ['unified7dFable'], t._now(), hold);
+  assert.equal(s.pinHolds.get('unified7dFable'), undefined,
+    'a released hold claimed a bucket nothing can ever release');
+});

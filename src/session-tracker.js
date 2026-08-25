@@ -152,7 +152,25 @@ export class SessionTracker {
         // phantom claim on the way IN as well as a bad release on the way out:
         // a request whose record was evicted mid-flight would add a hold count
         // to whatever record now answers to its id.
-        if (hold && hold.rid === s.rid && !hold.buckets.has(bucket)) {
+      // The request placing this pin is the one spending it, so it takes a hold
+        // until it ends. Claimed here rather than at `beginRequest` because which
+        // bucket a request spends is not known until selection has run, and this
+        // is the call that says so. Claimed at most once per bucket per request:
+        // a retry that re-pins the same bucket is the same request still
+        // spending it.
+        //
+        // Same ownership test as the release, and the same OUTSTANDING test.
+        // Without the first the window admits a phantom claim on the way IN as
+        // well as a bad release on the way out: a request whose record was
+        // dropped mid-flight would add a hold count to whatever record now
+        // answers to its id. Without the second a hold that has already been
+        // released can claim a bucket again, and nothing will ever release that
+        // claim, because the release path removed the hold from `holds` and will
+        // refuse it a second time: the pin would read as held for the life of the
+        // record. Unreachable today for the same reason the release side is, and
+        // guarded for the same reason: it is one condition, and an unreleaseable
+        // claim is the exact failure this counter exists to prevent.
+        if (hold && hold.rid === s.rid && s.holds.has(hold) && !hold.buckets.has(bucket)) {
           hold.buckets.add(bucket);
           s.pinHolds.set(bucket, (s.pinHolds.get(bucket) || 0) + 1);
         }
