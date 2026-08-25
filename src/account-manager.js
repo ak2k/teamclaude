@@ -1773,7 +1773,7 @@ export class AccountManager {
         // representative taken by an earlier route. One field carrying its
         // reason rather than a boolean beside an explanation, so the two cannot
         // drift.
-        familySplit: this._familySplit(model, scopeRoute, match[0] ?? null),
+        familySplit: this._familySplit(model, scopeRoute, match[0] ?? null, autocreated),
         band: {
           kind: explained.decision.kind,
           reason: explained.decision.reason ?? null,
@@ -1892,7 +1892,7 @@ export class AccountManager {
    * the fallback for everything not metered separately — this cannot be
    * decided and answers null, which discloses nothing rather than guessing.
    */
-  _familySplit(model, route = undefined, glob = null) {
+  _familySplit(model, route = undefined, glob = null, autocreated = false) {
     // A SCOPE OF ONE ID CANNOT BE DIVIDED, and this guard has to sit ABOVE
     // EVERY ARM to say so. It was placed between them, so it protected the
     // claims arm and never the representative one, and a scope whose match is a
@@ -1928,8 +1928,16 @@ export class AccountManager {
     // representative still resolves here, and the family is served from two
     // places with one entry speaking for both. Routes match in order, so only
     // the ones ahead of this one can have taken anything.
+    // AN AUTOCREATED SCOPE HAS EVERY CONFIGURED ROUTE AHEAD OF IT. It exists
+    // only because none of them matched its representative, so it is last by
+    // construction — and reading its absent route as "nothing precedes this"
+    // made the walk unreachable for exactly the scopes with the most
+    // predecessors. With `claude-fable-4` configured to a spent account, the
+    // autocreated Fable entry named its own destination while that sibling id
+    // could not be served at all, and said nothing.
     const idx = route ? this.routes.indexOf(route) : -1;
-    const before = idx > 0 ? this.routes.slice(0, idx) : [];
+    const before = autocreated ? this.routes
+      : (idx > 0 ? this.routes.slice(0, idx) : []);
     if (before.some(r => r.match.some(reaches))) return 'an earlier route';
     // A ROUTE WITH AN EXPLICIT ACCOUNTS LIST PINS EVERY ID IT CARRIES, so no
     // account's `models` claim can divide it: `_routeAllows` decides first and

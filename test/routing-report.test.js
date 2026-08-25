@@ -790,6 +790,43 @@ test('a route the catch-all has already taken publishes nothing, family or not',
   }
 });
 
+// AN AUTOCREATED SCOPE IS LAST BY CONSTRUCTION — it exists only because no
+// configured route matched its representative — so every configured route is
+// ahead of it. It arrives with no route object of its own, and reading that as
+// "nothing precedes this" made the predecessor walk unreachable for exactly the
+// scopes with the most predecessors. Two reviewers confirmed the mechanism and
+// neither could make it show, because their fixtures had both ids landing on
+// the same account; what makes it show is the sibling being pinned somewhere it
+// cannot be served.
+test('an autocreated scope sees the configured routes ahead of it', () => {
+  const now = Date.now();
+  const routes = [{ name: 'four', match: ['claude-fable-4'], accounts: ['a'] }];
+  const build = () => {
+    const am = new AccountManager([acct('a'), acct('b'), acct('c')], 0.98, {
+      expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 }, routes });
+    const q = (i, fable) => {
+      am.accounts[i].quota = { ...am.accounts[i].quota,
+        unified5h: 0.05, unified5hReset: now + 2 * H,
+        unified7d: 0.2, unified7dReset: now + 40 * H,
+        unified7dFable: fable, unified7dFableReset: now + 40 * H };
+    };
+    q(0, 0.99);   // spent on Fable, and the only account the exact route may use
+    q(1, 0.5);
+    q(2, 0.02);
+    return am;
+  };
+  const entry = build().getStatus().routing.find(e => e.autocreated);
+  const five = build().getActiveAccount(null, 'claude-fable-5', null, null, {});
+  const four = build().getActiveAccount(null, 'claude-fable-4', null, null, {});
+
+  assert.equal(entry.model, 'claude-fable-5', 'the premise: the autocreated Fable scope is published');
+  assert.equal(five.name, 'c', 'the premise: the family goes to the best Fable account');
+  assert.equal(four, null,
+    'the premise: the sibling is pinned to a spent account and cannot be served at all');
+  assert.equal(entry.familySplit, 'an earlier route',
+    'the entry named its own destination for a family whose other id is served nowhere');
+});
+
 test('a route whose families are all captured earlier publishes no entry at all', () => {
   // Two states reached the same empty list and only one of them means "fall
   // back to the literal": a glob naming NO metered family is a shared-bucket
