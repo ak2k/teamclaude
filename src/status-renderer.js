@@ -591,7 +591,7 @@ function excludedRow(row, paint) {
 // that is a narrower ambiguity than the one it replaces, and it is the most a
 // consumer of this payload can do without an id on the entries.
 function suppressedScopesFor(route, routeIndex, routing) {
-  if (!Array.isArray(routing)) return { matched: false, any: false, all: false, published: [] };
+  if (!Array.isArray(routing)) return { matched: false, indexed: false, any: false, all: false, published: [], entries: [] };
   // THE JOIN IS BY POSITION, WHICH IS INJECTIVE. `(name, glob)` was not: route
   // names are not unique, so a later route sharing a name and a glob with an
   // earlier one imported the earlier one's entry — which both named an owner
@@ -612,7 +612,10 @@ function suppressedScopesFor(route, routeIndex, routing) {
     // A payload from this version always takes the branch overhead.
     : routing.filter(e => e && e.scope === 'route' && e.route === route.name
       && Array.isArray(e.match) && (route.match || []).includes(e.match[0]));
-  if (!mine.length) return { matched: false, any: false, all: false, published: [] };
+  // `indexed` RIDES OUT even when nothing matched, and that is the whole point:
+  // the caller has to know WHICH JOIN produced the emptiness before it can read
+  // emptiness as a fact about the route.
+  if (!mine.length) return { matched: false, indexed, any: false, all: false, published: [], entries: [] };
   const hit = mine.filter(e => e.figuresAbsent === 'representative-captured');
   return {
     // Whether this route has per-scope figures AT ALL. It is what decides where
@@ -620,6 +623,12 @@ function suppressedScopesFor(route, routeIndex, routing) {
     // question as `any`: a route with nothing suppressed still has published
     // scopes whose admissions are the only per-account figures anyone computed.
     matched: true,
+    indexed,
+    // EVERY entry this route owns, withheld ones included. NAMES come from the
+    // measured basis; DISCLOSURES come from the whole set, because a withheld
+    // scope IS ITSELF a basis gap and reading the flag only off the live scopes
+    // threw away the very entry that was telling us the basis was incomplete.
+    entries: mine,
     any: hit.length > 0,
     all: hit.length === mine.length,
     // The scopes that DID publish. A route with two globs can have one scope
@@ -695,9 +704,24 @@ export function routeNaming(route, routeIndex, routing, blocked = []) {
     //
     // This EXTENDS the honest-empty form rather than adding a regime: it is the
     // same "name nobody, say why" the captured and blocked cases already use.
+    // A DEAD VERDICT REQUIRES THE INJECTIVE JOIN TO HAVE POSITIVELY ESTABLISHED
+    // EMPTINESS. Absence from the LEGACY name+glob join is not evidence about
+    // the route — it is the join failing to see, and the two are not the same
+    // fact. This branch used to ask only whether SOME route entry existed
+    // anywhere in the payload, which is a payload-global question: on a rolling
+    // upgrade, where the server is older and its entries carry no `routeIndex`
+    // or `match`, every route matched nothing, another route's entry satisfied
+    // the global test, and the whole routing table declared itself dead while
+    // traffic flowed normally. Absence of evidence read as evidence of absence,
+    // on every route at once.
+    //
+    // So `indexed` gates it. Unindexed payload -> the configured list, which is
+    // the degradation this commit's predecessor already committed to in
+    // writing: a mis-join must fall back to the operator's own list, never to
+    // "receives nothing".
     const derivable = Array.isArray(routing)
       && routing.some(e => e && e.scope === 'route');
-    if (derivable && (route.match || []).length) {
+    if (suppressed.indexed && derivable && (route.match || []).length) {
       return { source: 'none', reason: 'coverage-dead' };
     }
     return { source: 'route-accounts' };
@@ -761,7 +785,18 @@ export function routeNaming(route, routeIndex, routing, blocked = []) {
   // than disclosing the gap. The names stay exactly the measured-admitted set;
   // the line stops claiming to be complete. Closing it properly means grading
   // the entry on the ids the route RECEIVES, which is round 4a item 1.
-  const basisGap = liveScopes.map(e => e.familySplit).find(Boolean) || null;
+  // NAMES COME FROM THE MEASURED BASIS; DISCLOSURES COME FROM THE WHOLE ENTRY
+  // SET. This read `liveScopes`, which meant a WITHHELD sibling entry's
+  // `familySplit` was discarded before the line could see it — so a route with
+  // one scope empty and one covering fell into no row at all: not row 1 (some
+  // scope published), not row 2 (the flag had been dropped), not row 4 (entries
+  // exist). The entry that was telling us the basis was incomplete was the one
+  // being thrown away.
+  //
+  // A withheld scope IS ITSELF a basis gap, so reading the flag over every
+  // entry this route owns puts that shape back in row 2 rather than needing a
+  // fifth row. Names are unaffected: they still come only from `liveScopes`.
+  const basisGap = (suppressed.entries || []).map(e => e.familySplit).find(Boolean) || null;
   return { source: 'scopes', admitted, partial: suppressed.any, basisGap };
 }
 

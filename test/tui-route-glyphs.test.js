@@ -86,7 +86,7 @@ function glyphs(now) {
     marked[acct.name] = row.slice(GLYPH_AT, GLYPH_AT + general.length);
   }
   const on = name => Object.entries(marked)
-    .filter(([, cells]) => cells[general.indexOf(name)] === '►').map(([n]) => n);
+    .filter(([, cells]) => /[\u25ba\u25b8]/.test(cells[general.indexOf(name)] || '')).map(([n]) => n);
   return { status, general, on };
 }
 
@@ -181,6 +181,67 @@ test('the settings auto-detected line answers from the shared rule', () => {
   }
 });
 
+// ── A SURFACE THAT CANNOT RENDER THE MARKER MUST NOT SILENTLY DROP WHAT THE
+// MARKER QUALIFIES.
+//
+// The status line says `→ fiveOwner (split by model claims; other ids may go
+// elsewhere)`. This column showed `fiveOwner` marked, the sibling-owner
+// unmarked, and said NOTHING — the same set as the status line with the
+// disclosure removed. That is the one-payload-two-surfaces shape appearing
+// inside the commit that added the disclosure, which is why the glyph column
+// needs a qualified mark of its own rather than an exemption.
+//
+// `▸` marks "admitted, on a basis that does not cover this route". It is put on
+// the accounts the rule DOES admit rather than on everyone it cannot rule out:
+// the qualifier is about the ROUTE'S ANSWER being partial, and marking every
+// unadmitted account would be this renderer inventing per-account answers it
+// does not have — the defect class this round keeps finding.
+test('the glyph column qualifies a route whose basis does not cover it', () => {
+  const now = Date.now();
+  const routes = [
+    { name: 'wide', match: ['*opus*'], accounts: [] },
+    { name: 'plain', match: ['claude-haiku-4-5'], accounts: [] },
+  ];
+  const am = new AccountManager([
+    { name: 'fiveOwner', type: 'apikey', apiKey: 'k5', models: ['claude-opus-4-5'] },
+    { name: 'fourOwner', type: 'apikey', apiKey: 'k4', models: ['claude-opus-4-1'] },
+  ], 0.98, { routes });
+  am.accounts.forEach((x, i) => {
+    x.quota = { ...x.quota,
+      unified5h: 0.05 + i * 0.05, unified5hReset: now + 2 * H,
+      unified7d: 0.2 + i * 0.1, unified7dReset: now + 40 * H };
+  });
+  const status = am.getStatus();
+  const entry = status.routing.find(e => e.route === 'wide');
+  assert.ok(entry?.familySplit,
+    'the premise: the payload reports a basis gap on this route');
+  const admitted = entry.band?.admitted || [];
+  assert.ok(admitted.length, 'the fixture is degenerate: nothing is admitted, so nothing is marked');
+
+  const tui = new TUI({
+    accountManager: am, config: { proxy: { port: 1 }, routes },
+    sx: null, saveConfig: async () => {}, syncAccounts: async () => 0, onQuit: () => {},
+  });
+  tui.render = () => {};
+  const lines = renderFrame(tui);
+  const general = status.routes
+    .filter(r => !/fable|sonnet/i.test(`${r.name} ${(r.match || []).join(' ')}`)).map(r => r.name);
+  const nameAt = GLYPH_AT + general.length + 1;
+  const col = general.indexOf('wide');
+  assert.ok(col >= 0, 'the premise: the split route takes a glyph column');
+
+  const cellFor = name => {
+    const row = lines.find(l => l.slice(nameAt).startsWith(name));
+    assert.ok(row, `no rendered row for ${name}`);
+    return row[GLYPH_AT + col];
+  };
+  for (const name of admitted) {
+    assert.equal(cellFor(name), '▸',
+      `${name} is marked as if this route's answer were complete, while the status `
+      + 'line discloses that its basis does not cover the route');
+  }
+});
+
 // ── ATTACH MODE MUST GRADE WITH THE SERVER'S BLOCKLIST, NOT THE LOCAL ONE.
 //
 // The dashboard polls a server, and that server copies its own `blockedModels`
@@ -228,7 +289,7 @@ function attachGlyphs(serverBlocked, localBlocked) {
     marks[n] = row.slice(GLYPH_AT, GLYPH_AT + general.length);
   }
   return name => Object.entries(marks)
-    .filter(([, cells]) => cells[general.indexOf(name)] === '►').map(([k]) => k);
+    .filter(([, cells]) => /[►▸]/.test(cells[general.indexOf(name)] || '')).map(([k]) => k);
 }
 
 test('attach mode does not blank a live route because the LOCAL config blocks it', () => {

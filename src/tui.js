@@ -89,6 +89,25 @@ const routeFamily = route => {
 const routeGlyph = (paint, eligible, pinned) =>
   pinned ? bold(paint('►')) : eligible ? paint('►') : dim(paint('►'));
 
+// A ROUTE WHOSE MEASURED BASIS DOES NOT COVER IT gets a different mark, because
+// A SURFACE THAT CANNOT RENDER THE MARKER MUST NOT SILENTLY DROP WHAT THE
+// MARKER QUALIFIES. The status line says
+// `→ fiveOwner (split by model claims; other ids may go elsewhere)`; this column
+// showed `fiveOwner` marked, the sibling's owner unmarked, and said nothing —
+// the same set with the disclosure removed, which is the one-payload-two-
+// surfaces shape inside the commit that added the disclosure.
+//
+// `▸` rather than a mark on every unadmitted account: the qualifier is about
+// the ROUTE'S ANSWER being partial, not a claim about each account. Marking
+// everyone the basis cannot rule out would put a glyph on every account of
+// every split route, and asserting per-account status from here would be the
+// renderer deriving eligibility on its own, which is the class this round keeps
+// finding. So the accounts the basis DOES admit are marked as qualified, and
+// the column carries the route's incompleteness without inventing per-account
+// answers it does not have.
+const routeGlyphPartial = (paint, pinned) =>
+  pinned ? bold(paint('▸')) : paint('▸');
+
 // WHICH BLOCKLIST GRADES A ROUTE — the PAYLOAD'S when it carries one, the local
 // config otherwise, and never the local one in preference to it.
 //
@@ -1237,7 +1256,12 @@ export class TUI {
       if (n && n.source === 'none') return ' ';
       if (n && n.source === 'scopes') {
         if (!n.admitted.has(a.name)) return ' ';
-        return routeGlyph(routeColorFn(r.color), true, r.pinned === a.name);
+        // The rule admits this account — but if the basis it was measured on
+        // does not cover the route, say so here too rather than presenting a
+        // partial answer as a whole one.
+        return n.basisGap
+          ? routeGlyphPartial(routeColorFn(r.color), r.pinned === a.name)
+          : routeGlyph(routeColorFn(r.color), true, r.pinned === a.name);
       }
       const m = memberOf(r);
       return m ? routeGlyph(routeColorFn(r.color), m.eligible, r.pinned === a.name) : ' ';

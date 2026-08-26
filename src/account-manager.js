@@ -2233,7 +2233,58 @@ export class AccountManager {
     // sends the whole scope to that list whatever the claims say. Asking the
     // claims anyway reported a division the route makes impossible.
     if (route && route.accounts.length) return null;
-    return this.accounts.some(a => (a.models || []).some(reaches)) ? 'model claims' : null;
+    // THE CLAIMS ARM ASKS A DIFFERENT QUESTION FROM THE ARM ABOVE, and sharing
+    // one predicate between them was the defect. `reaches` compares two GLOBS,
+    // which is the honest question for an earlier ROUTE's match list — and
+    // `modelGlobOverlaps` is documented at model.js:156 as advisory and not
+    // decidable in general, which is fine there.
+    //
+    // A CLAIM IS NOT A GLOB. Ownership runs through `modelMatches` — exact
+    // equality plus the `[Nm]` strip, never globbing — so a `models` entry is a
+    // LITERAL ID, and the question is simply whether this scope's glob reaches
+    // it. Asked as glob-overlap it compared STRIPPED CORES, and with a wildcard
+    // strictly inside the glob neither core contains the other, so a literal
+    // claim on an id the route really does receive was missed and the family
+    // read as undivided. Enumerated over 81,600 glob/claim pairs: 624 misses,
+    // and 624 of 624 carry an internal wildcard.
+    //
+    // Fixed by SPLITTING the predicate rather than replacing it — swapping the
+    // shared closure would have repaired this arm and changed the earlier-route
+    // walk with it, which is trading rather than adding.
+    //
+    // A glob-shaped claim stops contributing here, and that is correct rather
+    // than incidental: `modelMatches` could never match one either, so a claim
+    // that cannot own an id cannot divide a family.
+    // THE COVERS EXCLUSION IS KEPT, and the reasoning is worth the lines because
+    // my first answer to "where did it go" was wrong.
+    //
+    // A claim that COVERS the whole scope divides nothing: every id the scope
+    // holds is claimed by that same account, so the representative's figures
+    // generalise and there is no split to report. That much is semantics.
+    //
+    // I PREDICTED dropping it would misfire on an exact-literal scope whose id
+    // one account claims. It does not — and not because the exclusion saves it.
+    // `_familySplit` opens with `if (glob && !glob.includes('*')) return null;`,
+    // so a WILDCARD-FREE scope never reaches this arm at all. The fixture I
+    // built to prove the exclusion load-bearing was short-circuited two lines in.
+    //
+    // MEASURED, once that guard was accounted for: over 3,626 (wildcard-bearing
+    // glob, literal claim) pairs, a literal claim covers such a glob ZERO times
+    // — which is what one would expect, since covering a pattern means matching
+    // every id it matches and a single literal matches one. So the exclusion is
+    // INERT for this arm today. Absence over an enumerated space is strong
+    // evidence and not a theorem, which is the other reason it stays.
+    //
+    // IT IS KEPT ANYWAY because inert-today is a property of the guard TWO LINES
+    // UP, not of this expression. If the one-id guard ever moves or narrows,
+    // this arm would start reporting divisions that do not exist, silently. The
+    // cost of keeping it is nothing; the cost of the coupling is a defect nobody
+    // would trace back to a guard they did not touch.
+    const claimReaches = (claim) => {
+      const id = bareModelId(claim);
+      return modelGlobMatches(scopeGlob, id) && !globCovers(id, scopeGlob);
+    };
+    return this.accounts.some(a => (a.models || []).some(claimReaches)) ? 'model claims' : null;
   }
 
   /** The name of the account a request for `model` would land on right now, or

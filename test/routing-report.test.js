@@ -1551,3 +1551,47 @@ test('the report names accounts and never a session id', () => {
     }
   }
 });
+
+
+// ── A CLAIM THAT COVERS THE WHOLE SCOPE DIVIDES NOTHING, and this pins WHICH
+// guard makes that true.
+//
+// `familySplit` means the entry's figures were graded on one representative
+// while the scope holds ids those figures do not speak for. If a single account
+// claims every id the scope holds, the scope is homogeneous with respect to that
+// claim and there is nothing to divide.
+//
+// THE INTERESTING PART IS WHICH CODE ENFORCES IT. The claims arm carries a
+// `!globCovers` term, and when that arm was split out of its shared closure the
+// term was briefly dropped — the prediction being that this fixture would then
+// report a split. IT DID NOT, at either tree, and the reason is upstream:
+// `_familySplit` opens with `if (glob && !glob.includes('*')) return null;`, so
+// a WILDCARD-FREE scope never reaches the claims arm at all. The covers term is
+// measured inert here — over 3,626 (wildcard-bearing glob, literal claim) pairs
+// a literal covers a glob zero times — and is kept as defence in depth rather
+// than because this case needs it.
+//
+// So this test is held by the ONE-ID GUARD, and its matrix row neutralises that
+// guard rather than the covers term: a row on the covers term would report
+// SURVIVES forever, and a row that must report SURVIVES is not evidence.
+test('a scope of exactly one id is not reported as a divided family', () => {
+  const now = Date.now();
+  const am = fleet({
+    accounts: ['owner', 'other'],
+    expiryRouting: { enabled: false },
+    routes: [{ name: 'exact', match: ['claude-opus-4-5'], accounts: [] }],
+  });
+  am.accounts[0].models = ['claude-opus-4-5'];
+  am.accounts[1].models = ['claude-haiku-4-5'];
+  quota(am, 0, { unified5h: 0.05, unified5hReset: now + 2 * H });
+  quota(am, 1, { unified5h: 0.10, unified5hReset: now + 2 * H });
+
+  const entry = am.getStatus().routing.find(e => e.route === 'exact');
+  assert.ok(entry, 'the premise: the route produced an entry');
+  assert.ok(!(entry.match || []).some(g => g.includes('*')),
+    'the premise: this scope glob holds exactly one id');
+  assert.deepEqual(am.accounts[0].models, [entry.model],
+    'the premise: one account claims exactly the id this scope is');
+  assert.equal(entry.familySplit ?? null, null,
+    'a scope of one id, wholly claimed by one account, is reported as a divided family');
+});

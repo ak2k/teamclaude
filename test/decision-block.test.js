@@ -1394,3 +1394,59 @@ test('a route does not name an account only a blocked scope admits', () => {
       `dropped ${name}, which the unblocked scope admits`);
   }
 });
+
+
+// THE LEGACY WIRE, which is the shape the CASE 4 guard above still does not
+// construct and which cost a live defect. Stripping `routing` to `[]` makes
+// `derivable` false, so the dead branch never executes and the guard passes
+// without reaching the code it guards — that is why it was blind twice.
+//
+// THE REAL 63e6e93 WIRE keeps `routing[]` and simply has no `routeIndex` or
+// `match` on its entries. Then the legacy name+glob join finds nothing for this
+// route, ANOTHER route's entry satisfies the payload-global `derivable` test,
+// and a LIVE route rendered as "an earlier route takes every id this route is
+// named for" — every route at once, on any new dashboard talking to any older
+// server, for the whole of a rolling upgrade.
+//
+// ABSENCE FROM A JOIN THAT CANNOT SEE IS NOT EVIDENCE ABOUT THE ROUTE. A dead
+// verdict requires the INJECTIVE join to have positively established emptiness,
+// so an unindexed payload degrades to the operator's configured list.
+test('a legacy payload whose entries carry no join fields names its configured accounts', () => {
+  const now = Date.now();
+  const accounts = [acct('alpha'), acct('beta')];
+  const am = new AccountManager(accounts, 0.98, {
+    routes: [
+      { name: 'first', match: ['claude-haiku-4-5*'], accounts: [] },
+      { name: 'live', match: ['*opus*'], accounts: ['alpha', 'beta'] },
+    ],
+  });
+  am.accounts.forEach((x, i) => {
+    x.quota = { ...x.quota, unified5h: 0.05 + i * 0.05, unified5hReset: now + 2 * H,
+      unified7d: 0.2 + i * 0.1, unified7dReset: now + 40 * H };
+  });
+  const status = am.getStatus();
+
+  // The legacy shape: entries KEPT, join fields removed. Not `routing: []`.
+  const legacy = {
+    ...status,
+    routing: status.routing.map(({ routeIndex, match, ...rest }) => rest),
+  };
+  assert.ok(legacy.routing.some(e => e.scope === 'route'),
+    'the premise: the payload still HAS route entries — this is not the empty-array shape');
+  assert.ok(legacy.routing.every(e => e.routeIndex === undefined),
+    'the premise: no entry carries a join index');
+
+  const listed = (status.routes.find(r => r.name === 'live')?.accounts || []).map(a => a.name);
+  assert.ok(listed.length, 'the fixture is degenerate: the route lists no accounts');
+
+  const line = renderStatus(legacy, { color: false, now }).split('\n')
+    .find(l => l.trim().startsWith('*opus*'));
+  assert.ok(line, 'the routing table renders the route');
+  assert.doesNotMatch(line, /an earlier route takes every id/,
+    'a LIVE route reads as dead because an unindexed join could not see its entries — '
+    + 'absence of evidence rendered as evidence of absence');
+  for (const name of listed) {
+    assert.match(line, new RegExp(`\\b${name}\\b`),
+      `the legacy payload dropped ${name}; a mis-join must degrade to the configured list`);
+  }
+});
