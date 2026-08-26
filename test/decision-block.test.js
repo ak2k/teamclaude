@@ -998,3 +998,301 @@ test('the routing table withdraws a suppressed route in the default configuratio
   const exactLine = rendered.split('\n').find(l => l.includes('claude-fable-5'));
   assert.match(exactLine, /owner5|owner4/, 'an unsuppressed route stopped naming its accounts');
 });
+
+// ── THE ROUTE LINE HAS ONE NAMING RULE, and the four cases below are its
+// boundary rather than four samples of it.
+//
+// The mixed-path fix took names from the scopes that PUBLISHED — but only under
+// PARTIAL suppression. With nothing captured the line fell through to
+// `routes[].accounts`, which `getRoutes` grades against the route's STRIPPED
+// SAMPLE, an id no claim matches, so every account came back eligible and the
+// line named accounts every measured scope excluded. Same defect, sibling
+// branch: the fifth time this round that repairing one branch left its twin.
+//
+// So the rule is now selected by whether the route HAS routing entries, not by
+// their suppression state. UNION SEMANTICS, spelled out because "excluded by
+// all" and "excluded by any" are both plausible readings of a union nobody
+// wrote down: an account admitted by AT LEAST ONE published scope is named; an
+// account excluded by ALL of them is not named at all, not even in red.
+
+// A fleet whose accounts are separated by what they CLAIM, so one route's
+// scopes genuinely admit different accounts and the stripped-sample view
+// disagrees with all of them.
+function claimFleet(now, globs, claims) {
+  const names = Object.keys(claims);
+  const am = new AccountManager(names.map(acct), 0.98, {
+    routes: [{ name: 'multi', match: globs, accounts: [] }],
+  });
+  names.forEach((n, i) => {
+    am.accounts[i].models = claims[n];
+    am.accounts[i].quota = { ...am.accounts[i].quota,
+      unified5h: 0.05 + i * 0.05, unified5hReset: now + 2 * H,
+      unified7d: 0.2 + i * 0.1, unified7dReset: now + 40 * H };
+  });
+  return am;
+}
+
+const routeLine = (am, now, needle) =>
+  renderStatus(am.getStatus(), { color: false, now }).split('\n')
+    .find(l => l.includes(needle));
+
+// CASE 1 — ALL PUBLISHED, which is the PASS-16 P1. Nothing is captured, so the
+// old code took the `routes[].accounts` branch.
+test('a route with nothing suppressed names only accounts a published scope admits', () => {
+  const now = Date.now();
+  const am = claimFleet(now, ['*sonnet*', '*opus*'], {
+    a: ['claude-sonnet-4-6'], b: ['claude-opus-4-5'], c: ['claude-fable-5'],
+  });
+  const status = am.getStatus();
+  const scopes = status.routing.filter(e => e.route === 'multi');
+  assert.ok(scopes.length >= 2, 'the premise: this route has several scopes');
+  assert.ok(scopes.every(e => e.figuresAbsent == null),
+    'the premise: NOTHING is suppressed — otherwise this re-tests the mixed path');
+
+  const line = routeLine(am, now, '*sonnet*, *opus*');
+  assert.ok(line, 'the routing table renders the route');
+
+  const admitted = new Set(scopes.flatMap(e => e.band?.admitted || []));
+  const unadmitted = ['a', 'b', 'c'].filter(n => !admitted.has(n));
+  // `c` claims neither glob's id, so no published scope admits it — and the
+  // stripped-sample view called it eligible anyway.
+  assert.ok(unadmitted.length,
+    'the fixture is degenerate: every account is admitted somewhere, so the two sources cannot disagree');
+  for (const name of unadmitted) {
+    assert.doesNotMatch(line, new RegExp(`\\b${name}\\b`),
+      `the line names ${name}, which no published scope of this route admits`);
+  }
+  // POSITIVE CONTROL: "names nobody unadmitted" must not be satisfiable by a
+  // renderer that stopped naming accounts at all.
+  assert.ok(admitted.size, 'the fixture is degenerate: no scope admitted anyone');
+  for (const name of admitted) {
+    assert.match(line, new RegExp(`\\b${name}\\b`),
+      `the line dropped ${name}, which a published scope admits`);
+  }
+  // Nothing here went unmeasured, so the partial caveat must not appear.
+  assert.doesNotMatch(line, /some scopes have no figures/,
+    'a fully measured route claims part of it was not measured');
+});
+
+// CASE 2 — THREE-PLUS SCOPES. Two globs can be special-cased by accident;
+// three is where a union has to actually be a union.
+//
+// THE THIRD GLOB IS `claude-haiku-4-5*`, NOT `*haiku*`, and the reason is worth
+// keeping because the first draft of this test asserted the wrong thing and its
+// own degeneracy guard caught it. `*haiku*` strips to the bare sample `haiku`,
+// which no account claims — and an id no claim names admits EVERYONE, which is
+// exactly the property TC-031 records. That scope was therefore vacuously
+// permissive, admitted all four accounts, and the union named `d` correctly.
+// The assertion was wrong, not the renderer. A glob whose stripped core is a
+// REAL id makes the third scope discriminate like the other two.
+test('a route with three published scopes names the union of what they admit', () => {
+  const now = Date.now();
+  const am = claimFleet(now, ['*sonnet*', '*opus*', 'claude-haiku-4-5*'], {
+    a: ['claude-sonnet-4-6'], b: ['claude-opus-4-5'],
+    c: ['claude-haiku-4-5'], d: ['claude-fable-5'],
+  });
+  const status = am.getStatus();
+  const scopes = status.routing.filter(e => e.route === 'multi');
+  assert.equal(scopes.length, 3, 'the premise: three scopes');
+  assert.ok(scopes.every(e => e.figuresAbsent == null), 'the premise: all published');
+
+  const line = routeLine(am, now, '*sonnet*, *opus*, claude-haiku-4-5*');
+  assert.ok(line, 'the routing table renders the route');
+  const admitted = new Set(scopes.flatMap(e => e.band?.admitted || []));
+  assert.ok(admitted.size >= 3,
+    'the fixture is degenerate: the union does not span all three scopes');
+  for (const name of admitted) {
+    assert.match(line, new RegExp(`\\b${name}\\b`), `the union dropped ${name}`);
+  }
+  assert.ok(!admitted.has('d'),
+    'the fixture is degenerate: d was supposed to be admitted by no scope');
+  assert.doesNotMatch(line, /\bd\b/,
+    'named d, which claims none of this route\'s globs and no published scope admits');
+});
+
+// CASE 3 — THE SCOPES DISAGREE ABOUT ONE ACCOUNT: admitted by one, excluded by
+// another. The direction is the assertion.
+test('an account one published scope admits is named even where another excludes it', () => {
+  const now = Date.now();
+  const am = claimFleet(now, ['*sonnet*', '*opus*'], {
+    a: ['claude-sonnet-4-6'], b: ['claude-opus-4-5'],
+  });
+  const status = am.getStatus();
+  const scopes = status.routing.filter(e => e.route === 'multi');
+  const admits = n => scopes.some(e => (e.band?.admitted || []).includes(n));
+  const excludes = n => scopes.some(e => (e.band?.excluded || []).some(x => x.account === n));
+  const disputed = ['a', 'b'].find(n => admits(n) && excludes(n));
+  assert.ok(disputed,
+    'the fixture is degenerate: no account is admitted by one scope and excluded by another');
+
+  const line = routeLine(am, now, '*sonnet*, *opus*');
+  assert.match(line, new RegExp(`\\b${disputed}\\b`),
+    `dropped ${disputed}, which a published scope admits — a union over admissions must name it`);
+});
+
+// CASE 4 — THE FALLBACK SURVIVES. With NO matching routing entry there are no
+// published scopes to draw on, and `routes[].accounts` is then the route's own
+// CONFIGURED list rather than a stripped-sample grade. Silencing those routes
+// would be the mirror-image defect, so the fix is pinned against it.
+test('a route with no routing entries still names its configured accounts', () => {
+  const now = Date.now();
+  const am = claimFleet(now, ['*sonnet*'], {
+    a: ['claude-sonnet-4-6'], b: ['claude-sonnet-4-6'],
+  });
+  const status = am.getStatus();
+  const listed = (status.routes.find(r => r.name === 'multi')?.accounts || []).map(a => a.name);
+  assert.ok(listed.length, 'the fixture is degenerate: the route lists no accounts');
+  // The pre-suppression wire shape, and the shape any consumer that does not
+  // send `routing` produces.
+  const stripped = { ...status, routing: [] };
+  const line = renderStatus(stripped, { color: false, now }).split('\n')
+    .find(l => l.includes('*sonnet*'));
+  assert.ok(line, 'the routing table renders the route at all');
+  for (const name of listed) {
+    assert.match(line, new RegExp(`\\b${name}\\b`),
+      `the fallback dropped ${name}; with no routing entries the configured list is all there is`);
+  }
+});
+
+// ── THE OTHER TWO PIPELINE STAGES, each of which the SWEEP found unheld.
+//
+// Both of these exist because a neutralisation row SURVIVED: reverting the join
+// to its name-based key, and dropping the blocklist predicate from the union,
+// each left the whole suite green. Probes covered them; the suite did not, and a
+// stage no test holds is a stage the next refactor silently removes.
+
+// STAGE: THE JOIN. Route names are NOT unique. Matching entries to a route by
+// `(name, glob)` let a later route sharing both import an earlier route's entry
+// — naming an owner for traffic this route cannot send, and (grok's stronger
+// fixture) dropping the account that actually serves it. The join is by the
+// route's POSITION, which cannot collide.
+test('a route sharing a name with an earlier one does not inherit its scopes', () => {
+  const now = Date.now();
+  const accounts = [acct('alpha'), acct('beta')];
+  accounts[0].models = ['claude-opus-4-5'];
+  accounts[1].models = ['claude-haiku-4-5'];
+  const am = new AccountManager(accounts, 0.98, {
+    routes: [
+      { name: 'exact', match: ['claude-opus-4-5'], accounts: [] },
+      { name: 'dup', match: ['claude-haiku-4-5*'], accounts: [] },
+      // Same NAME as the route above and it also lists that route's glob, which
+      // is what made the old key ambiguous.
+      { name: 'dup', match: ['*opus*', 'claude-haiku-4-5*'], accounts: [] },
+    ],
+  });
+  am.accounts.forEach((x, i) => {
+    x.quota = { ...x.quota, unified5h: 0.05 + i * 0.05, unified5hReset: now + 2 * H,
+      unified7d: 0.2 + i * 0.1, unified7dReset: now + 40 * H };
+  });
+  const status = am.getStatus();
+  const late = status.routes.findIndex(r => (r.match || []).length === 2);
+  assert.ok(late >= 0, 'the premise: the two-glob route rendered');
+  const earlier = status.routing.find(e => e.route === 'dup' && e.routeIndex !== late);
+  assert.ok(earlier, 'the premise: an earlier route shares the name "dup"');
+  assert.ok((earlier.band?.admitted || []).length,
+    'the fixture is degenerate: the earlier same-named route admits nobody, so importing it changes nothing');
+
+  const line = renderStatus(status, { color: false, now }).split('\n')
+    .find(l => l.includes('*opus*, claude-haiku-4-5*'));
+  assert.ok(line, 'the routing table renders the late route');
+  for (const name of earlier.band.admitted) {
+    assert.doesNotMatch(line, new RegExp(`\\b${name}\\b`),
+      `the late route names ${name}, which only the EARLIER same-named route's scope admits`);
+  }
+});
+
+// THE OTHER DIRECTION, and the one this rewrite nearly shipped wrong. Naming
+// from the published scopes must not become naming only the accounts the BAND
+// KEPT. A band SIZES: `admitted` is the subset that meets the coverage target,
+// `ladder` is the candidate field, and an account can be in the ladder, able to
+// serve, and not admitted — SPARE, `reason: 'coverage-met'`. Keyed on
+// `band.admitted` alone this line went from `→ a b c` to `→ a b` on a fleet
+// where `c` can serve: f45431a's trade-not-add, pointed at a renderer, and it
+// would have spread to EVERY route once the rule stopped being gated on partial
+// suppression. The rule unions `admitted` with the ladder so the two regimes
+// (passthrough, where the ladder is empty, and sized) get one answer.
+test('a spare account that can serve the route is still named', () => {
+  const now = Date.now();
+  const am = new AccountManager(['a', 'b', 'c', 'd'].map(acct), 0.98, {
+    expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 },
+    routes: [{ name: 'wide', match: ['*opus*'], accounts: ['a', 'b', 'c'] }],
+  });
+  const q = (i, o) => { am.accounts[i].quota = { ...am.accounts[i].quota, ...o }; };
+  q(0, { unified5h: 0.05, unified7d: 0.1, unified7dReset: now + 20 * H });
+  q(1, { unified5h: 0.15, unified7d: 0.3, unified7dReset: now + 40 * H });
+  q(2, { unified5h: 0.30, unified7d: 0.6, unified7dReset: now + 500 * H });
+  q(3, { unified5h: 0.40, unified7d: 0.7, unified7dReset: now + 600 * H });
+
+  const status = am.getStatus();
+  const entry = status.routing.find(e => e.route === 'wide' && e.figuresAbsent == null);
+  assert.ok(entry, 'the premise: this route published figures');
+  const band = entry.band || {};
+  assert.equal(band.kind, 'sized', 'the premise: the band SIZES, or there are no spares to drop');
+  const admitted = new Set(band.admitted || []);
+  const cannot = new Set((band.excluded || []).map(x => x.account));
+  const spare = (band.ladder || []).map(r => r.account)
+    .filter(n => !admitted.has(n) && !cannot.has(n));
+  assert.ok(spare.length,
+    'the fixture is degenerate: no account is a candidate the band declined to admit');
+
+  const line = renderStatus(status, { color: false, now }).split('\n')
+    .find(l => l.trim().startsWith('*opus*'));
+  assert.ok(line, 'the routing table renders the route');
+  for (const name of spare) {
+    assert.match(line, new RegExp(`\\b${name}\\b`),
+      `dropped ${name}, a candidate that CAN serve this route and was merely not `
+      + 'kept by the band — naming only the admitted subset hides working capacity');
+  }
+  // And the account that genuinely cannot serve is still not named, so this is
+  // an ADDITION to the rule rather than a retreat from it.
+  for (const name of cannot) {
+    assert.doesNotMatch(line, new RegExp(`\\b${name}\\b`),
+      `named ${name}, which this scope excludes as unable to serve`);
+  }
+});
+
+// STAGE: THE BLOCKLIST. A published scope whose own model is blocked carries
+// nothing, so an account admitted solely there is an owner offered for traffic
+// the route cannot send it. The `(partly blocked)` tag beside the name does not
+// save it — that is the same caveat-does-not-save-it rule the round already
+// applied to the stripped sample.
+test('a route does not name an account only a blocked scope admits', () => {
+  const now = Date.now();
+  const accounts = [acct('alpha'), acct('beta')];
+  accounts[0].models = ['claude-opus-4-5'];
+  accounts[1].models = ['claude-haiku-4-5'];
+  const am = new AccountManager(accounts, 0.98, {
+    routes: [{ name: 'multi', match: ['*opus*', 'claude-haiku-4-5*'], accounts: [] }],
+  });
+  am.accounts.forEach((x, i) => {
+    x.quota = { ...x.quota, unified5h: 0.05 + i * 0.05, unified5hReset: now + 2 * H,
+      unified7d: 0.2 + i * 0.1, unified7dReset: now + 40 * H };
+  });
+  // Block one of the two globs, the way the server does.
+  const status = { ...am.getStatus(), blockedModels: ['*opus*'] };
+  const scopes = status.routing.filter(e => e.route === 'multi');
+  assert.equal(scopes.length, 2, 'the premise: two scopes');
+  assert.ok(scopes.every(e => e.figuresAbsent == null),
+    'the premise: both PUBLISHED — this is about blocking, not suppression');
+  const opus = scopes.find(e => (e.match || [])[0] === '*opus*');
+  const clear = scopes.find(e => (e.match || [])[0] !== '*opus*');
+  const clearAdmits = new Set(clear.band?.admitted || []);
+  const blockedOnly = (opus.band?.admitted || []).filter(n => !clearAdmits.has(n));
+  assert.ok(blockedOnly.length,
+    'the fixture is degenerate: no account is admitted ONLY by the blocked scope');
+
+  const line = renderStatus(status, { color: false, now }).split('\n')
+    .find(l => l.includes('*opus*, claude-haiku-4-5*'));
+  assert.ok(line, 'the routing table renders the route');
+  for (const name of blockedOnly) {
+    assert.doesNotMatch(line, new RegExp(`\\b${name}\\b`),
+      `named ${name}, which only a BLOCKED scope admits — the route cannot send it traffic`);
+  }
+  // POSITIVE CONTROL: the clear scope's accounts must still be named, or this
+  // passes on a line that stopped naming anyone.
+  assert.ok(clearAdmits.size, 'the fixture is degenerate: the clear scope admits nobody');
+  for (const name of clearAdmits) {
+    assert.match(line, new RegExp(`\\b${name}\\b`),
+      `dropped ${name}, which the unblocked scope admits`);
+  }
+});

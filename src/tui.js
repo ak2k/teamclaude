@@ -1,5 +1,10 @@
 import { createWriteStream } from 'node:fs';
 import { gatingUtilization } from './model.js';
+// The route-naming DECISION, shared with the status screen. Imported rather
+// than reimplemented: this file drew its route glyphs from the stripped-sample
+// list while the status renderer had already stopped doing so, and one payload
+// with two answers is the defect that import closes.
+import { routeNaming } from './status-renderer.js';
 import { importCredentials, fetchProfile } from './oauth.js';
 import { sameIdentity, findUpsertTarget } from './identity.js';
 import { parseProxyUrl, proxyToUrl, describeProxy, resolveUpstreamProxy, setUpstreamProxy, getUpstreamProxy } from './upstream-proxy.js';
@@ -1071,8 +1076,50 @@ export class TUI {
 
       // Routes drive the inline markers; general (non-family) routes get a stable
       // column each at the row start so the marker's position identifies the route.
+      //
+      // TAKEN FROM ONE `getStatus()` RATHER THAN FROM `getRoutes()` ALONE, and
+      // that is the fix rather than a tidy-up. These glyphs used to be drawn
+      // from `getRoutes().accounts` + `m.eligible` — the STRIPPED-SAMPLE view,
+      // graded for an id no claim matches — and never consulted the suppression
+      // state at all. So the payload could withdraw a route's per-account
+      // figures, the status screen could say "no figures: an earlier route takes
+      // the id this route is named for", and this screen went on marking owners
+      // for it. That is the pass-13 P2 shape in a second file: one payload, two
+      // surfaces disagreeing.
+      //
+      // TWO MODES, AND ONLY ONE OF THEM HAS AN ACCOUNT MANAGER. In attach mode
+      // `am` is a payload-backed shim with no `getStatus()` — it keeps the last
+      // payload on `.status` — so asking for one unconditionally takes the
+      // dashboard down in exactly the mode that cannot afford it. The suite
+      // caught that; it is not a hypothetical.
+      const payload = typeof this.am.getStatus === 'function'
+        ? this.am.getStatus() : this.am.status;
       const routes = this.am.getRoutes();
+      const blockedPats = (this.config.blockedModels || [])
+        .filter(p => typeof p === 'string' && p.length);
+      // THE JOIN IS GUARDED, NOT ASSUMED. `routeIndex` is a position into the
+      // payload's own `routes`, and `getRoutes()` here is a SECOND call (attach
+      // mode also sanitizes it, since a half-specified route from an older or
+      // newer server would otherwise crash the renderer mid-frame). Index-joining
+      // two lists that merely ought to correspond is how the last defect
+      // attached one route's entries to another. So the join runs only when the
+      // two lists are the same length, and otherwise the naming falls back to
+      // the route's configured list — the previous behaviour, which is wrong in
+      // a known way rather than wrong in a silent one.
+      // The length check is weak on its own; it is sound here because in attach
+      // mode `getRoutes()` is a `.map()` over the very array `routeIndex`
+      // counts against, and in local mode both come from `getRoutes(observed)`.
+      const joinable = Array.isArray(payload?.routing)
+        && Array.isArray(payload?.routes)
+        && payload.routes.length === routes.length;
+      // The naming DECISION, once per route per frame, from the same function
+      // the status renderer uses. Not re-derived here: a rule that lives in one
+      // renderer is a rule the next renderer does not have.
+      const naming = routes.map((r, i) =>
+        routeNaming(r, i, joinable ? payload.routing : null, blockedPats));
       const genRoutes = routes.filter(r => routeFamily(r) === null);
+      const genNaming = routes.map((r, i) => [r, naming[i]])
+        .filter(([r]) => routeFamily(r) === null).map(([, n]) => n);
       // The single account each secondary bucket currently routes to (null = none
       // can serve it right now). Marked next to that account's F7/S7 bar — the
       // secondary-quota analogue of ► marking the default route's current account.
@@ -1083,7 +1130,7 @@ export class TUI {
         sonnet: anySonnet ? this.am.previewRouteIndex('claude-sonnet-4-6') : null,
       };
       for (let i = 0; i < this.am.accounts.length; i++) {
-        lines.push(this._renderAcct(i, bw, showBoth, routes, genRoutes, familyTarget));
+        lines.push(this._renderAcct(i, bw, showBoth, routes, genRoutes, familyTarget, genNaming));
       }
     }
 
@@ -1136,7 +1183,7 @@ export class TUI {
     this._paint(buf, force);
   }
 
-  _renderAcct(idx, bw, showBoth, routes = this.am.getRoutes(), genRoutes = routes.filter(r => routeFamily(r) === null), familyTarget = {}) {
+  _renderAcct(idx, bw, showBoth, routes = this.am.getRoutes(), genRoutes = routes.filter(r => routeFamily(r) === null), familyTarget = {}, genNaming = null) {
     const a = this.am.accounts[idx];
     const isCur = idx === this.am.currentIndex;
     const isSel = this.mode === 'select' && idx === this.selIdx;
@@ -1150,7 +1197,28 @@ export class TUI {
     // its colored ►, others a blank. Family routes (fable/sonnet) are drawn by the
     // F7/S7 bars below instead.
     const memberOf = (route) => route.accounts.find(x => x.name === a.name);
-    const startCells = genRoutes.map(r => {
+    const startCells = genRoutes.map((r, i) => {
+      const n = genNaming ? genNaming[i] : null;
+      // WHERE THIS GLYPH'S TRUTH COMES FROM, in the same order of preference
+      // the routing line uses, because one payload must not produce two answers:
+      //   'scopes'         — the union of published, unblocked scopes. An
+      //                      account admitted there really can take this route's
+      //                      traffic; one it admits nowhere gets NO glyph, not a
+      //                      dim one, since a mark here is a claim of ownership.
+      //   'none'           — the figures were withheld or everything measured is
+      //                      blocked. Nothing is known about who owns this
+      //                      route, so nothing is marked.
+      //   'route-accounts' — no routing entries for this route: its CONFIGURED
+      //                      list is the only account information there is, and
+      //                      the pre-existing behaviour is right.
+      // `genNaming` absent means a caller that did not supply it (the default
+      // parameter path), which keeps the old behaviour rather than silently
+      // blanking the column.
+      if (n && n.source === 'none') return ' ';
+      if (n && n.source === 'scopes') {
+        if (!n.admitted.has(a.name)) return ' ';
+        return routeGlyph(routeColorFn(r.color), true, r.pinned === a.name);
+      }
       const m = memberOf(r);
       return m ? routeGlyph(routeColorFn(r.color), m.eligible, r.pinned === a.name) : ' ';
     });

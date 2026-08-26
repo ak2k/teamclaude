@@ -590,13 +590,36 @@ function excludedRow(row, paint) {
 // Two routes sharing BOTH a name and a glob are still indistinguishable here;
 // that is a narrower ambiguity than the one it replaces, and it is the most a
 // consumer of this payload can do without an id on the entries.
-function suppressedScopesFor(route, routing) {
-  if (!Array.isArray(routing)) return { any: false, all: false };
-  const mine = routing.filter(e => e && e.scope === 'route' && e.route === route.name
-    && Array.isArray(e.match) && (route.match || []).includes(e.match[0]));
-  if (!mine.length) return { any: false, all: false, published: [] };
+function suppressedScopesFor(route, routeIndex, routing) {
+  if (!Array.isArray(routing)) return { matched: false, any: false, all: false, published: [] };
+  // THE JOIN IS BY POSITION, WHICH IS INJECTIVE. `(name, glob)` was not: route
+  // names are not unique, so a later route sharing a name and a glob with an
+  // earlier one imported the earlier one's entry — which both named an owner
+  // for traffic this route cannot send AND dropped the account that actually
+  // serves it. The comment that used to sit here called that an
+  // indistinguishability and disclosed it as a limit; it is an INVERSION, which
+  // is the class this round exists to close, so it is fixed rather than
+  // disclosed.
+  //
+  // The mode is chosen ONCE PER PAYLOAD rather than per entry, because a
+  // half-indexed payload is not a thing the producer emits and joining some
+  // entries one way and some another would be a third behaviour nobody tested.
+  const indexed = routing.some(e => e && e.scope === 'route' && Number.isInteger(e.routeIndex));
+  const mine = indexed
+    ? routing.filter(e => e && e.scope === 'route' && e.routeIndex === routeIndex)
+    // LEGACY, and it is the non-injective join: kept only so a payload produced
+    // before `routeIndex` existed still renders. It carries the collision above.
+    // A payload from this version always takes the branch overhead.
+    : routing.filter(e => e && e.scope === 'route' && e.route === route.name
+      && Array.isArray(e.match) && (route.match || []).includes(e.match[0]));
+  if (!mine.length) return { matched: false, any: false, all: false, published: [] };
   const hit = mine.filter(e => e.figuresAbsent === 'representative-captured');
   return {
+    // Whether this route has per-scope figures AT ALL. It is what decides where
+    // the route line's names come from, and it is deliberately not the same
+    // question as `any`: a route with nothing suppressed still has published
+    // scopes whose admissions are the only per-account figures anyone computed.
+    matched: true,
     any: hit.length > 0,
     all: hit.length === mine.length,
     // The scopes that DID publish. A route with two globs can have one scope
@@ -607,31 +630,100 @@ function suppressedScopesFor(route, routing) {
 }
 
 /**
- * Account names for a route whose scopes are PARTLY suppressed.
+ * Account names for a route from the scopes that PUBLISHED figures.
  *
- * Taken from the scopes that published, never from `routes[].accounts`. That
- * field is graded by `getRoutes` against the route's stripped sample — an id no
- * claim matches — so every account comes back eligible, and the line named an
- * account that every measured scope of the same route excluded. A caveat beside
- * a name does not fix that: the name is still on screen for traffic the route
- * cannot send it.
+ * This is the route line's ONE naming rule, and it applies whenever the route
+ * has routing entries at all — not only when some of them were suppressed.
+ * It was gated on partial suppression once, and that gate WAS the defect: with
+ * nothing captured the line fell through to `routes[].accounts`, which is
+ * graded by `getRoutes` against the route's stripped sample — an id no claim
+ * matches — so every account came back eligible and the line named accounts
+ * every measured scope of the same route excluded. Fixing that for the mixed
+ * case and leaving the all-published case is how this codebase produced the
+ * same defect five times: the rule has to be the rule, not a branch.
  *
- * ONLY accounts some published scope ADMITS are named. An account excluded from
- * every scope that was measured gets no line here at all — not even in red —
- * which is the same rule the full-withdrawal path follows when it names nobody.
+ * UNION SEMANTICS, stated because the scopes can disagree: an account admitted
+ * by AT LEAST ONE published scope is named; an account excluded by ALL of them
+ * is not named at all — not even in red. Disagreement resolves toward naming,
+ * because the route really can send that account traffic for the scope that
+ * admits it.
+ *
  * The red spelling elsewhere means "this route lists it and it is not eligible
- * right now", a statement `routes[].accounts` can make because it is the route's
- * configured list. Here there is no such list to draw on: the names are
+ * right now", a statement `routes[].accounts` can make because it is the
+ * route's configured list. Here there is no such list to draw on: the names are
  * synthesised from measured scopes, so an account those scopes all exclude has
  * no positive claim on this route and printing it puts an owner on screen for
  * traffic the route cannot send it.
+ *
+ * Returns null when NO scope published, which the caller must not paint from
+ * `routes[].accounts` — see its comment.
  */
-function partialAccountNames(published, paint) {
-  const admitted = new Set();
-  for (const entry of published) {
-    for (const name of entry.band?.admitted || []) admitted.add(name);
+/**
+ * WHERE A ROUTE'S ACCOUNT NAMES COME FROM — the decision, separated from the
+ * painting so that every surface answers it the same way.
+ *
+ * It exists because the round fixed this rule in `status-renderer.js` and left
+ * `tui.js` reading `getRoutes().accounts` — the stripped-sample view — so the
+ * payload withdrew a claim and a second screen went on making it. That is the
+ * pass-13 P2 shape in a different file, and a rule that lives in one renderer
+ * is a rule the next renderer does not have.
+ *
+ * Returns one of:
+ *   { source: 'scopes',        admitted: Set }  names come from the union of
+ *                                               published, unblocked scopes
+ *   { source: 'route-accounts' }                no routing entries for this
+ *                                               route: its CONFIGURED list is
+ *                                               the only account information
+ *                                               and naming from it is right
+ *   { source: 'none', reason }                  nothing may be named:
+ *                                               'captured' | 'blocked' | 'unmeasured'
+ *
+ * `routeIndex` is the join key and it must be this route's position in the same
+ * `routes` array the payload's `routeIndex` counts against.
+ */
+export function routeNaming(route, routeIndex, routing, blocked = []) {
+  const suppressed = suppressedScopesFor(route, routeIndex, routing);
+  if (!suppressed.matched) return { source: 'route-accounts' };
+  if (suppressed.all) return { source: 'none', reason: 'captured' };
+  const liveScopes = (suppressed.published || []).filter(e =>
+    blockedState(blocked, { models: [e.model], globs: e.match || [] }) !== 'blocked');
+  if (!liveScopes.length) {
+    return { source: 'none', reason: suppressed.published.length ? 'blocked' : 'unmeasured' };
   }
-  if (!published.length) return null;
+  // WHICH FIELD ANSWERS "WHO CAN SERVE THIS ROUTE", chosen by measurement
+  // rather than by the field's name — and `band.admitted` alone is the WRONG
+  // answer, which is the direction-trade this rewrite came within one commit of
+  // shipping.
+  //
+  // A band SIZES. `candidates` counts the field, `admitted` is the subset kept
+  // to meet the coverage target, `excluded` holds accounts that genuinely
+  // cannot serve, and `ladder` is the candidate field itself. An account can be
+  // in the ladder, able to serve, and NOT admitted — it is SPARE
+  // (`reason: 'coverage-met'`). Naming only `admitted` drops it: measured, the
+  // route line went from `→ a b c` to `→ a b` on a fleet where `c` can serve.
+  // That is f45431a's failure — trading a direction instead of adding one —
+  // pointed at a renderer, and it would have spread from a few routes to every
+  // route the moment this rule stopped being gated on partial suppression.
+  //
+  // The two regimes need one rule, so it UNIONS rather than choosing:
+  //   passthrough  ladder is EMPTY and `admitted` is the can-serve set
+  //   sized        ladder is the candidate field and is a superset of `admitted`
+  // Per scope, an account that scope EXCLUDES is dropped — excluded accounts do
+  // not appear in the ladder today, but subtracting them is asked rather than
+  // assumed. Across scopes the union then does the right thing on its own: an
+  // account one scope excludes and another admits is still named, because it
+  // really can take that other scope's traffic.
+  const admitted = new Set();
+  for (const entry of liveScopes) {
+    const band = entry.band || {};
+    const cannot = new Set((band.excluded || []).map(x => x.account));
+    for (const name of band.admitted || []) if (!cannot.has(name)) admitted.add(name);
+    for (const row of band.ladder || []) if (!cannot.has(row.account)) admitted.add(row.account);
+  }
+  return { source: 'scopes', admitted, partial: suppressed.any };
+}
+
+function scopeAccountNames(admitted, paint) {
   return admitted.size
     ? [...admitted].map(name => paint.green(name)).join(' ')
     : paint.gray('(none)');
@@ -640,10 +732,18 @@ function partialAccountNames(published, paint) {
 function routingLines(routes, blocked, paint, routing) {
   if (!Array.isArray(routes) || routes.length === 0) return [];
   const lines = [paint.bold('Routing')];
-  for (const route of routes) {
+  // The index is the join key, so it is carried rather than recomputed: this is
+  // the same array the payload's `routeIndex` counts against.
+  for (const [routeIndex, route] of routes.entries()) {
     const globs = route.match || [];
     const match = globs.join(', ');
-    const suppressed = suppressedScopesFor(route, routing);
+    const suppressed = suppressedScopesFor(route, routeIndex, routing);
+    // WHERE THE NAMES COME FROM is decided by `routeNaming`, not here, so that
+    // this line and the TUI's route glyphs cannot answer it differently. The
+    // round fixed the rule in this file and left tui.js reading the
+    // sample-graded list, which is how one payload ended up with two screens
+    // disagreeing about the same route.
+    const naming = routeNaming(route, routeIndex, routing, blocked);
     // A route every one of whose models is blocked can carry no traffic at all —
     // say so, rather than listing eligible accounts it will never reach. Asked
     // of `blockedState`, the same classification the Decision block and the
@@ -658,19 +758,64 @@ function routingLines(routes, blocked, paint, routing) {
     // route never sees. Blocked still wins: a route that can carry nothing at
     // all is the stronger statement, and it is true whichever id was asked
     // about.
-    // PARTLY suppressed: the names come from the scopes that published, since
-    // `routes[].accounts` answers for the stripped sample and would name an
-    // account the measured scopes exclude.
-    const partial = suppressed.any && !suppressed.all
-      ? partialAccountNames(suppressed.published, paint) : null;
+    // ONE NAMING RULE, and `matched` is what selects it — NOT the suppression
+    // state. If this route has routing entries, its names come from the scopes
+    // that published; `routes[].accounts` is the fallback ONLY where no routing
+    // entry matches this route at all, because that field answers for the
+    // route's STRIPPED SAMPLE and would name accounts the measured scopes
+    // exclude. Gating this on partial suppression is what let the all-published
+    // case keep painting from the sample after the mixed case was fixed.
+    //
+    // WHICH ROUTES STILL TAKE THE FALLBACK: those with no matching `routing[]`
+    // entry — an autocreated route (its scope is not a configured route), a
+    // route whose globs produced no entry, and any caller rendering a payload
+    // with no `routing` array at all (the pre-suppression wire shape). For
+    // those, `routes[].accounts` is the only account information in the payload
+    // and it is the route's own configured list, so naming from it is right.
+    // AND ONLY SCOPES THE BLOCKLIST HAS NOT KILLED. A published scope whose own
+    // model is blocked carries nothing, so an account admitted solely there is
+    // an owner offered for traffic this route cannot send it — the same
+    // sentence this round already used to reject naming from the stripped
+    // sample. The `(partly blocked)` tag beside such a name does not save it:
+    // "the caveat beside it did not save it" is the rule, not a spelling.
+    // Asked of `blockedState` per scope, the same classification the Decision
+    // block asks per entry, so the line cannot call a scope live while the
+    // block above it calls that scope blocked.
+    const fromScopes = naming.source === 'scopes'
+      ? scopeAccountNames(naming.admitted, paint) : null;
     const fromRoute = (route.accounts || [])
       .map(a => (a.eligible ? paint.green(a.name) : paint.red(a.name))).join(' ')
       || paint.gray('(none)');
+    // MATCHED BUT NO LIVE SCOPE TO NAME FROM. Two ways to reach it, and the
+    // line says which, because "nobody measured this" and "everything measured
+    // is blocked" are different facts about the route.
+    //
+    // THIS MUST NOT FALL THROUGH TO `fromRoute`, which is why it is a branch
+    // rather than a `||`: with no live scope, `scopeAccountNames` returns null,
+    // and without this the blocklist filter above would hand the line straight
+    // back to the stripped-sample painter — reintroducing the defect through
+    // the door the fix just closed.
+    //
+    // Keyed on the SETS, not on `fromScopes === null`. Those coincide here, but
+    // deriving one branch's condition from another branch's output makes a
+    // neutralisation row mean something other than its label — reverting the
+    // gate above would otherwise have fired this message on a fully measured
+    // route, so a row named for the gate would have mutated two things.
+    //
+    // The no-scope-published half is unreachable today: `figuresAbsent` is
+    // exactly 'representative-captured' or null, so captured ∪ published =
+    // matched. It is written anyway because it is the branch that would
+    // SILENTLY restore the defect the moment a second withheld-reason string is
+    // added.
+    const noneMeasured = naming.source !== 'none' || naming.reason === 'captured' ? null
+      : naming.reason === 'blocked'
+        ? paint.gray('no figures: every measured scope of this route is blocked')
+        : paint.gray('no figures for any scope of this route');
     const accounts = state === 'blocked'
       ? paint.red('blocked')
       : suppressed.all
         ? paint.gray('no figures: an earlier route takes the id this route is named for')
-        : (partial || fromRoute);
+        : (noneMeasured || fromScopes || fromRoute);
     // Some but not all: the names above are the measured scopes' own, and the
     // line still says part of this route went unmeasured rather than presenting
     // a partial answer as a whole one.

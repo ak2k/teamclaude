@@ -1697,8 +1697,21 @@ export class AccountManager {
     // callers passing an instant and a projection taken at a different one is
     // the split this whole round has been closing, one argument list up.
     const now = observed.now;
-    const scopes = [{ scope: 'shared', route: null, model: null, match: [], autocreated: false, owner: null }];
-    for (const route of this.getRoutes(observed)) {
+    const scopes = [{ scope: 'shared', route: null, model: null, match: [], autocreated: false, owner: null, routeIndex: null }];
+    // THE ENTRY CARRIES ITS ROUTE'S POSITION, and this is a WIRE ADDITION made
+    // deliberately. A consumer joining these entries back to `routes[]` had only
+    // `(name, glob)` to do it with, and route NAMES ARE NOT UNIQUE: two routes
+    // sharing a name and one glob are indistinguishable, so the later route's
+    // line imported the earlier route's entry — naming an owner for traffic it
+    // cannot send AND dropping the account that actually serves it. The `owner`
+    // field below is the stored route object and would settle it, but it is used
+    // internally and never reaches the wire, so no consumer can join on it.
+    //
+    // The index is taken from THIS iteration rather than from a second call to
+    // `getRoutes`, so the join does not rest on two calls agreeing about order.
+    // `status.routes` is `getRoutes(observed)` with the same argument, so the
+    // positions correspond by construction rather than by convention.
+    for (const [routeIndex, route] of this.getRoutes(observed).entries()) {
       // The stored route this view was built from, carried rather than looked
       // up later: the scope's own `match` is a fresh one-glob array, so any
       // identity lookup against it silently finds nothing.
@@ -1715,7 +1728,7 @@ export class AccountManager {
         : route.match.flatMap(glob => this._scopeModelsFor(glob, route, owner).map(model => ({ glob, model })));
       for (const { glob, model } of globs) {
         scopes.push({
-          scope: 'route', route: route.name, model, owner,
+          scope: 'route', route: route.name, model, owner, routeIndex,
           // Carried rather than looked up by name later. Route names are not
           // unique — two routes may share one — so a consumer joining an entry
           // back to `routes[]` by name attaches this decision to another
@@ -1725,7 +1738,7 @@ export class AccountManager {
         });
       }
     }
-    return scopes.map(({ scope, route, model, match, autocreated, owner: scopeRoute }) => {
+    return scopes.map(({ scope, route, model, match, autocreated, routeIndex, owner: scopeRoute }) => {
       // A CAPTURED REPRESENTATIVE PUBLISHES NO PER-ACCOUNT FIGURES. Every
       // figure below is computed FOR THE MODEL, and when an earlier route has
       // taken this entry's representative the model is an id this route never
@@ -1769,6 +1782,7 @@ export class AccountManager {
         return {
           scope,
           route,
+          routeIndex,
           model,
           match,
           autocreated,
@@ -1844,6 +1858,7 @@ export class AccountManager {
       return {
         scope,
         route,
+        routeIndex,
         model,
         match,
         autocreated,
