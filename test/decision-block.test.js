@@ -1130,11 +1130,19 @@ test('an account one published scope admits is named even where another excludes
     `dropped ${disputed}, which a published scope admits — a union over admissions must name it`);
 });
 
-// CASE 4 — THE FALLBACK SURVIVES. With NO matching routing entry there are no
-// published scopes to draw on, and `routes[].accounts` is then the route's own
-// CONFIGURED list rather than a stripped-sample grade. Silencing those routes
-// would be the mirror-image defect, so the fix is pinned against it.
-test('a route with no routing entries still names its configured accounts', () => {
+// CASE 4 — THE FALLBACK SURVIVES, and it is now TWO tests because "no routing
+// entries" turned out to be two different facts.
+//
+// THIS FIXTURE USED TO BE THE ONLY ONE, AND IT COULD NOT FAIL FOR THE REASON IT
+// EXISTED. It strips the ENTIRE routing array, which constructs the LEGACY WIRE
+// SHAPE — a payload from a producer that does not send `routing` at all. That is
+// a real case and worth holding. But the guard was asked for to protect the
+// FALLBACK, and the fallback's dangerous neighbour is a route whose globs exist
+// and produced NO entry because an earlier route captured every one of them.
+// This test stayed green straight through that defect. A test that cannot fail
+// for the reason it exists is the thing this round has spent itself finding, and
+// this one was mine.
+test('a payload with no routing array at all still names configured accounts', () => {
   const now = Date.now();
   const am = claimFleet(now, ['*sonnet*'], {
     a: ['claude-sonnet-4-6'], b: ['claude-sonnet-4-6'],
@@ -1143,15 +1151,57 @@ test('a route with no routing entries still names its configured accounts', () =
   const listed = (status.routes.find(r => r.name === 'multi')?.accounts || []).map(a => a.name);
   assert.ok(listed.length, 'the fixture is degenerate: the route lists no accounts');
   // The pre-suppression wire shape, and the shape any consumer that does not
-  // send `routing` produces.
+  // send `routing` produces. NOT a coverage-dead route — see the test below.
   const stripped = { ...status, routing: [] };
   const line = renderStatus(stripped, { color: false, now }).split('\n')
     .find(l => l.includes('*sonnet*'));
   assert.ok(line, 'the routing table renders the route at all');
   for (const name of listed) {
     assert.match(line, new RegExp(`\\b${name}\\b`),
-      `the fallback dropped ${name}; with no routing entries the configured list is all there is`);
+      `the fallback dropped ${name}; with no routing derivation the configured list is all there is`);
   }
+});
+
+// THE NEIGHBOUR THE GUARD ABOVE DOES NOT COVER. A route whose every glob an
+// earlier route captures produces NO entry — so `matched` is false and it took
+// the same scopeless fallback, painting the stripped-sample list for a route
+// that can receive nothing at all. The derivation EXISTS here (other routes have
+// entries) and this route HAS globs, which is what separates it from the case
+// above.
+test('a route whose every id an earlier route takes names nobody and says why', () => {
+  const now = Date.now();
+  const accounts = [acct('alpha'), acct('beta')];
+  const am = new AccountManager(accounts, 0.98, {
+    routes: [
+      { name: 'first', match: ['*opus*'], accounts: [] },
+      // Every id this one is named for is captured by `first`.
+      { name: 'dead', match: ['claude-opus-4-5*'], accounts: [] },
+    ],
+  });
+  am.accounts.forEach((x, i) => {
+    x.quota = { ...x.quota, unified5h: 0.05 + i * 0.05, unified5hReset: now + 2 * H,
+      unified7d: 0.2 + i * 0.1, unified7dReset: now + 40 * H };
+  });
+  const status = am.getStatus();
+  const deadIdx = status.routes.findIndex(r => r.name === 'dead');
+  assert.ok(deadIdx >= 0, 'the premise: the route rendered');
+  const mine = status.routing.filter(e => e.scope === 'route' && e.routeIndex === deadIdx);
+  assert.equal(mine.length, 0, 'the premise: this route produced NO routing entry');
+  assert.ok(status.routing.some(e => e.scope === 'route'),
+    'the premise: the derivation exists — other routes DO have entries');
+  const listed = (status.routes[deadIdx].accounts || []).map(a => a.name);
+  assert.ok(listed.length,
+    'the fixture is degenerate: the sample-graded list names nobody, so there is nothing to wrongly print');
+
+  const line = renderStatus(status, { color: false, now }).split('\n')
+    .find(l => l.includes('claude-opus-4-5*'));
+  assert.ok(line, 'the routing table renders the dead route');
+  for (const name of listed) {
+    assert.doesNotMatch(line, new RegExp(`\\b${name}\\b`),
+      `named ${name} on a route that can receive nothing — no traffic can ever reach it`);
+  }
+  assert.match(line, /an earlier route takes every id this route is named for/,
+    'the dead route names nobody but does not say why, which is a blank an operator cannot act on');
 });
 
 // ── THE OTHER TWO PIPELINE STAGES, each of which the SWEEP found unheld.
@@ -1199,6 +1249,54 @@ test('a route sharing a name with an earlier one does not inherit its scopes', (
     assert.doesNotMatch(line, new RegExp(`\\b${name}\\b`),
       `the late route names ${name}, which only the EARLIER same-named route's scope admits`);
   }
+});
+
+// THE MEASURED BASIS MAY NOT PASS FOR THE ROUTE. A scope is graded on ONE id —
+// its representative — and `band.admitted` answers for THAT id, not for the
+// route. The two come apart when the route's glob reaches siblings AND claims
+// discriminate among them: an account owning only a sibling is `route-excluded`
+// from the representative's scope, so the union correctly drops it, and the
+// line then named a set that excluded a known server WHILE APPEARING COMPLETE.
+// `familySplit` is the payload's own flag that this has happened, and the
+// routing line never read it — the Decision block did.
+//
+// THE FIX IS THE MARKER, NOT A WIDER SET, and the reason is worth keeping:
+// naming the sibling's owner would mean deciding HERE which accounts serve ids
+// no entry was graded on, which is a display deriving eligibility independently
+// of the thing that decides it — the class this round has found seven times.
+test('a route whose scopes do not cover it says so instead of looking complete', () => {
+  const now = Date.now();
+  const accounts = [acct('fiveOwner'), acct('fourOwner')];
+  accounts[0].models = ['claude-fable-5'];
+  accounts[1].models = ['claude-fable-4'];
+  const am = new AccountManager(accounts, 0.98, {
+    routes: [{ name: 'wide', match: ['*fable*'], accounts: [] }],
+  });
+  am.accounts.forEach((x, i) => {
+    x.quota = { ...x.quota, unified5h: 0.05 + i * 0.05, unified5hReset: now + 2 * H,
+      unified7d: 0.2 + i * 0.1, unified7dReset: now + 40 * H,
+      unified7dFable: 0.2 + i * 0.1, unified7dFableReset: now + 40 * H };
+  });
+  const status = am.getStatus();
+  const entry = status.routing.find(e => e.route === 'wide');
+  assert.equal(entry?.figuresAbsent ?? null, null, 'the premise: this scope PUBLISHED figures');
+  assert.ok(entry.familySplit,
+    'the premise: the payload flags that the family is split, or there is no gap to disclose');
+  const admitted = new Set(entry.band?.admitted || []);
+  const excluded = (entry.band?.excluded || []).map(x => x.account);
+  assert.ok(admitted.size && excluded.length,
+    'the fixture is degenerate: the scope does not discriminate, so nothing is left out');
+
+  const line = renderStatus(status, { color: false, now }).split('\n')
+    .find(l => l.trim().startsWith('*fable*'));
+  assert.ok(line, 'the routing table renders the route');
+  // The names stay exactly the measured-admitted set — this ADDS a disclosure
+  // and must not widen or narrow the naming.
+  for (const name of admitted) {
+    assert.match(line, new RegExp(`\\b${name}\\b`), `dropped ${name}, which the scope admits`);
+  }
+  assert.match(line, /split by/,
+    'the line presents a representative-graded answer as the whole route without saying so');
 });
 
 // THE OTHER DIRECTION, and the one this rewrite nearly shipped wrong. Naming

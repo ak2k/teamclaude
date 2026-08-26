@@ -683,7 +683,25 @@ function suppressedScopesFor(route, routeIndex, routing) {
  */
 export function routeNaming(route, routeIndex, routing, blocked = []) {
   const suppressed = suppressedScopesFor(route, routeIndex, routing);
-  if (!suppressed.matched) return { source: 'route-accounts' };
+  if (!suppressed.matched) {
+    // NO ENTRIES IS TWO DIFFERENT FACTS, and collapsing them painted a dead
+    // route from the configured list. SCOPELESS means no routing derivation
+    // exists to consult — the legacy wire shape, or a route with no globs — and
+    // there `routes[].accounts` is the operator's own configured list and is
+    // the right thing to name. COVERAGE-DEAD means the derivation exists, this
+    // route HAS globs, and it produced no entry at all: every id it is named
+    // for is taken by an earlier route, so it can receive nothing. Naming
+    // owners there offers accounts for traffic that can never arrive.
+    //
+    // This EXTENDS the honest-empty form rather than adding a regime: it is the
+    // same "name nobody, say why" the captured and blocked cases already use.
+    const derivable = Array.isArray(routing)
+      && routing.some(e => e && e.scope === 'route');
+    if (derivable && (route.match || []).length) {
+      return { source: 'none', reason: 'coverage-dead' };
+    }
+    return { source: 'route-accounts' };
+  }
   if (suppressed.all) return { source: 'none', reason: 'captured' };
   const liveScopes = (suppressed.published || []).filter(e =>
     blockedState(blocked, { models: [e.model], globs: e.match || [] }) !== 'blocked');
@@ -720,7 +738,31 @@ export function routeNaming(route, routeIndex, routing, blocked = []) {
     for (const name of band.admitted || []) if (!cannot.has(name)) admitted.add(name);
     for (const row of band.ladder || []) if (!cannot.has(row.account)) admitted.add(row.account);
   }
-  return { source: 'scopes', admitted, partial: suppressed.any };
+  // WHAT `admitted` MEANS, and the sentence the last cycle needed and did not
+  // have: it is the accounts that can serve THE ENTRY'S OWN `model` — the
+  // representative id the scope was graded on — sized by the band. It is NOT
+  // "the accounts that can serve this route", and the two come apart exactly
+  // when the route's glob reaches ids beyond the representative AND claims
+  // discriminate among them. `familySplit` is the payload's own flag that this
+  // has happened: the entry says out loud that the family is split and its
+  // figures do not generalise to the rest of it.
+  //
+  // So a route whose measured basis is a PROPER SUBSET of what it can receive
+  // may not present its names as the whole answer. Measured: an account owning
+  // the representative and another owning only a sibling gave `→ fiveOwner`
+  // while `claude-fable-4` reached the same route and `fourOwner` served it —
+  // a set that excludes a known server while appearing complete.
+  //
+  // THE MARKER, NOT A WIDER SET, and the reason is this round's own defect
+  // class. Naming the sibling's owner would mean deciding from here which
+  // accounts can serve ids no entry was graded on — a display deriving
+  // eligibility independently of the thing that decides it, which is the class
+  // this round has now found seven times. Publishing that guess would be worse
+  // than disclosing the gap. The names stay exactly the measured-admitted set;
+  // the line stops claiming to be complete. Closing it properly means grading
+  // the entry on the ids the route RECEIVES, which is round 4a item 1.
+  const basisGap = liveScopes.map(e => e.familySplit).find(Boolean) || null;
+  return { source: 'scopes', admitted, partial: suppressed.any, basisGap };
 }
 
 function scopeAccountNames(admitted, paint) {
@@ -810,7 +852,9 @@ function routingLines(routes, blocked, paint, routing) {
     const noneMeasured = naming.source !== 'none' || naming.reason === 'captured' ? null
       : naming.reason === 'blocked'
         ? paint.gray('no figures: every measured scope of this route is blocked')
-        : paint.gray('no figures for any scope of this route');
+        : naming.reason === 'coverage-dead'
+          ? paint.gray('an earlier route takes every id this route is named for')
+          : paint.gray('no figures for any scope of this route');
     const accounts = state === 'blocked'
       ? paint.red('blocked')
       : suppressed.all
@@ -821,12 +865,20 @@ function routingLines(routes, blocked, paint, routing) {
     // a partial answer as a whole one.
     const someAbsent = suppressed.any && !suppressed.all && state !== 'blocked'
       ? paint.dim(' (some scopes have no figures)') : '';
+    // THE MEASURED BASIS DOES NOT COVER THE ROUTE. The names above are right
+    // for the id each scope was graded on, and this route reaches ids those
+    // figures do not speak for — so the line says so rather than presenting a
+    // representative's answer as the route's. Without it the line named a set
+    // that excluded a known server while appearing complete, which is the one
+    // thing the naming rule may never do.
+    const splitBasis = naming.basisGap && state !== 'blocked'
+      ? paint.dim(` (split by ${naming.basisGap}; other ids may go elsewhere)`) : '';
     const partly = state === 'partial' ? paint.dim(' (partly blocked)') : '';
     const tag = route.autocreated ? paint.dim(' (auto)') : route.bucket ? paint.dim(` [${route.bucket}]`) : '';
     const pin = route.pinned ? paint.dim(` [pinned: ${route.pinned}]`) : '';
     // padEnd on the raw text, color after, so ANSI codes don't throw off alignment.
     const label = paintRoute(paint, route.color, match.padEnd(16));
-    lines.push(`  ${label} ${paint.dim('→')} ${accounts}${someAbsent}${partly}${tag}${pin}`);
+    lines.push(`  ${label} ${paint.dim('→')} ${accounts}${someAbsent}${splitBasis}${partly}${tag}${pin}`);
   }
   lines.push('');
   return lines;

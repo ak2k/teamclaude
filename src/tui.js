@@ -89,6 +89,27 @@ const routeFamily = route => {
 const routeGlyph = (paint, eligible, pinned) =>
   pinned ? bold(paint('►')) : eligible ? paint('►') : dim(paint('►'));
 
+// WHICH BLOCKLIST GRADES A ROUTE — the PAYLOAD'S when it carries one, the local
+// config otherwise, and never the local one in preference to it.
+//
+// This exists because grading with `this.config.blockedModels` was wrong in
+// ATTACH mode in BOTH directions, and both were reproduced. The dashboard polls
+// a server; that server copies its own `blockedModels` into the payload
+// (`index.js:391`), while `this.config` is the config of whatever machine the
+// dashboard happens to be running on — usually a different list, often empty.
+// So a route the server blocks kept its owner marked, AND a route only the
+// LOCAL config blocked lost the owner that actually serves it. Two models
+// reported those as separate findings; they are one root.
+//
+// The order is not symmetric and the asymmetry is the point: in LOCAL mode
+// `getStatus()` does NOT carry `blockedModels` at all — the config IS the
+// source there — so the payload is preferred only when it actually has one.
+function blocklistFor(payload, config) {
+  const fromPayload = Array.isArray(payload?.blockedModels) ? payload.blockedModels : null;
+  return (fromPayload ?? config?.blockedModels ?? [])
+    .filter(p => typeof p === 'string' && p.length);
+}
+
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 const strip = s => s.replace(ANSI_RE, '');
 const vw = s => strip(s).length;
@@ -1095,8 +1116,7 @@ export class TUI {
       const payload = typeof this.am.getStatus === 'function'
         ? this.am.getStatus() : this.am.status;
       const routes = this.am.getRoutes();
-      const blockedPats = (this.config.blockedModels || [])
-        .filter(p => typeof p === 'string' && p.length);
+      const blockedPats = blocklistFor(payload, this.config);
       // THE JOIN IS GUARDED, NOT ASSUMED. `routeIndex` is a position into the
       // payload's own `routes`, and `getRoutes()` here is a SECOND call (attach
       // mode also sanitizes it, since a half-specified route from an older or
@@ -1664,12 +1684,43 @@ export class TUI {
     }
     // Auto-detected routes (read-only) for context — a family metered separately
     // with no configured route. Pin one by adding a route with the same glob.
-    const auto = this.am.getRoutes().filter(r => r.autocreated);
+    // THE AUTO-DETECTED BLOCK ANSWERS "WHO SERVES THIS", so it uses the shared
+    // rule. The CONFIGURED block above answers "what did the operator type",
+    // so it keeps reading `this.config.routes` and must not be converted — a
+    // settings editor showing configuration is doing its job, and sweeping both
+    // would be a new defect wearing this one's justification. THE DISPLAY'S
+    // CLAIM DECIDES ITS SOURCE.
+    //
+    // This block used to map `getRoutes().accounts` raw, which is the
+    // stripped-sample view, so one route could be answered three different ways
+    // on three surfaces: the status renderer and the dashboard glyphs from
+    // `routeNaming()`, and this line from the old field.
+    const allRoutes = this.am.getRoutes();
+    // Same mode-safe, GUARDED join as the dashboard: attach mode has no
+    // `getStatus()` and keeps its payload on `.status`, and the index join runs
+    // only when the two lists correspond in length.
+    const payload = typeof this.am.getStatus === 'function'
+      ? this.am.getStatus() : this.am.status;
+    const joinable = Array.isArray(payload?.routing)
+      && Array.isArray(payload?.routes)
+      && payload.routes.length === allRoutes.length;
+    const blockedPats = blocklistFor(payload, this.config);
+    const auto = allRoutes
+      .map((r, i) => [r, i])
+      .filter(([r]) => r.autocreated);
     if (auto.length) {
       lines.push('');
       lines.push(dim('  Auto-detected (not saved):'));
-      for (const r of auto) {
-        lines.push(dim(`     ${r.match.join(', ')} → ${r.accounts.map(a => a.name).join(' ')}`));
+      for (const [r, i] of auto) {
+        const n = joinable
+          ? routeNaming(r, i, payload.routing, blockedPats) : null;
+        const names = !n || n.source === 'route-accounts'
+          ? (r.accounts || []).map(a => a.name).join(' ')
+          : n.source === 'none' ? ''
+            : [...n.admitted].join(' ');
+        const why = n && n.source === 'none' ? dim('  (no figures)')
+          : n && n.basisGap ? dim(`  (split by ${n.basisGap})`) : '';
+        lines.push(dim(`     ${r.match.join(', ')} → ${names}${why}`));
       }
     }
   }
