@@ -235,6 +235,13 @@ test('the glyph column qualifies a route whose basis does not cover it', () => {
     assert.ok(row, `no rendered row for ${name}`);
     return row[GLYPH_AT + col];
   };
+  // PINNED-BY-DESIGN, and the distinction is the point of the whole test: this
+  // asserts WHICH mark is used, not whether anything is marked. A widened
+  // matcher here would accept the complete glyph and the assertion would grade
+  // nothing — the defect it holds is precisely a qualified route rendering as a
+  // complete one. Matchers that ask "is it marked at all" belong to the
+  // vocabulary class and are widened (see the helper above); an identity claim
+  // about a specific glyph is the one case that must stay literal.
   for (const name of admitted) {
     assert.equal(cellFor(name), '▸',
       `${name} is marked as if this route's answer were complete, while the status `
@@ -341,4 +348,52 @@ test('the settings CONFIGURED routes block still prints what the operator typed'
       `the configured block dropped ${name}; it must show the configuration as entered, `
       + 'not a graded answer about who serves');
   }
+});
+
+
+// ── THE REASON IS NOT ONE REASON.
+//
+// `routeNaming` returns `source: 'none'` for FOUR different facts — the scopes
+// were captured, everything measured is blocked, nothing was measured, or no id
+// can reach the route at all. The settings auto line collapsed all four to
+// "(no figures)", so a BLOCKED route reported that its data was missing. The
+// names were right and the REASON was false, and an operator acts differently
+// on the two: one is a switch they flipped, the other is a gap in the report.
+//
+// The status line has always distinguished these. One payload described two
+// ways is the shape this round keeps finding, so it is asserted rather than
+// left to the next reader.
+test('the settings auto line says WHY it names nobody', () => {
+  const now = Date.now();
+  const build = (blockedModels) => {
+    const am = new AccountManager([
+      { name: 'owner', type: 'apikey', apiKey: 'k1', models: ['claude-fable-5'] },
+      { name: 'other', type: 'apikey', apiKey: 'k2', models: ['claude-sonnet-4-6'] },
+    ], 0.98, { routes: [] });
+    am.accounts.forEach((x, i) => {
+      x.quota = { ...x.quota,
+        unified5h: 0.05 + i * 0.05, unified5hReset: now + 2 * H,
+        unified7d: 0.2 + i * 0.1, unified7dReset: now + 40 * H,
+        unified7dFable: 0.2 + i * 0.1, unified7dFableReset: now + 40 * H };
+    });
+    const tui = new TUI({
+      accountManager: am,
+      config: { proxy: { port: 1 }, routes: [], blockedModels },
+      sx: null, saveConfig: async () => {}, syncAccounts: async () => 0, onQuit: () => {},
+    });
+    tui.render = () => {};
+    const lines = [];
+    tui._renderRoutes(lines);
+    return lines.map(strip).find(l => l.includes('*fable*'));
+  };
+
+  const blocked = build(['*fable*']);
+  const clear = build([]);
+  assert.ok(blocked && clear, 'the settings screen renders the auto-detected route');
+  assert.notEqual(blocked, clear,
+    'the fixture is degenerate: blocking changes nothing, so no reason was exercised');
+  assert.match(blocked, /block/i,
+    'a BLOCKED route does not say it is blocked — the names are right and the reason is false');
+  assert.doesNotMatch(blocked, /no figures/,
+    'a blocked route reports its data as missing, which is a different fact');
 });

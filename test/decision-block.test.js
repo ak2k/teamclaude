@@ -1429,7 +1429,10 @@ test('a legacy payload whose entries carry no join fields names its configured a
   // The legacy shape: entries KEPT, join fields removed. Not `routing: []`.
   const legacy = {
     ...status,
-    routing: status.routing.map(({ routeIndex, match, ...rest }) => rest),
+    // The underscores are the configured `/^_/u` allowance: these two are
+    // destructured only to REMOVE them from `rest`, which is the whole point of
+    // the fixture, so they are intentionally unused rather than forgotten.
+    routing: status.routing.map(({ routeIndex: _routeIndex, match: _match, ...rest }) => rest),
   };
   assert.ok(legacy.routing.some(e => e.scope === 'route'),
     'the premise: the payload still HAS route entries — this is not the empty-array shape');
@@ -1448,5 +1451,93 @@ test('a legacy payload whose entries carry no join fields names its configured a
   for (const name of listed) {
     assert.match(line, new RegExp(`\\b${name}\\b`),
       `the legacy payload dropped ${name}; a mis-join must degrade to the configured list`);
+  }
+});
+
+
+// ABSENCE IS MEASURED PER GLOB, NOT PER ROUTE.
+//
+// A route's configured globs are its REACHABLE set and its entries are its
+// MEASURED set. A glob that produced NO entry — because an earlier route takes
+// every id it names — is reachable-but-unmeasured, and it is a basis gap in
+// exactly the way a withheld entry is. The completeness test only ever asked
+// whether an ENTRY said `figuresAbsent`, so a missing entry was not a hit: a
+// route listing two globs, one of them wholly captured, rendered as COMPLETE
+// while the captured glob's traffic was served somewhere else.
+//
+// Entry-absent and `figuresAbsent` are the same state ONLY when the whole route
+// is empty — which was the one case already handled. WHEN A FIX KEYS ON "ALL",
+// ASK WHAT HAPPENS AT "SOME".
+test('a glob measured by nobody makes the route say so', () => {
+  const now = Date.now();
+  // NO `models` CLAIMS ANYWHERE, deliberately. With claims present the live
+  // `*opus*` scope reports its own `familySplit`, so the line qualifies itself
+  // whether or not the unmeasured glob is counted — and the test would pass for
+  // a reason unrelated to what it is named for. The sweep caught exactly that:
+  // the row for the unmeasured-glob term SURVIVED against the first version of
+  // this fixture. Claim-free, the captured glob is the ONLY source of a gap.
+  const accounts = [acct('a'), acct('b')];
+  const am = new AccountManager(accounts, 0.98, {
+    routes: [
+      { name: 'first', match: ['*haiku*'], accounts: ['a'] },
+      { name: 'mixed', match: ['*haiku*', '*opus*'], accounts: [] },
+    ],
+  });
+  am.accounts.forEach((x, i) => {
+    x.quota = { ...x.quota, unified5h: 0.05 + i * 0.05, unified5hReset: now + 2 * H,
+      unified7d: 0.2 + i * 0.1, unified7dReset: now + 40 * H };
+  });
+  const status = am.getStatus();
+  const idx = status.routes.findIndex(r => r.name === 'mixed');
+  const mine = status.routing.filter(e => e.scope === 'route' && e.routeIndex === idx);
+  const measured = new Set(mine.flatMap(e => e.match || []));
+  const unmeasured = (status.routes[idx].match || []).filter(g => !measured.has(g));
+  assert.ok(mine.length, 'the premise: this route DOES have at least one entry');
+  assert.ok(unmeasured.length,
+    'the fixture is degenerate: every configured glob produced an entry, so nothing is unmeasured');
+
+  const line = renderStatus(status, { color: false, now }).split('\n')
+    .find(l => l.trim().startsWith('*haiku*, *opus*'));
+  assert.ok(line, 'the routing table renders the route');
+  assert.match(line, /split by/,
+    'the line lists a glob nobody measured and still presents itself as the whole answer');
+});
+
+// A NAME IS NOT AN IDENTITY, and the union that names accounts is keyed by one.
+// Two accounts may share a name; excluding the one erased the other, and a
+// route whose admitted account was real rendered `(none)` while that account
+// served it. Base named both — permissively, from the configured list — so the
+// erasure arrived with this round rather than being inherited.
+//
+// ADMISSION WINS THE COLLISION: the payload's `admitted` and `excluded` are
+// BOTH name-keyed upstream, so the renderer never had an identity to discard;
+// but if a name is admitted at all then some account bearing it can serve, and
+// naming it is the true statement.
+test('an admitted account is not erased by a different account sharing its name', () => {
+  const now = Date.now();
+  const dupA = { name: 'dup', type: 'apikey', apiKey: 'k1', models: ['claude-opus-4-5'] };
+  const dupB = { name: 'dup', type: 'apikey', apiKey: 'k2', models: ['claude-haiku-4-5'] };
+  const am = new AccountManager([dupA, dupB], 0.98, {
+    routes: [{ name: 'wide', match: ['*opus*'], accounts: [] }],
+  });
+  am.accounts.forEach((x, i) => {
+    x.quota = { ...x.quota, unified5h: 0.05 + i * 0.05, unified5hReset: now + 2 * H,
+      unified7d: 0.2 + i * 0.1, unified7dReset: now + 40 * H };
+  });
+  const status = am.getStatus();
+  const e = status.routing.find(x => x.route === 'wide');
+  const admitted = e?.band?.admitted || [];
+  const excluded = (e?.band?.excluded || []).map(x => x.account);
+  assert.ok(admitted.some(n => excluded.includes(n)),
+    'the fixture is degenerate: no name is both admitted and excluded, so no collision exists');
+
+  const line = renderStatus(status, { color: false, now }).split('\n')
+    .find(l => l.trim().startsWith('*opus*'));
+  assert.ok(line, 'the routing table renders the route');
+  assert.doesNotMatch(line, /\(none\)/,
+    'the route names nobody while an admitted account serves it');
+  for (const name of admitted) {
+    assert.match(line, new RegExp(`\\b${name}\\b`),
+      `${name} is admitted and was erased by a namesake's exclusion`);
   }
 });

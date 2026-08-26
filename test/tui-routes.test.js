@@ -220,6 +220,13 @@ test('TUI: the F7 (Fable) marker sits on exactly one account — the routing tar
 
   const rows = am.accounts.map((_, i) =>
     stripAnsi(tui._renderAcct(i, 8, true, routes, [], familyTarget)));
+  // PINNED-BY-DESIGN: `►` is the COMPLETE vocabulary at this site, not a
+  // narrowing. `familyMark` calls `routeGlyph` and never `routeGlyphPartial`,
+  // so the qualified `▸` cannot appear on an F7 cell — a widened matcher would
+  // accept a glyph this path is structurally unable to emit. The tripwire is
+  // `familyMark` growing a qualified form, which is what a per-id fix for
+  // TC-039 would most likely add; this assertion should widen then, and not
+  // before.
   const marked = rows.filter(r => /►\s*F7/.test(r));
   assert.equal(marked.length, 1, 'exactly one F7 marker across all accounts');
   // ...and it is NOT the Fable-spent account a (which instead shows the ⊘ tag).

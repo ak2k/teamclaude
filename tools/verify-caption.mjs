@@ -307,6 +307,54 @@ console.log(`fleet      ${candidates.length} of ${sample.accounts.length} accoun
 console.log(`decision   ${decision.kind}${decision.reason ? ` (${decision.reason})` : ''}` +
   (decision.kind === 'sized' ? `  target ${decision.target}  achieved ${decision.achieved.toFixed(3)}` : ''));
 
+// ── THE RECONSTRUCTION IS CHECKED AGAINST THE CAPTURE BEFORE ANYTHING IS
+//    GRADED, because the route rebuild above CANNOT always be right ─────────
+//
+// `routes[].accounts` on the wire is a VIEW — the accounts a route currently
+// admits — and the config it came from is not recoverable from it. A route the
+// operator left UNRESTRICTED (`accounts: []`) publishes the whole eligible
+// fleet in that field, and the mapping above then hands `setRoutes` an EXPLICIT
+// list of those names, which is a different route: unrestricted-and-four-happen-
+// to-qualify becomes restricted-to-these-four.
+//
+// Measured, on a capture from a `*fable*` route with an empty accounts list and
+// one models-claim owner: the payload's own routing entry records `passthrough`
+// with ONE candidate, and the rebuild produces `sized` over FOUR, target 1,
+// achieved 1.643 — then printed REPRODUCES for the shipped caption against a
+// fleet that never existed. The pre-round gate REFUSED the same payload, so
+// this round turned a refusal into a graded verdict, which is the worst
+// direction an instrument can move: a refusal says "I cannot grade this", a
+// verdict says "I graded this and it is fine".
+//
+// So the rebuild now has to agree with the capture it claims to reconstruct.
+// This is the same posture as the harness self-check above — the instrument
+// establishes it is measuring the right thing before it reports — and it is
+// deliberately a REFUSAL rather than a repair: the wire genuinely does not
+// carry route exclusivity, so there is nothing here to reconstruct correctly,
+// only a guess to detect and decline.
+const routingFor = (sample.routing || []).filter(e => e && e.model === MODEL);
+if (routingFor.length > 1) {
+  refuse(`${SAMPLE} carries ${routingFor.length} routing entries for ${MODEL};`
+    + ' which one the rebuild should agree with is not decidable from the wire');
+}
+const captured = routingFor[0];
+if (captured && captured.band) {
+  const cap = captured.band;
+  const mism = [];
+  if (typeof cap.candidates === 'number' && cap.candidates !== candidates.length) {
+    mism.push(`candidates ${candidates.length} rebuilt vs ${cap.candidates} captured`);
+  }
+  if (typeof cap.kind === 'string' && cap.kind !== decision.kind) {
+    mism.push(`decision '${decision.kind}' rebuilt vs '${cap.kind}' captured`);
+  }
+  if (mism.length) {
+    refuse(`the rebuilt fleet does not match the capture for route '${captured.route}': ${mism.join('; ')}.`
+      + ' The usual cause is a route with no configured accounts list: its wire view names every'
+      + ' currently eligible account and the rebuild reads that as an explicit restriction.'
+      + ' Grading a caption against this fleet would grade a fleet that never existed');
+  }
+}
+
 // Only the `sized` variant admits by coverage, which is what these captions
 // describe. Under `banded` or `passthrough` the sentence on trial is a different
 // sentence, and grading it against this one would grade the wrong claim.

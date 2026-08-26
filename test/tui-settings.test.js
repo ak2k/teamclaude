@@ -42,6 +42,11 @@ test('settings: every navigable row is drawn, and the cursor stays visible on it
     const text = renderWithCursorAt(tui, i);
     assert.ok(text.includes(fields[i].label),
       `"${fields[i].label}" is reachable with the cursor but never drawn`);
+    // PINNED-BY-DESIGN: this `▸` is the settings CURSOR, not a route glyph —
+    // the two share a codepoint and nothing else. A glyph sweep of the suite
+    // surfaces this line, so the collision is written down rather than
+    // rediscovered: widening it to the route vocabulary would make the cursor
+    // assertion pass on a stray route mark elsewhere in the frame.
     assert.ok(text.includes('▸'),
       `the cursor vanishes while "${fields[i].label}" is selected`);
   }

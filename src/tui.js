@@ -1742,7 +1742,20 @@ export class TUI {
           ? (r.accounts || []).map(a => a.name).join(' ')
           : n.source === 'none' ? ''
             : [...n.admitted].join(' ');
-        const why = n && n.source === 'none' ? dim('  (no figures)')
+        // THE REASON IS NOT ONE REASON. `source: 'none'` carries FOUR — the
+        // scopes were captured, everything measured is blocked, nothing was
+        // measured, or no id can reach the route at all — and collapsing them
+        // to "(no figures)" made a BLOCKED route say its data was missing.
+        // Names right, reason FALSE, and an operator acts differently on
+        // "blocked" than on "unmeasured": one is a switch they flipped, the
+        // other is a gap in the report. The status line has always distinguished
+        // these; this line did not, which is one payload described two ways.
+        const why = n && n.source === 'none' ? dim(`  (${{
+          captured: 'no figures: an earlier route takes this id',
+          blocked: 'blocked',
+          'coverage-dead': 'an earlier route takes every id',
+          unmeasured: 'no figures',
+        }[n.reason] || 'no figures'})`)
           : n && n.basisGap ? dim(`  (split by ${n.basisGap})`) : '';
         lines.push(dim(`     ${r.match.join(', ')} → ${names}${why}`));
       }

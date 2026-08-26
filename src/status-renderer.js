@@ -758,8 +758,29 @@ export function routeNaming(route, routeIndex, routing, blocked = []) {
   const admitted = new Set();
   for (const entry of liveScopes) {
     const band = entry.band || {};
-    const cannot = new Set((band.excluded || []).map(x => x.account));
-    for (const name of band.admitted || []) if (!cannot.has(name)) admitted.add(name);
+    // A NAME IS NOT AN IDENTITY, and this set is keyed by name. Two accounts
+    // may share one — nothing forbids it — and then excluding the one erased
+    // the other: a route whose admitted account was real rendered `→ (none)`
+    // while that account served it. Measured at three shas; base named both
+    // (permissively, from the configured list), so the erasure arrived with
+    // this round.
+    //
+    // ADMISSION WINS THE COLLISION. The payload cannot do better — `admitted`
+    // and `excluded` are BOTH name-keyed upstream, so the renderer is not
+    // discarding an identity it was given; it never had one. But if a name is
+    // admitted at all, then at least one account bearing it can serve, and
+    // naming it is the true statement. Subtracting first made the false one.
+    // ONE MECHANISM, NOT TWO. The first repair filtered `cannot` AND made the
+    // admitted loop skip the check, and each change alone prevented the defect
+    // — so no single-line mutation could restore it and its matrix row SURVIVED
+    // whichever line it targeted. Belt-and-braces reads as caution and is
+    // really an untestable fix: redundancy is what a row cannot kill.
+    // The rule now lives in ONE place — `cannot` is the exclusions MINUS the
+    // admissions — and both loops consult it identically.
+    const admittedHere = new Set(band.admitted || []);
+    const cannot = new Set((band.excluded || [])
+      .map(x => x.account).filter(n => !admittedHere.has(n)));
+    for (const name of admittedHere) if (!cannot.has(name)) admitted.add(name);
     for (const row of band.ladder || []) if (!cannot.has(row.account)) admitted.add(row.account);
   }
   // WHAT `admitted` MEANS, and the sentence the last cycle needed and did not
@@ -785,6 +806,20 @@ export function routeNaming(route, routeIndex, routing, blocked = []) {
   // than disclosing the gap. The names stay exactly the measured-admitted set;
   // the line stops claiming to be complete. Closing it properly means grading
   // the entry on the ids the route RECEIVES, which is round 4a item 1.
+  //
+  // HOW FAR "STOPS CLAIMING TO BE COMPLETE" GOES, bounded here rather than left
+  // one step wider than its evidence. The marker fires on `familySplit`, and
+  // that flag has TWO arms with DIFFERENT strengths. The CLAIMS arm is exact:
+  // ownership is literal-id matching, so asking whether this glob reaches a
+  // claimed id is decidable and it is answered. The EARLIER-ROUTE arm is not —
+  // it asks `modelGlobOverlaps`, documented advisory at model.js:156 and not
+  // decidable in general — so an earlier route CAN divide a family without the
+  // flag noticing, and then this line renders the complete form for a basis
+  // that is really a proper subset. Witnessed, with a live control: an earlier
+  // `claude-*-4` ahead of `*fable*` sends `claude-fable-4` elsewhere while the
+  // line reads `*fable* → b` unqualified (TC-037). The sentence above is
+  // therefore true of the claims arm and ASPIRATIONAL of the earlier-route one
+  // until the glob-language primitive TC-029 and TC-030 both need lands.
   // NAMES COME FROM THE MEASURED BASIS; DISCLOSURES COME FROM THE WHOLE ENTRY
   // SET. This read `liveScopes`, which meant a WITHHELD sibling entry's
   // `familySplit` was discarded before the line could see it — so a route with
@@ -796,7 +831,38 @@ export function routeNaming(route, routeIndex, routing, blocked = []) {
   // A withheld scope IS ITSELF a basis gap, so reading the flag over every
   // entry this route owns puts that shape back in row 2 rather than needing a
   // fifth row. Names are unaffected: they still come only from `liveScopes`.
-  const basisGap = (suppressed.entries || []).map(e => e.familySplit).find(Boolean) || null;
+  // ABSENCE IS MEASURED AT GLOB GRANULARITY, NOT PER ROUTE. The route's
+  // configured globs are its REACHABLE set; the entries are its MEASURED set;
+  // a glob with no entry is reachable-but-unmeasured and is a basis gap in
+  // exactly the way a withheld entry is.
+  //
+  // The previous version only ever asked whether an ENTRY said
+  // `figuresAbsent`, so a glob that produced no entry at all was invisible: a
+  // route listing `*haiku*, *opus*` where an earlier route takes every haiku id
+  // rendered `→ b` with no qualifier, complete, while haiku traffic was served
+  // somewhere else entirely. A MISSING ENTRY IS NOT A HIT — and entry-absent
+  // and `figuresAbsent` are the same state ONLY when the whole route is empty,
+  // which is the one case the code already handled.
+  //
+  // ALL globs absent is DEAD (handled above by `matched`); SOME absent is row 2
+  // with the disclosure. One rule, both cases — and the twin is what this round
+  // keeps having to come back for. WHEN A FIX KEYS ON "ALL", ASK WHAT HAPPENS
+  // AT "SOME".
+  //
+  // NO SYNTHETIC ENTRY IS PUBLISHED for the missing glob, deliberately: that
+  // would re-open the defect where a route with no measurable scope acquired
+  // figures it had never computed. The DISCLOSURE is the fix; a fabricated
+  // scope is the trap.
+  const measuredGlobs = new Set((suppressed.entries || []).flatMap(e => e.match || []));
+  const unmeasuredGlobs = (route.match || []).filter(g => !measuredGlobs.has(g));
+  // EVERY distinct reason, not the first one. `.find(Boolean)` took whichever
+  // reason came first and silently hid any other — an earlier-route capture on
+  // one glob masking a model-claims split on another, so the line disclosed a
+  // gap while naming the wrong cause for it.
+  const gapReasons = new Set();
+  for (const e of suppressed.entries || []) if (e.familySplit) gapReasons.add(e.familySplit);
+  if (unmeasuredGlobs.length) gapReasons.add('an earlier route');
+  const basisGap = gapReasons.size ? [...gapReasons].join('; ') : null;
   return { source: 'scopes', admitted, partial: suppressed.any, basisGap };
 }
 

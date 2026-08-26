@@ -262,3 +262,69 @@ test('a band variant the caption does not describe is refused rather than graded
     fs.rmSync(single, { force: true });
   }
 });
+
+// A ROUTE'S WIRE VIEW IS NOT ITS CONFIG, and the gate rebuilds a fleet from the
+// wire. `routes[].accounts` is `[{name, eligible}]` — who the route currently
+// admits — and a route the operator left UNRESTRICTED publishes the whole
+// eligible fleet there. Reading that back as an explicit accounts list turns
+// "unrestricted, and four happen to qualify" into "restricted to these four",
+// which is a different route and can be a different DECISION.
+//
+// Measured before the check below existed: a capture from a `*fable*` route
+// with an empty accounts list and one models-claim owner records `passthrough`
+// over ONE candidate in its own routing entry, and the rebuild produced `sized`
+// over FOUR — then printed REPRODUCES for the shipped caption against a fleet
+// that never existed. The pre-round gate refused the same payload outright, so
+// the reconstruction turned a refusal into a graded verdict.
+//
+// The gate cannot recover the config from the wire, so it does not try: it
+// checks its rebuild against the capture's own routing entry and REFUSES on
+// disagreement.
+async function captureWith(routeAccounts) {
+  const { AccountManager } = await import('../src/account-manager.js');
+  const now = Date.parse('2026-08-26T12:00:00.000Z');
+  const H = 3600e3;
+  const am = new AccountManager([
+    { name: 'owner', type: 'apikey', apiKey: 'k1', models: ['claude-fable-5'] },
+    { name: 'spare1', type: 'apikey', apiKey: 'k2' },
+    { name: 'spare2', type: 'apikey', apiKey: 'k3' },
+    { name: 'spare3', type: 'apikey', apiKey: 'k4' },
+  ], 0.98, {
+    routes: [{ name: 'fable', match: ['*fable*'], accounts: routeAccounts }],
+    expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 },
+  });
+  am.accounts.forEach((a, i) => {
+    a.quota = { ...a.quota,
+      unified5h: 0.10 + i * 0.05, unified5hReset: now + (2 + i) * H,
+      unified7d: 0.20 + i * 0.10, unified7dReset: now + (40 + i * 5) * H,
+      unified7dFable: 0.15 + i * 0.10, unified7dFableReset: now + (40 + i * 5) * H };
+  });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'caption-recon-'));
+  const file = path.join(dir, 'capture.json');
+  fs.writeFileSync(file, JSON.stringify(am.getStatus(), null, 2));
+  return { file, now: new Date(now).toISOString() };
+}
+
+test('a capture the rebuild cannot reproduce is refused, not graded', async () => {
+  const { file, now } = await captureWith([]);          // UNRESTRICTED route
+  const { code, out } = gate([`--sample=${file}`, '--model=claude-fable-5', `--now=${now}`]);
+  assert.notEqual(code, 0, `the gate graded a fleet the capture contradicts:\n${out}`);
+  assert.doesNotMatch(out, /^(REPRODUCES|DIFFERS|INDISTINGUISHABLE)\s+\S/m,
+    'a caption verdict was printed for a fleet the capture does not describe;'
+    + ' the exit code is not the observable, the verdict is');
+  assert.match(out, /the rebuilt fleet does not match the capture/,
+    'it refused for some other reason, so this fixture is not exercising the reconstruction check');
+  assert.match(out, /candidates 4 rebuilt vs 1 captured/);
+});
+
+test('the reconstruction check does not refuse a capture it CAN reproduce', async () => {
+  // The control, and the reason it is not optional: a check that refused every
+  // capture would satisfy the test above without measuring anything. With the
+  // route configured explicitly, the wire view and the config agree, the
+  // rebuild matches, and the gate walks past this check to its ordinary work.
+  const { file, now } = await captureWith(['owner']);   // EXPLICIT route
+  const { out } = gate([`--sample=${file}`, '--model=claude-fable-5', `--now=${now}`]);
+  assert.doesNotMatch(out, /the rebuilt fleet does not match the capture/,
+    'the reconstruction check refused a capture whose route WAS explicitly configured,'
+    + ' so it is not discriminating — it is just refusing');
+});
