@@ -251,6 +251,20 @@ test('a band variant the caption does not describe is refused rather than graded
   // would report a caption as reproducing a decision the caption never made.
   const sample = JSON.parse(fs.readFileSync(SAMPLE, 'utf8'));
   sample.accounts = sample.accounts.slice(0, 1);
+  // THE ROUTING BLOCK DESCRIBES THE FULL FLEET AND THIS FIXTURE TRUNCATES IT,
+  // so the capture would contradict its own accounts — and the fidelity check
+  // now catches exactly that, refusing before the band-variant refusal this
+  // test is about. That is the check working, not interfering: a four-candidate
+  // routing entry beside a one-account fleet IS an inconsistent capture.
+  // The entry is brought into line with the truncated fleet so the fixture is
+  // internally coherent and the refusal under test is the one that fires.
+  for (const e of sample.routing || []) {
+    if (e && e.band) {
+      e.band.candidates = 1;
+      e.band.kind = 'passthrough';
+      e.band.admitted = (e.band.admitted || []).slice(0, 1);
+    }
+  }
   const single = path.join(os.tmpdir(), `caption-single-${process.pid}.json`);
   fs.writeFileSync(single, JSON.stringify(sample));
   try {
@@ -327,4 +341,63 @@ test('the reconstruction check does not refuse a capture it CAN reproduce', asyn
   assert.doesNotMatch(out, /the rebuilt fleet does not match the capture/,
     'the reconstruction check refused a capture whose route WAS explicitly configured,'
     + ' so it is not discriminating — it is just refusing');
+});
+
+// THE GUARD WAS THE BYPASS. The fidelity check added in `09c1fdf` compares the
+// rebuilt fleet against the capture's own routing entry — and skipped silently
+// when no entry named the graded model. `tools/caption-sample.json` carried NO
+// routing key at all, so on the sample the battery actually runs the repair had
+// never executed once, for any model, while the gate printed caption verdicts.
+//
+// Unreachable code cannot carry a claim; this is that defect in an INSTRUMENT.
+test('the fidelity check actually runs on the shipped sample', () => {
+  const sample = JSON.parse(fs.readFileSync(SAMPLE, 'utf8'));
+  assert.ok(Array.isArray(sample.routing) && sample.routing.length,
+    'the shipped sample lost its routing block; the fidelity check is inert again');
+  const entry = sample.routing.find(e => e && e.model === 'claude-fable-5');
+  assert.ok(entry && entry.band,
+    'no captured entry names the graded model, so the comparison would skip');
+
+  // IT GRADES when the rebuild matches...
+  const ok = gate([`--sample=${SAMPLE}`, '--model=claude-fable-5', `--now=${NOW}`]);
+  assert.equal(ok.code, 0, ok.out);
+
+  // ...and REFUSES when the capture contradicts the rebuild. Without this the
+  // test passes on a build where the check is present and never fires.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'caption-fid-'));
+  const bad = JSON.parse(JSON.stringify(sample));
+  const badEntry = bad.routing.find(e => e && e.model === 'claude-fable-5');
+  badEntry.band.candidates = (badEntry.band.candidates || 0) + 99;
+  const badPath = path.join(dir, 'corrupt.json');
+  fs.writeFileSync(badPath, JSON.stringify(bad));
+  const refused = gate([`--sample=${badPath}`, '--model=claude-fable-5', `--now=${NOW}`]);
+  assert.notEqual(refused.code, 0, 'a contradicted capture was graded anyway');
+  assert.match(refused.out, /does not match the capture/);
+
+  // ...and refuses LOUDLY when there is nothing to check against, so the next
+  // sample captured without a routing block cannot restore the silence.
+  const stripped = JSON.parse(JSON.stringify(sample));
+  delete stripped.routing;
+  const strippedPath = path.join(dir, 'noRouting.json');
+  fs.writeFileSync(strippedPath, JSON.stringify(stripped));
+  const loud = gate([`--sample=${strippedPath}`, '--model=claude-fable-5', `--now=${NOW}`]);
+  assert.notEqual(loud.code, 0, 'a sample with no routing block was graded silently');
+  assert.match(loud.out, /carries no routing/);
+
+  // ...AND REFUSES WHEN THE ROUTING BLOCK NAMES NO ENTRY FOR THE GRADED MODEL.
+  // This is the arm that actually bypassed: same band payload, a SIBLING model
+  // id on the entry, the comparison skipped and a verdict printed anyway. It is
+  // a DIFFERENT conjunct from the missing-block case, and without it the
+  // neutralisation row for the no-entry refusal SURVIVES — measured, which is
+  // how this arm came to be written.
+  const sibling = JSON.parse(JSON.stringify(sample));
+  for (const e of sibling.routing) {
+    if (e && e.model === 'claude-fable-5') e.model = 'claude-fable-4';
+  }
+  const siblingPath = path.join(dir, 'sibling.json');
+  fs.writeFileSync(siblingPath, JSON.stringify(sibling));
+  const skipped = gate([`--sample=${siblingPath}`, '--model=claude-fable-5', `--now=${NOW}`]);
+  assert.notEqual(skipped.code, 0,
+    'a capture naming no entry for the graded model was graded without any fidelity check');
+  assert.match(skipped.out, /no entry for claude-fable-5/);
 });

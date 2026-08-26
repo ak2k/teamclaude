@@ -74,5 +74,219 @@
         "unified7dFableReset": 1787781600000
       }
     }
+  ],
+  "routing": [
+    {
+      "scope": "shared",
+      "route": null,
+      "routeIndex": null,
+      "model": null,
+      "match": [],
+      "autocreated": false,
+      "target": "account-a",
+      "pinnedTo": null,
+      "bucket": "unified7d",
+      "familySplit": null,
+      "figuresAbsent": null,
+      "basisSynthetic": null,
+      "band": {
+        "kind": "sized",
+        "reason": null,
+        "target": 1,
+        "achieved": 1.7857142857142856,
+        "floor": null,
+        "candidates": 4,
+        "admitted": [
+          "account-a",
+          "account-b"
+        ],
+        "ladder": [
+          {
+            "rank": 1,
+            "account": "account-b",
+            "bucket": "unified7d",
+            "pressure": {
+              "kind": "known",
+              "value": 0.0000010583642526890012
+            },
+            "headroom": {
+              "kind": "known",
+              "value": 0.8979591836734694
+            },
+            "cumulative": 0.8979591836734694,
+            "admitted": true,
+            "reason": "under-target"
+          },
+          {
+            "rank": 2,
+            "account": "account-a",
+            "bucket": "unified7d",
+            "pressure": {
+              "kind": "known",
+              "value": 8.870791876746398e-7
+            },
+            "headroom": {
+              "kind": "known",
+              "value": 0.8877551020408163
+            },
+            "cumulative": 1.7857142857142856,
+            "admitted": true,
+            "reason": "under-target"
+          },
+          {
+            "rank": 3,
+            "account": "account-d",
+            "bucket": "unified7d",
+            "pressure": {
+              "kind": "known",
+              "value": 8.784798784183849e-7
+            },
+            "headroom": {
+              "kind": "known",
+              "value": 0.8775510204081632
+            },
+            "cumulative": null,
+            "admitted": false,
+            "reason": "coverage-met"
+          },
+          {
+            "rank": 4,
+            "account": "account-c",
+            "bucket": "unified7d",
+            "pressure": {
+              "kind": "known",
+              "value": 5.74245892090993e-7
+            },
+            "headroom": {
+              "kind": "known",
+              "value": 0.9591836734693877
+            },
+            "cumulative": null,
+            "admitted": false,
+            "reason": "coverage-met"
+          }
+        ],
+        "excluded": []
+      },
+      "pick": {
+        "kind": "picked",
+        "reason": null,
+        "account": "account-b",
+        "runnerUp": "account-a",
+        "tiedWith": [],
+        "by": "pressure",
+        "terms": [
+          "pressure",
+          "reset"
+        ]
+      }
+    },
+    {
+      "scope": "route",
+      "route": "fable",
+      "routeIndex": 0,
+      "model": "claude-fable-5",
+      "match": [
+        "*fable*"
+      ],
+      "autocreated": true,
+      "target": "account-a",
+      "pinnedTo": null,
+      "bucket": "unified7dFable",
+      "familySplit": null,
+      "figuresAbsent": null,
+      "basisSynthetic": null,
+      "band": {
+        "kind": "sized",
+        "reason": null,
+        "target": 1,
+        "achieved": 1.8367346938775508,
+        "floor": null,
+        "candidates": 4,
+        "admitted": [
+          "account-c",
+          "account-d"
+        ],
+        "ladder": [
+          {
+            "rank": 1,
+            "account": "account-c",
+            "bucket": "unified7dFable",
+            "pressure": {
+              "kind": "known",
+              "value": 0.0000016407025488314092
+            },
+            "headroom": {
+              "kind": "known",
+              "value": 0.9591836734693877
+            },
+            "cumulative": 0.9591836734693877,
+            "admitted": true,
+            "reason": "under-target"
+          },
+          {
+            "rank": 2,
+            "account": "account-d",
+            "bucket": "unified7dFable",
+            "pressure": {
+              "kind": "known",
+              "value": 0.0000015519811185391467
+            },
+            "headroom": {
+              "kind": "known",
+              "value": 0.8775510204081632
+            },
+            "cumulative": 1.8367346938775508,
+            "admitted": true,
+            "reason": "under-target"
+          },
+          {
+            "rank": 3,
+            "account": "account-a",
+            "bucket": "unified7dFable",
+            "pressure": {
+              "kind": "known",
+              "value": 0.0000015344072398665642
+            },
+            "headroom": {
+              "kind": "known",
+              "value": 0.8877551020408163
+            },
+            "cumulative": null,
+            "admitted": false,
+            "reason": "coverage-met"
+          },
+          {
+            "rank": 4,
+            "account": "account-b",
+            "bucket": "unified7dFable",
+            "pressure": {
+              "kind": "known",
+              "value": 0.0000014817096087631355
+            },
+            "headroom": {
+              "kind": "known",
+              "value": 0.8979591836734694
+            },
+            "cumulative": null,
+            "admitted": false,
+            "reason": "coverage-met"
+          }
+        ],
+        "excluded": []
+      },
+      "pick": {
+        "kind": "picked",
+        "reason": null,
+        "account": "account-c",
+        "runnerUp": "account-d",
+        "tiedWith": [],
+        "by": "pressure",
+        "terms": [
+          "pressure",
+          "reset"
+        ]
+      }
+    }
   ]
 }

@@ -882,11 +882,36 @@ test('the final tiebreak reads the reset of THIS route\'s window', () => {
     unified7dSonnet: 0.5, unified7dSonnetReset: now + 400 * H,
   });
 
-  const wild = am.getStatus().routing.find(e => e.route === 'wild');
+  // THE PREMISE MAY NOT RACE THE WALL CLOCK. The tie is exact only when ZERO
+  // time passes between `now` above and the pressure computation: the two
+  // accounts compensate 0.5/(10H) against 0.25/(5H), and every millisecond of
+  // real elapsed time shortens both remainders by a different FRACTION, so the
+  // equality decays. Measured by r3-attestor: the premise tolerates ~4 ms and
+  // the fixture's own worst case on an IDLE box is 2.85 ms — a 1.4x margin that
+  // a loaded box eats easily.
+  //
+  // The failure direction is the flattering one and that is why it matters: a
+  // failing premise is a FAILING TEST, the neutralisation sweep reads a failing
+  // test as a KILL, and the instrument that vouches for this row's coverage
+  // goes quietly permissive. It guards the very row whose contended verdict
+  // cost a battery.
+  //
+  // FROZEN, NOT WIDENED. Loosening 1e-12 moves the race rather than ending it —
+  // it buys milliseconds and leaves the same decay in place for a slower box.
+  // Freezing the clock across the read makes the tie exact by construction, so
+  // the premise holds at any elapsed time and the assertion means what it says.
+  const realNow = Date.now;
+  let wild;
+  try {
+    Date.now = () => now;
+    wild = am.getStatus().routing.find(e => e.route === 'wild');
+  } finally {
+    Date.now = realNow;
+  }
   const [first, second] = wild.band.ladder.filter(r => r.pressure.kind === 'known');
   assert.equal(first.pressure.kind, 'known');
-  assert.ok(Math.abs(first.pressure.value - second.pressure.value) < 1e-12,
-    'the premise: the two accounts must TIE on pressure, or the reset never decides');
+  assert.equal(first.pressure.value, second.pressure.value,
+    'the premise: the two accounts must TIE on pressure EXACTLY, or the reset never decides');
   assert.equal(wild.pick.account, 'late',
     'the report\'s tiebreak read a reset from the window the other route governs');
   assert.equal(wild.target, 'late',

@@ -332,12 +332,52 @@ console.log(`decision   ${decision.kind}${decision.reason ? ` (${decision.reason
 // deliberately a REFUSAL rather than a repair: the wire genuinely does not
 // carry route exclusivity, so there is nothing here to reconstruct correctly,
 // only a guess to detect and decline.
+// THE GUARD WAS THE BYPASS, AND THE REPAIR IT GUARDS HAS NEVER RUN.
+//
+// This block was added in `09c1fdf` under "A GATE MAY NOT GRADE A FLEET ITS OWN
+// CAPTURE DENIES". It compares the rebuilt fleet against the capture's own
+// routing entry — and `if (captured && captured.band)` meant that NO MATCHING
+// ENTRY simply skipped the comparison, silently. `tools/caption-sample.json`
+// has NO `routing` KEY AT ALL, so on the sample the battery actually runs, for
+// every model, the fidelity check has never executed once. The gate ran ten
+// times today and reported a caption verdict each time with its reconstruction
+// unverified.
+//
+// The comparison LOGIC is correct — measured: a capture whose entry names the
+// GRADED model and disagrees still refuses. What was wrong is REACHABILITY, and
+// an unreachable check reads exactly like a passing one. `20ec1cf` wrote down
+// that unreachable code cannot carry a claim, about a dead renderer branch, and
+// labelled it; this is the same defect in an INSTRUMENT and it was unlabelled,
+// so it read live.
+//
+// TWO PARTS AND NEITHER IS SUFFICIENT ALONE. The sample gains a `routing` block
+// so there is something to compare against — and the skip becomes LOUD, so the
+// next sample captured without one puts the silence back and says so. A gate
+// that silently declines to verify is how this stayed invisible.
+const hasRouting = Array.isArray(sample.routing);
+if (!hasRouting) {
+  refuse(`${SAMPLE} carries no routing[] block, so the rebuilt fleet cannot be checked`
+    + ' against the capture it claims to reconstruct. That comparison is the whole'
+    + ' point of the fidelity check; grading captions without it is grading a fleet'
+    + ' nobody verified. Re-capture with a routing block.');
+}
 const routingFor = (sample.routing || []).filter(e => e && e.model === MODEL);
 if (routingFor.length > 1) {
   refuse(`${SAMPLE} carries ${routingFor.length} routing entries for ${MODEL};`
     + ' which one the rebuild should agree with is not decidable from the wire');
 }
 const captured = routingFor[0];
+// A ROUTING BLOCK THAT NAMES NO ENTRY FOR THE GRADED MODEL IS THE SAME SILENCE
+// ONE LEVEL IN, and it was the arm that actually bypassed: same band payload,
+// a SIBLING model id on the entry, and the comparison skipped while the gate
+// still printed a verdict. Refusing rather than skipping is the conservative
+// form — the alternative is a caption graded against a reconstruction nothing
+// vouched for, which is precisely the state this check exists to prevent.
+if (!captured) {
+  refuse(`${SAMPLE} carries a routing[] block but no entry for ${MODEL}, so there is`
+    + ' nothing to check the rebuilt fleet against. The fidelity check cannot run and'
+    + ' will not pretend it did — capture a sample whose routing names this model.');
+}
 if (captured && captured.band) {
   const cap = captured.band;
   const mism = [];

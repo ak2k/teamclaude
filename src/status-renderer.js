@@ -1027,7 +1027,11 @@ function routingLines(routes, blocked, paint, routing) {
     // representative's answer as the route's. Without it the line named a set
     // that excluded a known server while appearing complete, which is the one
     // thing the naming rule may never do.
-    const splitBasis = naming.basisGap && state !== 'blocked'
+    // SUPPRESSED WHEN THE WHOLE BASIS IS A PLACEHOLDER — see the composition
+    // rule below. "Split by X; other ids may go elsewhere" claims the figures
+    // are real and merely partial, which cannot be true of a line whose every
+    // scope was graded on an id nothing can request.
+    const splitBasis = naming.basisGap && state !== 'blocked' && !naming.synthetic
       ? paint.dim(` (split by ${naming.basisGap}; other ids may go elsewhere)`) : '';
     // ITS OWN SENTENCE, and it stacks with the split qualifier rather than
     // replacing it: a route can have both a synthesised scope and a genuinely
@@ -1037,6 +1041,31 @@ function routingLines(routes, blocked, paint, routing) {
     // was being reported with the other's words. ALL scopes fabricated is the
     // route-level claim; SOME names the globs, so a measured sibling is never
     // denied.
+    // THE SET OF SENTENCES ON A RENDERED LINE MUST BE SIMULTANEOUSLY TRUE.
+    //
+    // Each of these forms was individually true of its own scope and TOGETHER
+    // they contradicted. Measured on a mixed route:
+    //   "… (split by model claims; other ids may go elsewhere) (no id this
+    //    route receives was measured)"
+    // The first asserts the figures are REAL and merely partial; the second
+    // asserts nothing was measured at all. Same line, same instant, and an
+    // operator cannot reconcile them.
+    //
+    // THE COMMIT THAT SEPARATED THEM WAS RIGHT AND ITS COMPOSITION CLAIM WAS
+    // NOT. It argued the synthetic sentence must not FOLD INTO `basisGap`,
+    // because "split by X" would misdescribe a placeholder basis — correct —
+    // and then asserted "the two stack, because a route can have a synthesised
+    // scope AND a genuinely divided one". They do not stack; they collide. That
+    // was a written justification which named no falsifier, and the mixed
+    // fixture was the falsifier, unrendered.
+    //
+    // NO PER-FORM CHECK CATCHES THIS, which is why it needs a composition rule
+    // rather than a fix to either sentence: the COMPOSITION is what is false.
+    // When the whole basis is a placeholder the split qualifier has nothing
+    // real to be partial ABOUT, so it is suppressed and the stronger, wholly
+    // true sentence stands alone. In the partial case both survive because both
+    // are then true of the line: some scopes measured and split, others not
+    // measured, and each names which.
     const syntheticBasis = state === 'blocked' ? ''
       : naming.synthetic ? paint.dim(' (no id this route receives was measured)')
         : (naming.syntheticGlobs || []).length

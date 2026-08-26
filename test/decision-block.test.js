@@ -1745,3 +1745,51 @@ test('the Decision block discloses a placeholder basis on the same screen', () =
   assert.doesNotMatch(ctlDecision, /placeholder/,
     'a genuinely measured basis is labelled a placeholder');
 });
+
+// THE SET OF SENTENCES ON A RENDERED LINE MUST BE SIMULTANEOUSLY TRUE.
+//
+// Each disclosure form was individually true of its own scope and together they
+// contradicted: "(split by model claims; other ids may go elsewhere)" asserts
+// the figures are REAL and merely partial, beside "(no id this route receives
+// was measured)" asserting nothing was measured — same line, same instant. No
+// per-form correctness check catches that, because the COMPOSITION is what is
+// false.
+test('two disclosure sentences that cannot both be true never share a line', () => {
+  const REAL_BUT_PARTIAL = /split by .*other ids may go elsewhere/;
+  const NOTHING_MEASURED = /no id this route receives was measured/;
+
+  // Wholly fabricated basis, with model claims that WOULD otherwise raise the
+  // split marker. The split sentence has nothing real to be partial about.
+  // THE CLAIM MUST BE AN ID THIS GLOB REACHES, or the split marker never fires
+  // and the assertion below asserts the absence of something that was never
+  // going to be there. A first version claimed `claude-fable-5`, which
+  // `claude-*-4` does not reach — the test passed VACUOUSLY and its
+  // neutralisation row SURVIVED, which is how the vacuity was found.
+  // `claude-fable-4` IS reached by `claude-*-4`, so `familySplit` fires and
+  // there is a real split marker for the composition rule to suppress.
+  const all = p20Fleet(['claude-*-4']);
+  all.am.accounts[0].models = ['claude-fable-4'];
+  const allLine = renderStatus(all.am.getStatus(), { color: false, now: all.now })
+    .split('\n').find(l => l.includes('claude-*-4') && l.includes('→'));
+  assert.match(allLine, NOTHING_MEASURED);
+  // THE PREMISE, asserted so the check below cannot pass on a line that never
+  // had a split marker: the entry really does report a family split, so the
+  // split sentence is what suppression is removing rather than something that
+  // was absent anyway.
+  const allEntry = all.am.getStatus().routing.find(e => e.scope === 'route' && e.route === 'r');
+  assert.ok(allEntry.familySplit,
+    'the fixture no longer produces a family split, so suppressing it proves nothing');
+  assert.doesNotMatch(allLine, REAL_BUT_PARTIAL,
+    'a line whose every scope is a placeholder also claims its figures are real but partial');
+
+  // THE CONTROL, and it is what stops this passing by deleting a true
+  // disclosure: a REAL basis that IS genuinely split must keep the split
+  // sentence.
+  const real = p20Fleet(['*fable*']);
+  real.am.accounts[0].models = ['claude-fable-5'];
+  const realLine = renderStatus(real.am.getStatus(), { color: false, now: real.now })
+    .split('\n').find(l => l.includes('*fable*') && l.includes('→'));
+  assert.match(realLine, REAL_BUT_PARTIAL,
+    'the split disclosure was suppressed on a genuinely split REAL basis');
+  assert.doesNotMatch(realLine, NOTHING_MEASURED);
+});
