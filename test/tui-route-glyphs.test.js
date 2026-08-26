@@ -397,3 +397,70 @@ test('the settings auto line says WHY it names nobody', () => {
   assert.doesNotMatch(blocked, /no figures/,
     'a blocked route reports its data as missing, which is a different fact');
 });
+
+// THE DASHBOARD MUST NOT MARK A SYNTHESISED BASIS COMPLETE while the status line
+// discloses it. One payload, two screens, which is the defect the shared naming
+// rule exists to prevent — and it was live for exactly one commit, because the
+// commit that added the synthetic disclosure claimed "the TUI carries it too" on
+// the strength of a change to the settings AUTO block. That block renders only
+// `autocreated` routes, which are `fable` and `sonnet` with real family samples
+// and which never reach the literal-strip fallback at all, so the branch was
+// unreachable. The REACHABLE consumer is this glyph column, and it went
+// unexamined until the claim was checked.
+//
+// The column's whole vocabulary is complete-vs-qualified, so both kinds of bad
+// basis must reach it: `basisGap` (real basis, does not cover the route) and
+// `synthetic` (placeholder basis, no client can request it).
+test('the glyph column does not mark a synthesised basis as a complete answer', () => {
+  const now = Date.now();
+  const H = 3600e3;
+  const routes = [{ name: 'v4', match: ['claude-*-4'], accounts: [] }];
+  const am = new AccountManager([
+    { name: 'alpha', type: 'apikey', apiKey: 'k1', models: ['claude-fable-5'] },
+    { name: 'beta', type: 'apikey', apiKey: 'k2' },
+  ], 0.98, { routes });
+  am.accounts.forEach((x, i) => {
+    x.quota = { ...x.quota, unified5h: 0.05 + i * 0.05, unified5hReset: now + 2 * H,
+      unified7d: 0.2 + i * 0.2, unified7dReset: now + 40 * H,
+      unified7dFable: 0.2 + i * 0.2, unified7dFableReset: now + 40 * H };
+  });
+
+  // The premise, asserted: without it a green could mean the fallback stopped
+  // firing and the column was graded on an ordinary route.
+  const status = am.getStatus();
+  const entry = status.routing.find(e => e.scope === 'route' && e.route === 'v4');
+  assert.equal(entry.model, 'claude--4', 'the fixture no longer exercises the literal-strip fallback');
+  assert.equal(entry.basisSynthetic, 'unmetered-glob', 'the producer did not mark the placeholder basis');
+
+  const tui = new TUI({
+    accountManager: am, config: { proxy: { port: 1 }, routes },
+    sx: null, saveConfig: async () => {}, syncAccounts: async () => 0, onQuit: () => {},
+  });
+  const genRoutes = status.routes.filter(r => !/fable|sonnet/i.test(`${r.name} ${(r.match || []).join(' ')}`));
+  const GLYPH_AT = 4;
+  const NAME_AT = GLYPH_AT + genRoutes.length + 1;
+
+  // Driven through the REAL `_render()`: `_renderAcct`'s trailing parameters
+  // default to pre-redirection behaviour, so calling it bare skips the rule
+  // under test and reports a clean column on a tree that has the defect.
+  const chunks = [];
+  const w = process.stdout.write, c = process.stdout.columns, rws = process.stdout.rows;
+  process.stdout.columns = 200; process.stdout.rows = 50;
+  process.stdout.write = ch => { chunks.push(ch); return true; };
+  try { tui.running = true; tui._render(); } finally {
+    process.stdout.write = w; process.stdout.columns = c; process.stdout.rows = rws;
+  }
+  const frame = strip(chunks.join('')).split('\n').map(l => l.replace(/^\x1b\[H/, ''));
+  const row = frame.find(l => l.slice(NAME_AT).startsWith('alpha'));
+  assert.ok(row, 'no rendered dashboard row for the admitted account');
+  const cell = row.slice(GLYPH_AT, GLYPH_AT + genRoutes.length);
+
+  // PINNED-BY-DESIGN both ways, because this test's subject is WHICH mark is
+  // used: the complete glyph must be absent and the qualified one present. A
+  // widened matcher here would accept either and grade nothing — the same
+  // distinction the glyph sweep makes between a detector and an identity pin.
+  assert.doesNotMatch(cell, /\u25ba/,
+    'the dashboard marks a placeholder basis with the COMPLETE glyph while the status line discloses it');
+  assert.match(cell, /\u25b8/,
+    'the admitted account lost its mark entirely instead of gaining the qualified one');
+});

@@ -1,6 +1,6 @@
 import { refreshAccessToken, isTokenExpiringSoon, isTokenExpired } from './oauth.js';
 import { sameIdentity } from './identity.js';
-import { weeklyBucketForModel, modelGlobMatches, modelGlobOverlaps, gatingSource, WEEKLY_BUCKET_KEYS, familyModelsMatching, globCovers, familyPatternFor } from './model.js';
+import { weeklyBucketForModel, modelGlobMatches, modelGlobOverlaps, gatingSource, WEEKLY_BUCKET_KEYS, familyModelsMatching, globCovers, familyPatternFor, FAMILY_MODELS } from './model.js';
 import { SessionTracker } from './session-tracker.js';
 import { WindowWatcher } from './window-watcher.js';
 import { decideBand, explainBand, pressureOf, assertNever } from './band-decision.js';
@@ -1778,6 +1778,36 @@ export class AccountManager {
       // twice gave the mutation table two identical anchors — a row that then
       // mutates whichever it finds first and reports on the other.
       const bucket = this._weeklyBucketFor(model, scopeRoute ?? this._routeForModel(model));
+      // IS THIS SCOPE'S REPRESENTATIVE A REAL ID, OR A PLACEHOLDER?
+      //
+      // `modelsForGlob` answers with the family representatives a glob can
+      // carry, and falls back to the glob's own literal core when it names no
+      // family this proxy meters — `claude-*-4` has no family, so the scope is
+      // built on `claude--4`, A STRING NO CLIENT CAN EVER REQUEST. Every
+      // question downstream is then asked about that string: which weekly
+      // bucket meters it, which accounts' `models` claims own it, which of them
+      // the band admits. The answers are internally consistent and describe no
+      // traffic that exists.
+      //
+      // WITHOUT THIS FLAG THE LINE RENDERS THAT BASIS IN THE MEASURED-COMPLETE
+      // FORM. The four-form table this round shipped promises that names come
+      // from a MEASURED basis, so a synthesised one presented as measured is
+      // FALSE-MEASUREDNESS — the same family as false-completeness, one level
+      // down, and the honest forms are load-bearing only if a line that appears
+      // measured is measured.
+      //
+      // DISCLOSURE, NOT COMPUTATION. Naming who really serves the ids this
+      // route receives means grading it on those ids, which is the sample root
+      // and round 4a item 1. The renderer must not guess it — that is the
+      // display-derives-eligibility class this round has found seven times. So
+      // the producer states the fact and the line carries it.
+      //
+      // MEMBERSHIP, NOT A REDERIVATION OF THE FALLBACK. Asking whether the
+      // model is a `FAMILY_MODELS` member is the same question from the other
+      // end and cannot drift from `modelsForGlob`'s branch, where a copy of the
+      // strip's condition here would silently stop agreeing the moment that
+      // fallback changed shape.
+      const basisSynthetic = FAMILY_MODELS.includes(model) ? null : 'unmetered-glob';
       if (this._captureDistortsFigures(model, scopeRoute)) {
         return {
           scope,
@@ -1795,6 +1825,11 @@ export class AccountManager {
           // a consumer asking "are these figures real" does not have to infer
           // it from a band variant.
           figuresAbsent: 'representative-captured',
+          // Carried on BOTH entry paths. This one publishes no figures anyway,
+          // so the flag changes nothing a reader sees today — it is set because
+          // a field that exists on one branch and not its twin is the shape
+          // that made `familySplit` reach the line from live scopes only.
+          basisSynthetic,
           band: {
             kind: 'passthrough',
             reason: 'representative-captured',
@@ -1892,6 +1927,12 @@ export class AccountManager {
         // Figures below are this entry's own; the suppression branch above is
         // the only path that publishes none.
         figuresAbsent: null,
+        // …and they were computed for `model`, which this says is or is not an
+        // id anything can request. `figuresAbsent` answers "are there figures";
+        // this answers "are they ABOUT anything", and the two are independent:
+        // this entry has figures, and on a synthesised basis they describe no
+        // traffic the route receives.
+        basisSynthetic,
         band: {
           kind: explained.decision.kind,
           reason: explained.decision.reason ?? null,

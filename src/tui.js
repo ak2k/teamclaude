@@ -1259,7 +1259,23 @@ export class TUI {
         // The rule admits this account — but if the basis it was measured on
         // does not cover the route, say so here too rather than presenting a
         // partial answer as a whole one.
-        return n.basisGap
+        //
+        // BOTH KINDS OF BAD BASIS, and the second was missing for exactly one
+        // commit. `basisGap` is "the basis is real but does not cover this
+        // route"; `synthetic` is "the basis is a placeholder no client can
+        // request". This column's entire vocabulary is complete-vs-qualified,
+        // so both must reach it — otherwise the STATUS line disclosed the
+        // synthesised basis while this column marked it COMPLETE, which is one
+        // payload and two screens, the precise defect the shared naming rule
+        // exists to prevent. Measured that way before this line was written:
+        // status `(no id this route receives was measured)` beside a `►` here.
+        //
+        // Found by CHECKING A CLAIM I HAD ALREADY MADE. The commit that added
+        // the synthetic disclosure said "the TUI carries it too" on the
+        // strength of a change to the settings auto block — which is
+        // unreachable for this state (see `_renderRoutes`) — while the column
+        // that IS reachable went unexamined.
+        return (n.basisGap || n.synthetic)
           ? routeGlyphPartial(routeColorFn(r.color), r.pinned === a.name)
           : routeGlyph(routeColorFn(r.color), true, r.pinned === a.name);
       }
@@ -1757,7 +1773,33 @@ export class TUI {
           unmeasured: 'no figures',
         }[n.reason] || 'no figures'})`)
           : n && n.basisGap ? dim(`  (split by ${n.basisGap})`) : '';
-        lines.push(dim(`     ${r.match.join(', ')} → ${names}${why}`));
+        // THE SAME DISCLOSURE THE STATUS LINE CARRIES, because one payload must
+        // not produce two screens that disagree — the rule that pulled route
+        // naming into `routeNaming` in the first place. Stacks with `why`
+        // rather than replacing it.
+        //
+        // UNREACHABLE TODAY, AND SAID SO RATHER THAN LEFT LOOKING LIVE. This
+        // block renders only `autocreated` routes, and those are exactly
+        // `fable` and `sonnet` — built from `*fable*` / `*sonnet*` with samples
+        // `claude-fable-5` / `claude-sonnet-4-6`, both real `FAMILY_MODELS`
+        // members. Independently, `account-manager.js:1727` gives an
+        // autocreated route's scope `route.sample` DIRECTLY and never calls
+        // `_scopeModelsFor`, so the literal-strip fallback cannot be reached
+        // here by two separate mechanisms and `n.synthetic` is always false.
+        //
+        // Kept anyway, as the round keeps the no-scope-published branch beside
+        // it: this is the line that would SILENTLY restore false-measuredness
+        // on this screen the moment autocreation learns a third family, or the
+        // moment an autocreated route stops carrying its own sample. TRIPWIRE:
+        // either of those changes makes this live, and the test that covers it
+        // is the reachable one on the glyph column, not this.
+        //
+        // WHAT IT IS NOT is evidence that the dashboard discloses. A commit
+        // claimed exactly that on the strength of this branch while the
+        // REACHABLE consumer — the glyph column — still marked the same state
+        // COMPLETE. Unreachable code cannot carry a claim.
+        const unmeasuredBasis = n && n.synthetic ? dim('  (no id this route receives was measured)') : '';
+        lines.push(dim(`     ${r.match.join(', ')} → ${names}${why}${unmeasuredBasis}`));
       }
     }
   }

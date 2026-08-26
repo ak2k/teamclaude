@@ -1541,3 +1541,74 @@ test('an admitted account is not erased by a different account sharing its name'
       `${name} is admitted and was erased by a namesake's exclusion`);
   }
 });
+
+// A SCOPE GRADED ON A PLACEHOLDER SAYS SO, ruled BLOCKING as false-measuredness.
+//
+// `modelsForGlob` falls back to a glob's own literal core when the glob names no
+// family this proxy meters, so `claude-*-4` builds its scope on `claude--4` — a
+// string no client can ever request. Every question after that is asked about
+// it: which weekly bucket meters it, whose `models` claims own it, whom the band
+// admits. The answers are internally consistent and describe no traffic that
+// exists.
+//
+// Before this, the line rendered that basis in the MEASURED-COMPLETE form. The
+// four-form table promises names come from a MEASURED basis, so a synthesised
+// one presented as measured is false-measuredness — the same family as
+// false-completeness, one level down, and the honest forms are load-bearing only
+// if a line that looks measured is measured.
+//
+// THE FIX IS DISCLOSURE, NOT COMPUTATION. Naming who really serves the ids this
+// route receives means grading it on those ids, which is the sample root and
+// round 4a item 1; having the renderer guess is the display-derives-eligibility
+// class this round has found seven times.
+test('a scope graded on an id nothing can request does not present it as measured', () => {
+  const now = Date.now();
+  const H = 3600e3;
+  const am = new AccountManager([
+    { name: 'a', type: 'apikey', apiKey: 'k1', models: ['claude-fable-5'] },
+    { name: 'b', type: 'apikey', apiKey: 'k2' },
+  ], 0.98, { routes: [{ name: 'wide', match: ['claude-*-4'] }] });
+  am.accounts.forEach((x, i) => {
+    x.quota = { ...x.quota, unified5h: 0.05 + i * 0.05, unified5hReset: now + 2 * H,
+      unified7d: 0.2 + i * 0.2, unified7dReset: now + 40 * H,
+      unified7dFable: 0.2 + i * 0.2, unified7dFableReset: now + 40 * H };
+  });
+  const status = am.getStatus();
+
+  // The premise, asserted rather than assumed: without it a green here could
+  // mean the fallback never fired and the test graded an ordinary route.
+  const entry = status.routing.find(e => e.scope === 'route' && e.route === 'wide');
+  assert.ok(entry, 'no routing entry for the glob under test');
+  assert.equal(entry.model, 'claude--4',
+    'the scope is not built on the stripped literal, so this fixture no longer exercises the fallback');
+  assert.equal(entry.basisSynthetic, 'unmetered-glob',
+    'the producer did not mark a scope whose representative is a placeholder');
+
+  const line = renderStatus(status, { color: false, now }).split('\n')
+    .find(l => l.trim().startsWith('claude-*-4'));
+  assert.ok(line, 'no rendered routing line for the glob under test');
+  assert.match(line, /no id this route receives was measured/,
+    'the line renders a synthesised basis in the measured-complete form');
+
+  // AND THE CONTROL, on the same fleet: a glob that DOES resolve to a real
+  // family representative must be untouched. Without it this test passes just
+  // as well on a build that qualifies every route, which would disclose nothing
+  // while looking like a fix.
+  const am2 = new AccountManager([
+    { name: 'a', type: 'apikey', apiKey: 'k1', models: ['claude-fable-5'] },
+    { name: 'b', type: 'apikey', apiKey: 'k2' },
+  ], 0.98, { routes: [{ name: 'fam', match: ['*fable*'] }] });
+  am2.accounts.forEach((x, i) => {
+    x.quota = { ...x.quota, unified5h: 0.05 + i * 0.05, unified5hReset: now + 2 * H,
+      unified7d: 0.2 + i * 0.2, unified7dReset: now + 40 * H,
+      unified7dFable: 0.2 + i * 0.2, unified7dFableReset: now + 40 * H };
+  });
+  const ctlStatus = am2.getStatus();
+  const ctlEntry = ctlStatus.routing.find(e => e.scope === 'route' && e.route === 'fam');
+  assert.equal(ctlEntry.basisSynthetic, null,
+    'a glob resolving to a real family representative was marked synthetic');
+  const ctlLine = renderStatus(ctlStatus, { color: false, now }).split('\n')
+    .find(l => l.trim().startsWith('*fable*'));
+  assert.doesNotMatch(ctlLine, /no id this route receives was measured/,
+    'the unmeasured-basis qualifier appears on a route whose basis IS measured');
+});

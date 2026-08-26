@@ -863,7 +863,24 @@ export function routeNaming(route, routeIndex, routing, blocked = []) {
   for (const e of suppressed.entries || []) if (e.familySplit) gapReasons.add(e.familySplit);
   if (unmeasuredGlobs.length) gapReasons.add('an earlier route');
   const basisGap = gapReasons.size ? [...gapReasons].join('; ') : null;
-  return { source: 'scopes', admitted, partial: suppressed.any, basisGap };
+  // A SYNTHESISED BASIS IS NOT A SPLIT, so it rides the same whole-entry-set
+  // aggregation and gets its OWN sentence rather than being folded into
+  // `basisGap`. `basisGap` renders as "split by X; other ids may go
+  // elsewhere" — a claim that the figures are real and merely partial. On a
+  // synthesised basis they are neither: the scope was graded on a placeholder
+  // (`claude--4` for `claude-*-4`) that no client can request, so no id this
+  // route receives was measured at all. Saying "split by an unmetered glob"
+  // would be a FALSE HONEST-FORM, which is the failure this round has spent
+  // three cycles removing — an honest-looking qualifier that misdescribes the
+  // thing it discloses is worse than the bare line, because it spends the
+  // reader's trust on a wrong explanation.
+  //
+  // Aggregated over the WHOLE entry set for the same reason `basisGap` is: a
+  // route with one synthesised scope and one real one still has a basis that
+  // does not cover it, and reading only live scopes is what discarded a
+  // withheld sibling's flag a cycle ago.
+  const synthetic = (suppressed.entries || []).some(e => e.basisSynthetic);
+  return { source: 'scopes', admitted, partial: suppressed.any, basisGap, synthetic };
 }
 
 function scopeAccountNames(admitted, paint) {
@@ -974,12 +991,18 @@ function routingLines(routes, blocked, paint, routing) {
     // thing the naming rule may never do.
     const splitBasis = naming.basisGap && state !== 'blocked'
       ? paint.dim(` (split by ${naming.basisGap}; other ids may go elsewhere)`) : '';
+    // ITS OWN SENTENCE, and it stacks with the split qualifier rather than
+    // replacing it: a route can have both a synthesised scope and a genuinely
+    // divided one, and dropping either would be the "collapse four reasons to
+    // one" defect this cycle already fixed on the settings line.
+    const syntheticBasis = naming.synthetic && state !== 'blocked'
+      ? paint.dim(' (no id this route receives was measured)') : '';
     const partly = state === 'partial' ? paint.dim(' (partly blocked)') : '';
     const tag = route.autocreated ? paint.dim(' (auto)') : route.bucket ? paint.dim(` [${route.bucket}]`) : '';
     const pin = route.pinned ? paint.dim(` [pinned: ${route.pinned}]`) : '';
     // padEnd on the raw text, color after, so ANSI codes don't throw off alignment.
     const label = paintRoute(paint, route.color, match.padEnd(16));
-    lines.push(`  ${label} ${paint.dim('→')} ${accounts}${someAbsent}${splitBasis}${partly}${tag}${pin}`);
+    lines.push(`  ${label} ${paint.dim('→')} ${accounts}${someAbsent}${splitBasis}${syntheticBasis}${partly}${tag}${pin}`);
   }
   lines.push('');
   return lines;
