@@ -1612,3 +1612,136 @@ test('a scope graded on an id nothing can request does not present it as measure
   assert.doesNotMatch(ctlLine, /no id this route receives was measured/,
     'the unmeasured-basis qualifier appears on a route whose basis IS measured');
 });
+
+// NOT EVERY SCOPE HAS A REPRESENTATIVE, and the synthesised-basis mark has to
+// know that. The shared scope is built with `model: null` and never goes near
+// `modelsForGlob`, so a membership test alone — `FAMILY_MODELS.includes(null)`
+// is false — labelled a scope with NO representative as though it had a
+// PLACEHOLDER one, and published that on the wire.
+//
+// The mark's justification is that `_scopeModelsFor` returns family members or
+// the literal strip, so a non-member came from the strip. That is true of THAT
+// FUNCTION, and the mark is on the map over EVERY scope — two of which never
+// call it. Non-null non-member still implies the strip; that is the claim the
+// mark actually rests on and the one this test pins.
+test('a scope with no representative is not marked as a synthesised basis', () => {
+  const now = Date.now();
+  const H = 3600e3;
+  const am = new AccountManager([
+    { name: 'alpha', type: 'apikey', apiKey: 'k1' },
+    { name: 'beta', type: 'apikey', apiKey: 'k2' },
+  ], 0.98, { routes: [{ name: 'v4', match: ['claude-*-4'], accounts: [] }] });
+  am.accounts.forEach((x, i) => {
+    x.quota = { ...x.quota, unified5h: 0.05 + i * 0.05, unified5hReset: now + 2 * H,
+      unified7d: 0.2 + i * 0.2, unified7dReset: now + 40 * H,
+      unified7dFable: 0.2 + i * 0.2, unified7dFableReset: now + 40 * H };
+  });
+  const status = am.getStatus();
+
+  const shared = status.routing.find(e => e.scope === 'shared');
+  assert.ok(shared, 'no shared scope in the payload');
+  assert.equal(shared.model, null,
+    'the shared scope has acquired a representative; this test no longer exercises the null case');
+  assert.equal(shared.basisSynthetic ?? null, null,
+    'a scope with NO representative is marked as though it had a placeholder one');
+
+  // THE CONTROL, and it is what stops this passing on a build that marks
+  // nothing: the route scope in the same payload IS synthetic and must still
+  // say so. Without it, deleting the mark entirely would satisfy the assertion
+  // above.
+  const route = status.routing.find(e => e.scope === 'route' && e.route === 'v4');
+  assert.equal(route.model, 'claude--4', 'the fixture no longer exercises the literal-strip fallback');
+  assert.equal(route.basisSynthetic, 'unmetered-glob',
+    'the route scope lost its synthesised-basis mark');
+});
+
+// Shared fleet builder for the PASS-20 cases. `expiryRouting` is ON because
+// `decisionLines` returns [] on a passthrough band — a fixture without it makes
+// the Decision block never render, and a probe that read that silence as "no
+// divergence" nearly refuted a real finding.
+function p20Fleet(match) {
+  const now = Date.now();
+  const H = 3600e3;
+  const am = new AccountManager([
+    { name: 'alpha', type: 'apikey', apiKey: 'k1' },
+    { name: 'beta', type: 'apikey', apiKey: 'k2' },
+  ], 0.98, {
+    routes: [{ name: 'r', match, accounts: [] }],
+    expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5 },
+  });
+  am.accounts.forEach((x, i) => {
+    x.quota = { ...x.quota, unified5h: 0.05 + i * 0.05, unified5hReset: now + 2 * H,
+      unified7d: 0.2 + i * 0.2, unified7dReset: now + 40 * H,
+      unified7dFable: 0.2 + i * 0.2, unified7dFableReset: now + 40 * H };
+  });
+  return { am, now };
+}
+
+// THE MARK MEANS "THIS BASIS IS NOT AN ID THIS ROUTE CAN RECEIVE", and a
+// wildcard-free glob's literal IS such an id by construction — the strip is the
+// identity on it. Marking it told a directly measured route that nothing it
+// receives was measured. The superseded predicate asked FAMILY_MODELS
+// membership, which answers METERING while the sentence claims EXISTENCE.
+test('a wildcard-free glob names a real id and is not called a placeholder', () => {
+  const { am, now } = p20Fleet(['claude-haiku-4-5']);
+  const status = am.getStatus();
+  const entry = status.routing.find(e => e.scope === 'route' && e.route === 'r');
+  assert.equal(entry.model, 'claude-haiku-4-5',
+    'the strip is no longer the identity on a wildcard-free glob; this fixture has moved');
+  assert.equal(entry.basisSynthetic ?? null, null,
+    'a real, requestable id is marked as a placeholder basis');
+  const line = renderStatus(status, { color: false, now }).split('\n')
+    .find(l => l.trim().startsWith('claude-haiku-4-5'));
+  assert.doesNotMatch(line, /was measured|no id measured/,
+    'a directly measured route is told its ids went unmeasured');
+
+  // CONTROL: a glob whose strip really does fabricate must still be marked, or
+  // this passes on a build that has simply stopped marking anything.
+  const fab = p20Fleet(['claude-*-4']);
+  const fabEntry = fab.am.getStatus().routing.find(e => e.scope === 'route' && e.route === 'r');
+  assert.equal(fabEntry.model, 'claude--4');
+  assert.equal(fabEntry.basisSynthetic, 'unmetered-glob',
+    'the fabricated basis lost its mark');
+});
+
+// A DISCLOSURE MAY NOT DENY A MEASUREMENT THAT EXISTS. The aggregation was an
+// EXISTENTIAL test feeding an ALL-quantified sentence, so one fabricated scope
+// erased a measured sibling from the disclosure.
+test('one placeholder scope does not deny a measured sibling', () => {
+  const { am, now } = p20Fleet(['*fable*', 'claude-*-4']);
+  const status = am.getStatus();
+  const entries = status.routing.filter(e => e.scope === 'route' && e.route === 'r');
+  const real = entries.find(e => !e.basisSynthetic);
+  const fake = entries.find(e => e.basisSynthetic);
+  assert.ok(real && fake, 'the fixture no longer has one real and one fabricated scope');
+  assert.equal(real.model, 'claude-fable-5');
+
+  const line = renderStatus(status, { color: false, now }).split('\n')
+    .find(l => l.includes('*fable*') && l.includes('→'));
+  assert.doesNotMatch(line, /no id this route receives was measured/,
+    'the route-level denial is rendered while a sibling scope IS measured');
+  assert.match(line, /no id measured for claude-\*-4/,
+    'the partial case does not name the scope whose basis is a placeholder');
+});
+
+// ONE PAYLOAD, ONE RULE, EVERY CONSUMER. The Decision block printed a full set
+// of figures for a placeholder basis while the Routing line below disclosed it —
+// the seventh instance of the round's signature defect, and the first on a
+// consumer that does not go through `routeNaming`.
+test('the Decision block discloses a placeholder basis on the same screen', () => {
+  const { am, now } = p20Fleet(['claude-*-4']);
+  const status = am.getStatus();
+  const frame = renderStatus(status, { color: false, now });
+  const decision = frame.split('\n').find(l => l.startsWith('Decision'));
+  assert.ok(decision, 'the Decision block did not render; a silent surface is not a negative');
+  assert.match(decision, /placeholder/,
+    'the Decision block reports figures for a placeholder basis without saying so');
+
+  // CONTROL: a real basis must leave the header alone.
+  const ctl = p20Fleet(['*fable*']);
+  const ctlFrame = renderStatus(ctl.am.getStatus(), { color: false, now: ctl.now });
+  const ctlDecision = ctlFrame.split('\n').find(l => l.startsWith('Decision'));
+  assert.ok(ctlDecision, 'the control Decision block did not render');
+  assert.doesNotMatch(ctlDecision, /placeholder/,
+    'a genuinely measured basis is labelled a placeholder');
+});

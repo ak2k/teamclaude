@@ -1,6 +1,6 @@
 import { refreshAccessToken, isTokenExpiringSoon, isTokenExpired } from './oauth.js';
 import { sameIdentity } from './identity.js';
-import { weeklyBucketForModel, modelGlobMatches, modelGlobOverlaps, gatingSource, WEEKLY_BUCKET_KEYS, familyModelsMatching, globCovers, familyPatternFor, FAMILY_MODELS } from './model.js';
+import { weeklyBucketForModel, modelGlobMatches, modelGlobOverlaps, gatingSource, WEEKLY_BUCKET_KEYS, familyModelsMatching, globCovers, familyPatternFor } from './model.js';
 import { SessionTracker } from './session-tracker.js';
 import { WindowWatcher } from './window-watcher.js';
 import { decideBand, explainBand, pressureOf, assertNever } from './band-decision.js';
@@ -1802,12 +1802,70 @@ export class AccountManager {
       // display-derives-eligibility class this round has found seven times. So
       // the producer states the fact and the line carries it.
       //
-      // MEMBERSHIP, NOT A REDERIVATION OF THE FALLBACK. Asking whether the
-      // model is a `FAMILY_MODELS` member is the same question from the other
-      // end and cannot drift from `modelsForGlob`'s branch, where a copy of the
-      // strip's condition here would silently stop agreeing the moment that
-      // fallback changed shape.
-      const basisSynthetic = FAMILY_MODELS.includes(model) ? null : 'unmetered-glob';
+      // THIS DOES REDERIVE `modelsForGlob`'s STRIP, AND THAT OBJECTION WAS
+      // MINE — the superseded version argued for membership precisely because
+      // it "cannot drift from `modelsForGlob`'s branch, where a copy of the
+      // strip's condition would silently stop agreeing the moment that
+      // fallback changed shape". The objection is real and it is the lesser
+      // risk: membership does not drift and DOES NOT ANSWER THE QUESTION, and
+      // a predicate that is stably wrong is worse than one that could go stale.
+      // TRIPWIRE, since the duplication is deliberate: if `modelsForGlob`'s
+      // fallback stops being `glob.replace(/\*/g, '') || 'model'`, this stops
+      // agreeing with it silently. The guard against that is
+      // `test/decision-block.test.js`, which asserts the fabricated
+      // representative is exactly `claude--4` before looking at any rendering —
+      // so a changed fallback fails there rather than here.
+      // THE INVARIANT, and the mark is derived from it rather than from any
+      // property that happens to correlate with it:
+      //
+      //   THE MARK MEANS "THIS BASIS IS NOT AN ID THIS ROUTE CAN RECEIVE".
+      //   Nothing that IS such an id may carry it; nothing that is not may
+      //   lack it.
+      //
+      // So the question is whether the representative was FABRICATED, and
+      // `modelsForGlob`'s fallback fabricates only when the wildcard strip
+      // CHANGES the glob. Asked directly: the representative is the strip's
+      // output AND the strip altered it. `claude-*-4` -> `claude--4` is
+      // fabrication; `claude-haiku-4-5` -> itself is the identity, and the
+      // literal IS an id the route receives, by construction.
+      //
+      // TWO WRONG PREDICATES PRECEDED THIS AND BOTH ARE INSTRUCTIVE.
+      // `FAMILY_MODELS.includes(model)` asks about METERING — the list holds
+      // one representative per SEPARATELY METERED family, not a census of real
+      // ids — while the mark's sentence claims EXISTENCE. Two different
+      // questions, and the round's signature trap. It marked every
+      // wildcard-free route on an unmetered-but-real id (`claude-haiku-4-5`,
+      // `claude-opus-4-1`) and told it "no id this route receives was
+      // measured" about a basis that IS the id it receives.
+      // Adding `model &&` fixed the shared scope (`model: null`, `:1700`) and
+      // left that untouched, because a null guard answers a third question
+      // again. `model.js:62` had already stated the position: a glob naming no
+      // separately metered family reads as ONE SCOPE ON THE SHARED BUCKET,
+      // not as an error.
+      //
+      // The shared scope now falls out of the invariant instead of out of a
+      // patch: `model` is null, so there is no representative to be receivable
+      // or not, and nothing is claimed about it.
+      //
+      // `gpt-*` IS marked and that is correct under the invariant, which is
+      // worth stating because `model.js:62` names it. `gpt-` is not an id
+      // anything can request, so the disclosure is true. That comment's claim
+      // is about SCOPE COUNT — one scope rather than one per family — and this
+      // does not contradict it.
+      const scopeGlob = match.length === 1 ? match[0] : null;
+      const stripped = scopeGlob === null ? null : (scopeGlob.replace(/\*/g, '') || 'model');
+      // `model &&` IS NOT HERE, AND ITS ABSENCE IS DELIBERATE. It was in the
+      // first draft as the shared-scope guard, and it is REDUNDANT: the shared
+      // scope carries `match: []`, so `scopeGlob` is already null for it and
+      // the conjunction is false before `model` is consulted. Route scopes
+      // always have a model — `modelsForGlob` never returns an empty string,
+      // since the literal falls back to `'model'`. So the guard could not be
+      // killed by any single mutation, and REDUNDANCY IS WHAT A ROW CANNOT
+      // KILL: belt-and-braces reads as caution and defeats the only instrument
+      // that could vouch for it. One mechanism, `scopeGlob`, and the
+      // shared-scope row targets it.
+      const basisSynthetic = scopeGlob && model === stripped && stripped !== scopeGlob
+        ? 'unmetered-glob' : null;
       if (this._captureDistortsFigures(model, scopeRoute)) {
         return {
           scope,

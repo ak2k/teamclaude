@@ -309,7 +309,21 @@ function decisionLines(entry, status, blocked, paint) {
   const auto = entry.autocreated ? `  ${paint.dim('(auto)')}` : '';
   const family = entry.route && (status.routing || []).filter(x => x.route === entry.route).length > 1
     ? paint.dim(` (${modelFamily(entry.model)})`) : '';
-  out.push(`${paint.bold('Decision')}  ${paint.cyan(scope)}${family}${auto}  ${paint.dim(`[${entry.bucket}]`)}`);
+  // THE SAME FACT THE ROUTING LINE CARRIES, on the same screen. This block
+  // printed a scope, a bucket and a full set of figures for a basis that is a
+  // PLACEHOLDER — `claude-*-4` graded on `claude--4` — while the Routing line a
+  // few rows below disclosed exactly that. ONE PAYLOAD, TWO ANSWERS: the
+  // seventh instance of this round's signature defect, and the first on a
+  // consumer that does not go through `routeNaming`, which is why the
+  // three-surface census could not see it.
+  //
+  // Read from the ENTRY, not recomputed: the producer decided it, this states
+  // it, and the two cannot disagree. It rides the header rather than the figure
+  // rows because it qualifies ALL of them — every number below is computed for
+  // that representative.
+  const placeholder = entry.basisSynthetic
+    ? paint.dim('  (basis is a placeholder id; figures below are for it)') : '';
+  out.push(`${paint.bold('Decision')}  ${paint.cyan(scope)}${family}${auto}  ${paint.dim(`[${entry.bucket}]`)}${placeholder}`);
 
   // BOTH DESTINATION ROWS REPORT WHAT THE PATH RETURNS. Neither describes a
   // rule, because a rule stated in the block is a claim the block cannot check:
@@ -879,8 +893,32 @@ export function routeNaming(route, routeIndex, routing, blocked = []) {
   // route with one synthesised scope and one real one still has a basis that
   // does not cover it, and reading only live scopes is what discarded a
   // withheld sibling's flag a cycle ago.
-  const synthetic = (suppressed.entries || []).some(e => e.basisSynthetic);
-  return { source: 'scopes', admitted, partial: suppressed.any, basisGap, synthetic };
+  // A DISCLOSURE MAY NOT DENY A MEASUREMENT THAT EXISTS.
+  //
+  // This was `.some(e => e.basisSynthetic)` feeding the sentence "no id this
+  // route receives was measured" — an ALL-quantified claim built from an
+  // EXISTENTIAL test. On a route with one fabricated scope and one real one it
+  // rendered `*fable*, claude-*-4 → alpha beta (no id this route receives was
+  // measured)` while `claude-fable-5` was measured and published right there in
+  // the payload. False-measuredness's other face: a false DENIAL rather than a
+  // false claim, and the more damaging direction, because a reader who is told
+  // nothing was measured stops looking for the thing that was.
+  //
+  // SECOND INSTANCE OF THE AGGREGATION FAMILY IN ONE CYCLE. `basisGap` above
+  // used `.find(Boolean)` and collapsed several distinct gap reasons to
+  // whichever came first; that was fixed four commits ago, and then this was
+  // written. The rule the pair earns: PER-SCOPE TRUTH MAY NOT BE REPORTED WITH
+  // AN ALL-QUANTIFIED SENTENCE UNLESS IT HOLDS FOR ALL SCOPES.
+  //
+  // So the two states are distinguished and each gets a sentence that is true
+  // of it: EVERY scope fabricated, or SOME — and the partial case names the
+  // globs whose bases are placeholders, so nothing the route did measure is
+  // denied.
+  const scopeEntries = suppressed.entries || [];
+  const syntheticScopes = scopeEntries.filter(e => e.basisSynthetic);
+  const synthetic = syntheticScopes.length > 0 && syntheticScopes.length === scopeEntries.length;
+  const syntheticGlobs = synthetic ? [] : syntheticScopes.flatMap(e => e.match || []);
+  return { source: 'scopes', admitted, partial: suppressed.any, basisGap, synthetic, syntheticGlobs };
 }
 
 function scopeAccountNames(admitted, paint) {
@@ -995,8 +1033,14 @@ function routingLines(routes, blocked, paint, routing) {
     // replacing it: a route can have both a synthesised scope and a genuinely
     // divided one, and dropping either would be the "collapse four reasons to
     // one" defect this cycle already fixed on the settings line.
-    const syntheticBasis = naming.synthetic && state !== 'blocked'
-      ? paint.dim(' (no id this route receives was measured)') : '';
+    // TWO SENTENCES, because the two states are different facts and one of them
+    // was being reported with the other's words. ALL scopes fabricated is the
+    // route-level claim; SOME names the globs, so a measured sibling is never
+    // denied.
+    const syntheticBasis = state === 'blocked' ? ''
+      : naming.synthetic ? paint.dim(' (no id this route receives was measured)')
+        : (naming.syntheticGlobs || []).length
+          ? paint.dim(` (no id measured for ${naming.syntheticGlobs.join(', ')})`) : '';
     const partly = state === 'partial' ? paint.dim(' (partly blocked)') : '';
     const tag = route.autocreated ? paint.dim(' (auto)') : route.bucket ? paint.dim(` [${route.bucket}]`) : '';
     const pin = route.pinned ? paint.dim(` [pinned: ${route.pinned}]`) : '';
