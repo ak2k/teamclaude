@@ -100,8 +100,31 @@ export function modelGlobOverlaps(a, b) {
 // two rules there would put a scope on screen that the line under it calls
 // dead.
 export function modelsForGlob(glob) {
+  return modelsForGlobWithProvenance(glob).models;
+}
+
+/**
+ * The same answer, plus WHICH BRANCH PRODUCED IT.
+ *
+ * **PROVENANCE IS CARRIED, NOT RECONSTRUCTED, AND THAT IS THE WHOLE POINT.**
+ * Callers wanting to know whether a representative was MATCHED (a metered
+ * family answered the glob) or DERIVED (the fallback strip, because none did)
+ * used to re-derive it downstream by comparing the model against the stripped
+ * glob. That comparison is a coincidence detector, not a provenance test: it
+ * fires whenever stripping the wildcards happens to reconstruct the family
+ * representative exactly, which is true for a star inserted between ANY two
+ * characters of ANY family id — 49 of 49 single-star insertions and 120 of 120
+ * two-star combinations, measured. THE CLASS IS UNBOUNDED, so no enumeration of
+ * glob shapes could ever have closed it.
+ *
+ * The branch, by contrast, is a fact this function already holds and cannot be
+ * wrong about. A predicate over it asks a question about control flow, which
+ * the producer always knows, rather than about the world, which it never does.
+ */
+export function modelsForGlobWithProvenance(glob) {
   const family = familyModelsMatching(glob);
-  return family.length ? family : [String(glob ?? '').replace(/\*/g, '') || 'model'];
+  if (family.length) return { models: family, provenance: 'matched' };
+  return { models: [String(glob ?? '').replace(/\*/g, '') || 'model'], provenance: 'derived' };
 }
 
 // The glob that characterises a family whose members are recognised by name —

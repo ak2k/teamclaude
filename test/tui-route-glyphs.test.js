@@ -464,3 +464,75 @@ test('the glyph column does not mark a synthesised basis as a complete answer', 
   assert.match(cell, /\u25b8/,
     'the admitted account lost its mark entirely instead of gaining the qualified one');
 });
+
+// ONE TEST PER CONSUMER — the dashboard glyph column's row of the
+// disclosure-consumer enumeration. The other five consumers are tested in
+// test/decision-block.test.js; this one lives here because it is the only
+// consumer that renders through the TUI.
+function mixedFleet(match) {
+  const now = Date.now();
+  const H = 3600e3;
+  const am = new AccountManager([
+    { name: 'zulu9acct', type: 'apikey', apiKey: 'k1' },
+    { name: 'yankee7acct', type: 'apikey', apiKey: 'k2' },
+  ], 0.98, {
+    routes: [{ name: 'wide', match }],
+    expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5, preempt: true },
+  });
+  am.accounts.forEach((x, i) => {
+    x.quota = { ...x.quota, unified5h: 0.05 + i * 0.05, unified5hReset: now + 2 * H,
+      unified7d: 0.2 + i * 0.2, unified7dReset: now + 40 * H,
+      unified7dFable: 0.2 + i * 0.2, unified7dFableReset: now + 40 * H };
+  });
+  return { am, now };
+}
+
+
+test('S5 the dashboard glyph marks a route with SOME derived scope', () => {
+  // THE SIXTH FORM. The column asked `basisGap || synthetic`: `basisGap` carries
+  // FAMILY SPLITS (null here) and `synthetic` answers ALL (false on a mixed
+  // route), so the glyph rendered COMPLETE beside a status line naming the
+  // derived glob. It reads the stated reduction now.
+  //
+  // **GRADED ON THE GLYPH CELL, NOT ON THE WHOLE FRAME, AND THE FIRST VERSION OF
+  // THIS TEST WAS VACUOUS FOR EXACTLY THAT REASON.** It compared two rendered
+  // frames and asserted they differed — which they always do, because the
+  // fixtures carry different globs and the frame prints them. The assertion
+  // passed whether or not the fix was present, and the neutralisation row for
+  // this very mechanism reported SURVIVES, which is the coverage hole announcing
+  // itself. A frame differential answers "did anything change"; only the cell
+  // answers "did the glyph change".
+  const cellFor = (match, acct) => {
+    const { am } = mixedFleet(match);
+    const routes = [{ name: 'wide', match }];
+    const tui = new TUI({
+      accountManager: am, config: { proxy: { port: 1 }, routes },
+      sx: null, saveConfig: async () => {}, syncAccounts: async () => 0, onQuit: () => {},
+    });
+    tui.render = () => {};
+    const lines = renderFrame(tui);
+    const status = am.getStatus();
+    const general = status.routes
+      .filter(r => !/fable|sonnet/i.test(`${r.name} ${(r.match || []).join(' ')}`)).map(r => r.name);
+    const col = general.indexOf('wide');
+    assert.ok(col >= 0, 'the premise: this route takes a general glyph column');
+    const nameAt = GLYPH_AT + general.length + 1;
+    const row = lines.find(l => l.slice(nameAt).startsWith(acct));
+    assert.ok(row, `no rendered row for ${acct}; grading a missing row proves nothing`);
+    return row[GLYPH_AT + col];
+  };
+
+  // `*opus*` is matched, `gpt-*` is derived — one route, both kinds, and NEITHER
+  // glob mentions fable or sonnet so the route reaches the general column rather
+  // than an F7/S7 bar. Shape is incidental; what matters is that one scope comes
+  // from a family match and the other from the strip.
+  const mixed = cellFor(['*opus*', 'gpt-*'], 'zulu9acct');
+  // CONTROL: the same column with every scope matched. If these were equal the
+  // glyph is saying the same thing about a route with a derived scope and one
+  // without, which is the defect.
+  const allMatched = cellFor(['*opus*'], 'zulu9acct');
+
+  assert.notEqual(mixed, allMatched,
+    'the glyph column renders a route with a derived scope identically to one '
+    + 'with none, so the dashboard says COMPLETE where the status line discloses');
+});

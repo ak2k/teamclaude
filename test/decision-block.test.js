@@ -1587,8 +1587,14 @@ test('a scope graded on an id nothing can request does not present it as measure
   const line = renderStatus(status, { color: false, now }).split('\n')
     .find(l => l.trim().startsWith('claude-*-4'));
   assert.ok(line, 'no rendered routing line for the glob under test');
-  assert.match(line, /no id this route receives was measured/,
-    'the line renders a synthesised basis in the measured-complete form');
+  assert.match(line, /basis derived from the glob, not matched to a metered family/,
+    'the line renders a derived basis in the measured-complete form');
+  // THE WITHDRAWN SENTENCE MUST NOT COME BACK. It claimed NON-EXISTENCE — that
+  // no id this route receives was measured — a claim about the world the
+  // payload cannot decide, and FALSE on a derived-but-real id. A positive pin
+  // on the new wording alone would pass on a build rendering both.
+  assert.doesNotMatch(line, /no id this route receives was measured/,
+    'the withdrawn non-existence claim is back on the line');
 
   // AND THE CONTROL, on the same fleet: a glob that DOES resolve to a real
   // family representative must be untouched. Without it this test passes just
@@ -1609,7 +1615,7 @@ test('a scope graded on an id nothing can request does not present it as measure
     'a glob resolving to a real family representative was marked synthetic');
   const ctlLine = renderStatus(ctlStatus, { color: false, now }).split('\n')
     .find(l => l.trim().startsWith('*fable*'));
-  assert.doesNotMatch(ctlLine, /no id this route receives was measured/,
+  assert.doesNotMatch(ctlLine, /basis derived from the glob|no id this route receives was measured/,
     'the unmeasured-basis qualifier appears on a route whose basis IS measured');
 });
 
@@ -1677,22 +1683,39 @@ function p20Fleet(match) {
   return { am, now };
 }
 
-// THE MARK MEANS "THIS BASIS IS NOT AN ID THIS ROUTE CAN RECEIVE", and a
-// wildcard-free glob's literal IS such an id by construction — the strip is the
-// identity on it. Marking it told a directly measured route that nothing it
-// receives was measured. The superseded predicate asked FAMILY_MODELS
-// membership, which answers METERING while the sentence claims EXISTENCE.
-test('a wildcard-free glob names a real id and is not called a placeholder', () => {
+// **THIS TEST'S CLAIM CHANGED WITH RULING B, AND THE HISTORY IS THE POINT.**
+// It used to assert `basisSynthetic === null` here, because the mark then meant
+// "THIS BASIS IS NOT AN ID THIS ROUTE CAN RECEIVE" and `claude-haiku-4-5` IS
+// such an id — so marking it told a directly measured route that nothing it
+// receives was measured, which was false.
+//
+// That sentence is undecidable and has been withdrawn. `claude-haiku-4-5*` and
+// `claude-haiku-4-*` both take the derived branch and agree on every signal a
+// predicate can read, while one names a real id and the other does not — so no
+// predicate could ever have separated them, and the fault was in what the mark
+// CLAIMED rather than in how it was decided.
+//
+// Under B the mark claims PROVENANCE: derived from the glob, not matched to a
+// metered family. That is TRUE of this route — no metered family answers
+// `claude-haiku-4-5`, so its representative came from the strip — so the mark is
+// present AND honest. **THE TEST NOW PINS THE SENTENCE, NOT THE FLAG**: what
+// must never happen is this route being told its ids went unmeasured.
+test('a wildcard-free glob is marked as derived, never as unmeasured', () => {
   const { am, now } = p20Fleet(['claude-haiku-4-5']);
   const status = am.getStatus();
   const entry = status.routing.find(e => e.scope === 'route' && e.route === 'r');
   assert.equal(entry.model, 'claude-haiku-4-5',
     'the strip is no longer the identity on a wildcard-free glob; this fixture has moved');
-  assert.equal(entry.basisSynthetic ?? null, null,
-    'a real, requestable id is marked as a placeholder basis');
+  assert.equal(entry.basisSynthetic, 'unmetered-glob',
+    'a derived basis lost its provenance mark');
   const line = renderStatus(status, { color: false, now }).split('\n')
     .find(l => l.trim().startsWith('claude-haiku-4-5'));
-  assert.doesNotMatch(line, /was measured|no id measured/,
+  assert.match(line, /basis derived from the glob, not matched to a metered family/,
+    'the derived basis is not disclosed as derived');
+  // THE WITHDRAWN CLAIM, pinned negatively: a real id must never be told it was
+  // not measured. This is the assertion the old test existed for and it is the
+  // one that survives the narrowing intact.
+  assert.doesNotMatch(line, /no id this route receives was measured|no id measured for/,
     'a directly measured route is told its ids went unmeasured');
 
   // CONTROL: a glob whose strip really does fabricate must still be marked, or
@@ -1718,10 +1741,10 @@ test('one placeholder scope does not deny a measured sibling', () => {
 
   const line = renderStatus(status, { color: false, now }).split('\n')
     .find(l => l.includes('*fable*') && l.includes('→'));
-  assert.doesNotMatch(line, /no id this route receives was measured/,
+  assert.doesNotMatch(line, /basis derived from the glob,|no id this route receives was measured/,
     'the route-level denial is rendered while a sibling scope IS measured');
-  assert.match(line, /no id measured for claude-\*-4/,
-    'the partial case does not name the scope whose basis is a placeholder');
+  assert.match(line, /basis derived for claude-\*-4, not matched to a metered family/,
+    'the partial case does not name the scope whose basis is derived');
 });
 
 // ONE PAYLOAD, ONE RULE, EVERY CONSUMER. The Decision block printed a full set
@@ -1734,7 +1757,7 @@ test('the Decision block discloses a placeholder basis on the same screen', () =
   const frame = renderStatus(status, { color: false, now });
   const decision = frame.split('\n').find(l => l.startsWith('Decision'));
   assert.ok(decision, 'the Decision block did not render; a silent surface is not a negative');
-  assert.match(decision, /placeholder/,
+  assert.match(decision, /basis derived from the glob/,
     'the Decision block reports figures for a placeholder basis without saying so');
 
   // CONTROL: a real basis must leave the header alone.
@@ -1756,7 +1779,7 @@ test('the Decision block discloses a placeholder basis on the same screen', () =
 // false.
 test('two disclosure sentences that cannot both be true never share a line', () => {
   const REAL_BUT_PARTIAL = /split by .*other ids may go elsewhere/;
-  const NOTHING_MEASURED = /no id this route receives was measured/;
+  const NOTHING_MEASURED = /basis derived from the glob, not matched to a metered family/;
 
   // Wholly fabricated basis, with model claims that WOULD otherwise raise the
   // split marker. The split sentence has nothing real to be partial about.
@@ -1792,4 +1815,243 @@ test('two disclosure sentences that cannot both be true never share a line', () 
   assert.match(realLine, REAL_BUT_PARTIAL,
     'the split disclosure was suppressed on a genuinely split REAL basis');
   assert.doesNotMatch(realLine, NOTHING_MEASURED);
+});
+
+// ============================================================================
+// THE DISCLOSURE-CONSUMER ENUMERATION, ONE TEST PER CONSUMER.
+//
+// Four reproduced findings this pass were ONE shape — a disclosure that reaches
+// some consumers and not others — and two commits produced five instances of it,
+// because each fixed one arm and left the siblings. So the consumers of the
+// signals this cycle touches are enumerated, and each carries its own test.
+// A patch per surface guarantees a sixth surface next pass; that arithmetic has
+// now been demonstrated twice.
+//
+// THE CONSUMER SET for `basisSynthetic` and its reduction:
+//   S1  status-renderer.js  routing line, ALL form        naming.synthetic
+//   S2  status-renderer.js  routing line, SOME form       naming.syntheticGlobs
+//   S3  status-renderer.js  Decision header               entry.basisSynthetic (WINNER)
+//   S4  status-renderer.js  Decision sibling map          e.basisSynthetic per scope
+//   S5  tui.js              dashboard glyph column        basisGap || anySynthetic
+//   S6  tui.js              settings auto block           UNREACHABLE, labelled
+//
+// **THE FIXTURES KEY ON THE PROPERTY, NEVER ON GLOB SHAPE**, and that is not
+// stylistic. The mark class is UNBOUNDED: a star inserted between any two
+// characters of any family id reproduces the old defect — 49 of 49 single-star
+// insertions and 120 of 120 two-star combinations, enumerated across two seats.
+// A test asserting "an interior-star form behaves thus" would be a finite sample
+// of an infinite class AND wrong for half its own members, since `claude-*fable-5`
+// and `claude-fable-*` are both interior-star and behave oppositely. What decides
+// is whether the strip reconstructs the family representative exactly. Shape
+// names appear in comments as examples and never in assertions.
+// ============================================================================
+
+// A ROUTE HOLDING BOTH KINDS AT ONCE — one matched scope, one derived — which is
+// the state every one of these consumers reduced differently. `accounts` is
+// ABSENT rather than `[]`: an empty array reads as "restricted to nobody", not
+// as the absence of a restriction, and with it the derived scope never lands in
+// the sibling set. `preempt` is on or the Decision block never renders, which is
+// how a fixture renders nothing and a probe reports the emptiness as agreement.
+function mixedFleet(match) {
+  const now = Date.now();
+  const H = 3600e3;
+  const am = new AccountManager([
+    { name: 'zulu9acct', type: 'apikey', apiKey: 'k1' },
+    { name: 'yankee7acct', type: 'apikey', apiKey: 'k2' },
+  ], 0.98, {
+    routes: [{ name: 'wide', match }],
+    expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5, preempt: true },
+  });
+  am.accounts.forEach((x, i) => {
+    x.quota = { ...x.quota, unified5h: 0.05 + i * 0.05, unified5hReset: now + 2 * H,
+      unified7d: 0.2 + i * 0.2, unified7dReset: now + 40 * H,
+      unified7dFable: 0.2 + i * 0.2, unified7dFableReset: now + 40 * H };
+  });
+  return { am, now };
+}
+
+const DERIVED_ALL = /basis derived from the glob, not matched to a metered family/;
+const DERIVED_SOME = /basis derived for .*, not matched to a metered family/;
+
+test('S1/S2 the routing line names WHICH scopes are derived when only some are', () => {
+  const { am, now } = mixedFleet(['*opus*', 'claude-*-4']);
+  const line = renderStatus(am.getStatus(), { color: false, now }).split('\n')
+    .find(l => l.trim().startsWith('*opus*'));
+  assert.ok(line, 'no routing line rendered; a silent surface is not a negative');
+  assert.match(line, DERIVED_SOME, 'the partial case does not name the derived glob');
+  // THE ALL FORM MUST NOT APPEAR HERE. It denies the measured sibling, which is
+  // the erasure this round already fixed once; a route-level denial on a route
+  // that measured something is false.
+  assert.doesNotMatch(line, DERIVED_ALL,
+    'the route-level form is rendered while a sibling scope IS matched');
+
+  // CONTROL: every scope derived takes the ALL form and names no globs.
+  const all = mixedFleet(['claude-*-4']);
+  const allLine = renderStatus(all.am.getStatus(), { color: false, now: all.now }).split('\n')
+    .find(l => l.trim().startsWith('claude-*-4'));
+  assert.match(allLine, DERIVED_ALL, 'the all-derived case lost its disclosure');
+});
+
+test('S3 the Decision header speaks for the WINNING entry and not for a sibling', () => {
+  // The header qualifies the figures beneath it, so it answers for the entry
+  // that won the block. When a mere sibling is derived it is rightly silent —
+  // widening it would attach one basis's qualifier to another's figures.
+  const mixed = mixedFleet(['*opus*', 'claude-*-4']);
+  const header = renderStatus(mixed.am.getStatus(), { color: false, now: mixed.now })
+    .split('\n').find(l => l.trim().startsWith('Decision'));
+  assert.ok(header, 'the Decision block did not render; expiry routing off?');
+  assert.doesNotMatch(header, /basis derived/,
+    'the header claims a derived basis for figures computed on a matched one');
+
+  // CONTROL: when the DERIVED scope wins, the header must say so — otherwise
+  // this passes on a build whose header never discloses at all.
+  const derivedWins = mixedFleet(['claude-*-4']);
+  const ctlHeader = renderStatus(derivedWins.am.getStatus(), { color: false, now: derivedWins.now })
+    .split('\n').find(l => l.trim().startsWith('Decision'));
+  assert.match(ctlHeader, /basis derived from the glob/,
+    'the header is silent about a derived basis its own figures are computed on');
+});
+
+test('S4 a derived SIBLING scope says so in the Other-scopes map', () => {
+  // THE FIFTH SURFACE. This map read no disclosure signal at all: it rendered
+  // `wide (other): sized` for a derived sibling while the routing line on the
+  // same screen named that glob. One payload, two sentences.
+  const { am, now } = mixedFleet(['*opus*', 'claude-*-4']);
+  const siblings = renderStatus(am.getStatus(), { color: false, now }).split('\n')
+    .find(l => /Other scopes/.test(l));
+  assert.ok(siblings, 'no Other-scopes line rendered; the sibling set is empty here');
+  assert.match(siblings, /basis derived from the glob/,
+    'a derived sibling scope renders as an ordinary band with no disclosure');
+
+  // CONTROL: siblings that are NOT derived must stay unqualified, or this passes
+  // on a build that marks every sibling regardless.
+  const clean = mixedFleet(['*opus*', '*fable*']);
+  const cleanSiblings = renderStatus(clean.am.getStatus(), { color: false, now: clean.now })
+    .split('\n').find(l => /Other scopes/.test(l));
+  if (cleanSiblings) {
+    assert.doesNotMatch(cleanSiblings, /basis derived from the glob/,
+      'a matched sibling scope is labelled derived');
+  }
+});
+
+// **THE PASS-21 BLOCKER'S OWN TEST, AND IT KEYS ON THE PROPERTY.** The existing
+// matched-glob control uses `*fable*`, whose strip yields `fable` — which never
+// equalled the family representative, so it never reproduced the defect. The
+// blocker needs a MATCHED glob whose strip reconstructs the representative
+// EXACTLY, because that coincidence is what the superseded predicate mistook for
+// provenance.
+//
+// THE CLASS IS UNBOUNDED, WHICH IS WHY THIS IS ONE FIXTURE AND NOT A LIST. A
+// star inserted between any two characters of any family id reproduces it — 49
+// of 49 single-star insertions and 120 of 120 two-star combinations, enumerated
+// across two seats. Note also that `claude-*fable-5` and `claude-fable-*` are
+// BOTH interior-star and behave OPPOSITELY, so a test keyed on where the star
+// sits would be wrong for half its own members. Shape is incidental; what
+// decides is whether the strip is information-preserving.
+test('a MATCHED glob is never marked, even when its strip reconstructs the representative', () => {
+  const { am, now } = p20Fleet(['claude-*fable-5']);
+  const status = am.getStatus();
+  const entry = status.routing.find(e => e.scope === 'route' && e.route === 'r');
+
+  // THE PREMISE, asserted rather than assumed: this fixture only tests what it
+  // claims if the strip really does reconstruct the representative. If
+  // `modelsForGlob` ever stops matching this glob to the family, the premise is
+  // gone and a green below would mean nothing.
+  assert.equal(entry.model, 'claude-fable-5',
+    'this glob no longer resolves to the family representative; the fixture has moved');
+  assert.equal('claude-*fable-5'.replace(/\*/g, ''), entry.model,
+    'the strip no longer reconstructs the representative, so the coincidence this '
+    + 'test exists for is not present in the fixture');
+
+  assert.equal(entry.basisSynthetic ?? null, null,
+    'a family-MATCHED basis is marked as derived because the strip happens to '
+    + 'reconstruct it — provenance read off a string coincidence');
+  const line = renderStatus(status, { color: false, now }).split('\n')
+    .find(l => l.trim().startsWith('claude-*fable-5'));
+  assert.ok(line, 'no routing line rendered for the glob under test');
+  assert.doesNotMatch(line, /basis derived/,
+    'a matched basis is disclosed as derived');
+
+  // CONTROL: a genuinely derived basis on the same fleet must still be marked,
+  // or this passes on a build that has simply stopped marking anything.
+  const fab = p20Fleet(['claude-*-4']);
+  const fabEntry = fab.am.getStatus().routing.find(e => e.scope === 'route' && e.route === 'r');
+  assert.equal(fabEntry.basisSynthetic, 'unmetered-glob',
+    'the derived basis lost its mark, so the assertion above grades nothing');
+});
+
+// **:743 — TWO TRUE FACTS, AND THE EARLY RETURN RENDERED ONE.** When every scope
+// is captured, `routeNaming` returns at the `suppressed.all` branch — which sat
+// ABOVE the synthetic reduction and carried none of it. So a reader learned an
+// earlier route took the ids and never learned the figures behind that verdict
+// were computed for a string the proxy DERIVED. Both facts are true; the branch
+// published one.
+//
+// THE PRODUCER'S OWN COMMENT SAID THE FLAG "changes nothing a reader sees",
+// which was true of the flag and false of the render. Setting a field is not
+// rendering it, and the reassurance was the dangerous half: it told the next
+// reader there was nothing downstream to check.
+//
+// THE FIXTURE IS FIDDLY AND ITS CONDITIONS ARE ASSERTED RATHER THAN ASSUMED.
+// `_captureDistortsFigures` needs the representative captured by an earlier
+// route, NO accounts list on the route behind it, and a `models` claim that
+// restricts the representative — drop any one and the route publishes normally
+// or goes coverage-dead instead, and this test silently stops testing anything.
+test('a captured route discloses BOTH the capture and its derived basis', () => {
+  const now = Date.now();
+  const H = 3600e3;
+  const am = new AccountManager([
+    { name: 'zulu9acct', type: 'apikey', apiKey: 'k1', models: ['claude-haiku-4-5'] },
+    { name: 'yankee7acct', type: 'apikey', apiKey: 'k2' },
+  ], 0.98, {
+    routes: [
+      { name: 'exact', match: ['claude-haiku-4-5'] },
+      { name: 'behind', match: ['claude-haiku-4-5*'] },
+    ],
+  });
+  am.accounts.forEach((x, i) => {
+    x.quota = { ...x.quota, unified5h: 0.05 + i * 0.05, unified5hReset: now + 2 * H,
+      unified7d: 0.2 + i * 0.2, unified7dReset: now + 40 * H };
+  });
+  const status = am.getStatus();
+  const behind = status.routing.find(e => e.scope === 'route' && e.route === 'behind');
+
+  // THE PREMISE, both halves. Without the capture this is an ordinary route;
+  // without the derived basis there is no second fact to lose.
+  assert.equal(behind.figuresAbsent, 'representative-captured',
+    'the route behind is not captured, so the all-captured early return is never taken');
+  assert.equal(behind.basisSynthetic, 'unmetered-glob',
+    'the captured scope carries no derived basis, so there is no second fact to render');
+
+  const line = renderStatus(status, { color: false, now }).split('\n')
+    .find(l => l.trim().startsWith('claude-haiku-4-5*'));
+  assert.ok(line, 'no routing line rendered for the captured route');
+  assert.match(line, /an earlier route takes the id/,
+    'the capture itself stopped being disclosed');
+  assert.match(line, /basis derived/,
+    'the capture is disclosed and the derived basis is not — one of two true facts');
+
+  // **THE CONTROL, AND r3-attestor2 IS WHY IT IS HERE.** Their point: without an
+  // arm showing the same route disclosing on a DIFFERENT path, this test cannot
+  // tell "the captured return carries the fact" from "this route would disclose
+  // whatever path it took" — and a green would be asserting on a coincidence.
+  // Same placeholder route, no earlier capture: it publishes normally, takes the
+  // ordinary aggregation rather than the early return, and must still disclose.
+  const solo = new AccountManager([
+    { name: 'zulu9acct', type: 'apikey', apiKey: 'k1', models: ['claude-haiku-4-5'] },
+    { name: 'yankee7acct', type: 'apikey', apiKey: 'k2' },
+  ], 0.98, { routes: [{ name: 'behind', match: ['claude-haiku-4-5*'] }] });
+  solo.accounts.forEach((x, i) => {
+    x.quota = { ...x.quota, unified5h: 0.05 + i * 0.05, unified5hReset: now + 2 * H,
+      unified7d: 0.2 + i * 0.2, unified7dReset: now + 40 * H };
+  });
+  const soloStatus = solo.getStatus();
+  const soloEntry = soloStatus.routing.find(e => e.scope === 'route' && e.route === 'behind');
+  assert.equal(soloEntry.figuresAbsent ?? null, null,
+    'the control is ALSO captured, so it does not exercise a different path');
+  const soloLine = renderStatus(soloStatus, { color: false, now }).split('\n')
+    .find(l => l.trim().startsWith('claude-haiku-4-5*'));
+  assert.match(soloLine, /basis derived/,
+    'the uncaptured route does not disclose either, so the assertion above is '
+    + 'not evidence that the CAPTURED path carries the fact');
 });

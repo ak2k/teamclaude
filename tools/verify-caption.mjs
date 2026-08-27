@@ -378,21 +378,64 @@ if (!captured) {
     + ' nothing to check the rebuilt fleet against. The fidelity check cannot run and'
     + ' will not pretend it did — capture a sample whose routing names this model.');
 }
-if (captured && captured.band) {
-  const cap = captured.band;
-  const mism = [];
-  if (typeof cap.candidates === 'number' && cap.candidates !== candidates.length) {
-    mism.push(`candidates ${candidates.length} rebuilt vs ${cap.candidates} captured`);
+// DEFAULT-REFUSE. THE COMPARISON'S EXECUTION IS THE ONLY PATH TO A GRADE.
+//
+// THIS INVERSION REPLACES A SHAPE THAT LOST THREE TIMES. The check used to read
+// "grade unless a guard catches a bad state", and each pass found one more bad
+// state the guards did not enumerate: no `routing` block at all, then a block
+// naming no entry for the graded model, then — pass 21 — an entry present with
+// a MALFORMED BAND. That third one bypassed by two separate roads at once: a
+// falsy `captured.band` skipped the whole block, and a band whose `candidates`
+// or `kind` had the wrong type skipped its own comparison via a `typeof` test,
+// leaving `mism` empty and the gate printing a verdict either way.
+//
+// SO THE FOURTH GUARD IS NOT ANOTHER GUARD. Enumerating bad-band shapes would
+// only close the shapes somebody has already thought of, and the score so far
+// is three for three against that method. Instead every required comparison
+// must POSITIVELY EXECUTE AND AGREE, and ANY other control flow — absent field,
+// wrong type, unequal value, a field nobody added a check for — reaches a
+// refusal. That closes the shapes nobody has found yet, which is the only kind
+// that has ever bitten.
+//
+// THE COST IS DELIBERATE AND IS THE POINT: a capture missing a field this gate
+// requires now REFUSES instead of grading, so a thinner capture format becomes
+// a loud failure rather than a silent narrowing of what was checked.
+const REQUIRED = [
+  { field: 'candidates', type: 'number', rebuilt: candidates.length,
+    render: (r, c) => `candidates ${r} rebuilt vs ${c} captured` },
+  { field: 'kind', type: 'string', rebuilt: decision.kind,
+    render: (r, c) => `decision '${r}' rebuilt vs '${c}' captured` },
+];
+
+const cap = (captured && captured.band) || null;
+if (!cap || typeof cap !== 'object') {
+  refuse(`${SAMPLE}'s entry for ${MODEL} carries no usable band, so the fidelity`
+    + ' comparison has nothing to execute against. It will not grade a caption on a'
+    + ' reconstruction it could not check — re-capture a sample whose routing entry'
+    + ' carries its band.');
+}
+
+const unran = [];
+const mism = [];
+for (const { field, type, rebuilt, render } of REQUIRED) {
+  if (typeof cap[field] !== type) {
+    unran.push(`${field} (captured value is ${cap[field] === undefined ? 'absent' : typeof cap[field]}, needs ${type})`);
+    continue;
   }
-  if (typeof cap.kind === 'string' && cap.kind !== decision.kind) {
-    mism.push(`decision '${decision.kind}' rebuilt vs '${cap.kind}' captured`);
-  }
-  if (mism.length) {
-    refuse(`the rebuilt fleet does not match the capture for route '${captured.route}': ${mism.join('; ')}.`
-      + ' The usual cause is a route with no configured accounts list: its wire view names every'
-      + ' currently eligible account and the rebuild reads that as an explicit restriction.'
-      + ' Grading a caption against this fleet would grade a fleet that never existed');
-  }
+  if (cap[field] !== rebuilt) mism.push(render(rebuilt, cap[field]));
+}
+
+if (unran.length) {
+  refuse(`the fidelity comparison could not RUN for route '${captured.route}':`
+    + ` ${unran.join('; ')}. A comparison that did not execute is not a comparison`
+    + ' that passed, and this gate refuses rather than grading a caption against a'
+    + ' fleet nothing checked.');
+}
+if (mism.length) {
+  refuse(`the rebuilt fleet does not match the capture for route '${captured.route}': ${mism.join('; ')}.`
+    + ' The usual cause is a route with no configured accounts list: its wire view names every'
+    + ' currently eligible account and the rebuild reads that as an explicit restriction.'
+    + ' Grading a caption against this fleet would grade a fleet that never existed');
 }
 
 // Only the `sized` variant admits by coverage, which is what these captions

@@ -401,3 +401,49 @@ test('the fidelity check actually runs on the shipped sample', () => {
     'a capture naming no entry for the graded model was graded without any fidelity check');
   assert.match(skipped.out, /no entry for claude-fable-5/);
 });
+
+// PASS 21, AND THE THIRD TIME THIS EXACT CLASS SHIPPED. The fidelity check was
+// written as "grade unless a guard catches a bad state", and each pass found one
+// more state the guards did not enumerate: no `routing` block, then a block
+// naming no entry for the graded model, then an entry whose BAND IS MALFORMED —
+// which bypassed by two roads at once, a falsy `band` skipping the whole block
+// and a wrong-typed field skipping its own comparison through a `typeof` test,
+// leaving the mismatch list empty and the gate printing a verdict either way.
+//
+// So the fix is not a fourth guard. THE COMPARISON'S POSITIVE EXECUTION IS THE
+// ONLY PATH TO A GRADE, and every other control flow refuses. This test pins the
+// property rather than the three known shapes: it drives a malformation NOBODY
+// REPORTED (a field of the wrong type), because the enumerable shapes were never
+// what bit.
+test('a malformed band refuses rather than grading, and the shipped sample still grades', () => {
+  const sample = JSON.parse(fs.readFileSync(SAMPLE, 'utf8'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'caption-band-'));
+
+  const write = (name, mutate) => {
+    const copy = JSON.parse(JSON.stringify(sample));
+    mutate(copy.routing.find(e => e && e.model === 'claude-fable-5'));
+    const p = path.join(dir, `${name}.json`);
+    fs.writeFileSync(p, JSON.stringify(copy));
+    return p;
+  };
+
+  // A WRONG-TYPED FIELD used to skip its own comparison silently.
+  const wrongType = gate([`--sample=${write('wrongtype', e => { e.band.candidates = '4'; })}`,
+    '--model=claude-fable-5', `--now=${NOW}`]);
+  assert.notEqual(wrongType.code, 0, 'a band whose candidates is a string was graded');
+  assert.match(wrongType.out, /could not RUN/,
+    'it refused for some other reason, so this fixture is not exercising the execution requirement');
+
+  // A BAND THAT IS NOT AN OBJECT used to skip the block entirely.
+  const noBand = gate([`--sample=${write('noband', e => { delete e.band; })}`,
+    '--model=claude-fable-5', `--now=${NOW}`]);
+  assert.notEqual(noBand.code, 0, 'an entry with no band was graded');
+  assert.match(noBand.out, /no usable band/);
+
+  // THE CONTROL, and it is what stops this passing on a gate that refuses
+  // everything: a fix which buys refusal by breaking the comparison satisfies
+  // both assertions above and is not a fix.
+  const ok = gate([`--sample=${SAMPLE}`, '--model=claude-fable-5', `--now=${NOW}`]);
+  assert.equal(ok.code, 0,
+    `the shipped sample stopped grading, so the refusal was bought by disabling the gate:\n${ok.out}`);
+});

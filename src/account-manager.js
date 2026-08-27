@@ -1853,7 +1853,11 @@ export class AccountManager {
       // is about SCOPE COUNT — one scope rather than one per family — and this
       // does not contradict it.
       const scopeGlob = match.length === 1 ? match[0] : null;
-      const stripped = scopeGlob === null ? null : (scopeGlob.replace(/\*/g, '') || 'model');
+      // `stripped` USED TO LIVE HERE and is gone with the predicate that needed
+      // it. Comparing the model against the stripped glob was the coincidence
+      // detector ruling B removed; nothing downstream asks that question now,
+      // and leaving the binding would have been an unused warning — which this
+      // round counts as a lint PROBLEM, not a nit.
       // `model &&` IS NOT HERE, AND ITS ABSENCE IS DELIBERATE. It was in the
       // first draft as the shared-scope guard, and it is REDUNDANT: the shared
       // scope carries `match: []`, so `scopeGlob` is already null for it and
@@ -1864,8 +1868,32 @@ export class AccountManager {
       // KILL: belt-and-braces reads as caution and defeats the only instrument
       // that could vouch for it. One mechanism, `scopeGlob`, and the
       // shared-scope row targets it.
-      const basisSynthetic = scopeGlob && model === stripped && stripped !== scopeGlob
-        ? 'unmetered-glob' : null;
+      // **MARKED IFF THE REPRESENTATIVE WAS DERIVED RATHER THAN MATCHED.**
+      //
+      // The superseded predicate was `model === stripped && stripped !== scopeGlob`,
+      // and it is a COINCIDENCE DETECTOR rather than a provenance test: it fires
+      // whenever stripping the wildcards happens to reconstruct the family
+      // representative exactly. That is true for a star inserted between ANY two
+      // characters of ANY family id — 49 of 49 single-star insertions and 120 of
+      // 120 two-star combinations, enumerated. THE CLASS IS UNBOUNDED, which is
+      // why the two shape-enumerated repairs before this one each closed the
+      // members somebody had thought of and left the rest.
+      //
+      // THIS ASKS THE INPUT QUESTION, NOT THE OUTPUT ONE. `familyModelsMatching`
+      // is the same call `_scopeModelsFor` and `modelsForGlob` branch on, given
+      // the same glob — so this reads the branch rather than guessing it from
+      // what the branch returned. `modelsForGlobWithProvenance` carries the same
+      // fact for callers outside this file; the tripwire if they ever disagree
+      // is that both consult one function.
+      //
+      // WHAT THE MARK NOW CLAIMS IS NARROWER AND TRUE: the basis was DERIVED
+      // from the glob, not matched to a metered family. It no longer claims the
+      // id is unrequestable, because nothing here can decide that —
+      // `claude-haiku-4-5*` yields a real id from the derived branch and
+      // `claude-haiku-4-*` yields a fabricated one, and they agree on every
+      // signal a predicate can read. NON-VERIFICATION, NOT NON-EXISTENCE.
+      const derivedBasis = scopeGlob !== null && familyModelsMatching(scopeGlob).length === 0;
+      const basisSynthetic = derivedBasis ? 'unmetered-glob' : null;
       if (this._captureDistortsFigures(model, scopeRoute)) {
         return {
           scope,
@@ -1883,10 +1911,22 @@ export class AccountManager {
           // a consumer asking "are these figures real" does not have to infer
           // it from a band variant.
           figuresAbsent: 'representative-captured',
-          // Carried on BOTH entry paths. This one publishes no figures anyway,
-          // so the flag changes nothing a reader sees today — it is set because
-          // a field that exists on one branch and not its twin is the shape
-          // that made `familySplit` reach the line from live scopes only.
+          // Carried on BOTH entry paths, because a field that exists on one
+          // branch and not its twin is the shape that made `familySplit` reach
+          // the line from live scopes only.
+          //
+          // **THIS COMMENT USED TO ADD "so the flag changes nothing a reader
+          // sees today", AND THAT WAS FALSE — OR RATHER, TRUE OF THE FLAG AND
+          // FALSE OF THE RENDER.** Setting it here was correct and it reached
+          // nothing, because every `source: 'none'` return in `routeNaming`
+          // exited before the synthetic reduction and carried none of it. So a
+          // route with all scopes captured AND a derived basis rendered ONE of
+          // two true facts. The reassurance was the dangerous part: it told the
+          // next reader there was nothing downstream to check.
+          //
+          // SETTING A FIELD IS NOT RENDERING IT. A producer can only put the
+          // fact on the wire; whether a reader ever sees it is a question about
+          // the consumers, and this comment is not entitled to answer it.
           basisSynthetic,
           band: {
             kind: 'passthrough',

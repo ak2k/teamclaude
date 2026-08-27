@@ -321,8 +321,16 @@ function decisionLines(entry, status, blocked, paint) {
   // it, and the two cannot disagree. It rides the header rather than the figure
   // rows because it qualifies ALL of them — every number below is computed for
   // that representative.
+  // **THE HEADER COVERS THE WINNER ONLY, WHICH IS WHY THE SIBLING MAP BELOW
+  // ALSO HAS TO SPEAK.** This qualifies the entry that WON the block — every
+  // figure under it is computed for that representative — and it is correct as
+  // far as it reaches. What it cannot do is answer for the route's OTHER scopes,
+  // which render in `Other scopes`; when the winner is matched and a sibling is
+  // derived, this line is rightly silent and the sibling's own cell must say so.
+  // The fix for that is at the sibling map, not here: widening this to "any
+  // scope" would attach a qualifier about one basis to the figures of another.
   const placeholder = entry.basisSynthetic
-    ? paint.dim('  (basis is a placeholder id; figures below are for it)') : '';
+    ? paint.dim('  (basis derived from the glob; figures below are for it)') : '';
   out.push(`${paint.bold('Decision')}  ${paint.cyan(scope)}${family}${auto}  ${paint.dim(`[${entry.bucket}]`)}${placeholder}`);
 
   // BOTH DESTINATION ROWS REPORT WHAT THE PATH RETURNS. Neither describes a
@@ -483,7 +491,16 @@ function decisionLines(entry, status, blocked, paint) {
       if (e.figuresAbsent === 'representative-captured') {
         return `${scopeName(e)}: no figures, an earlier route takes its id`;
       }
-      return `${scopeName(e)}: ${e.band.kind}${state === 'partial' ? ', partly blocked' : ''}${split}`;
+      // **THE FIFTH SURFACE. THIS MAP READ NO DISCLOSURE SIGNAL AT ALL.** It
+      // rendered `wide (other): sized` for a sibling whose basis is derived,
+      // while the routing line on the same screen named that glob — one payload,
+      // two sentences, and the operator reading this row had no way to know the
+      // figures behind `sized` were computed for a string the proxy derived.
+      // The header above qualifies only the entry that WON the block, so a
+      // derived SIBLING had no cell that could speak for it. Same signal, same
+      // wording, every consumer.
+      const derived = e.basisSynthetic ? ', basis derived from the glob' : '';
+      return `${scopeName(e)}: ${e.band.kind}${state === 'partial' ? ', partly blocked' : ''}${derived}${split}`;
     }).join(', ');
     out.push(`  ${paint.dim('Other scopes'.padEnd(13))}${paint.dim(names)}`);
   }
@@ -740,11 +757,36 @@ export function routeNaming(route, routeIndex, routing, blocked = []) {
     }
     return { source: 'route-accounts' };
   }
-  if (suppressed.all) return { source: 'none', reason: 'captured' };
+  // **SETTING THE FIELD IS NOT RENDERING IT, AND THE EARLY RETURNS ARE A
+  // CONSUMER SET.** The producer sets `basisSynthetic` on BOTH entry paths
+  // precisely so the two cannot drift — and it made no difference here, because
+  // every `source: 'none'` return below exits before the synthetic reduction
+  // further down and carries none of it. A route whose scopes are all captured
+  // AND whose basis is derived has TWO true facts, and this path rendered one:
+  // the reader learned an earlier route took the ids, and never learned the
+  // figures behind that verdict were computed for a string the proxy derived.
+  //
+  // A COMMENT IN THIS FILE SAID THE FLAG "changed nothing a reader sees". That
+  // was true of the flag and false of the render, which is the same
+  // set-versus-render confusion one level up, and it is corrected here rather
+  // than left to read as reassurance.
+  //
+  // So the reduction is computed ONCE, above the branches, and every return
+  // that can carry it does. Guarding one path is not guarding its siblings.
+  const basisScopes = (suppressed.entries || []).filter(e => e.basisSynthetic);
+  const basisFacts = {
+    anySynthetic: basisScopes.length > 0,
+    syntheticGlobs: basisScopes.flatMap(e => e.match || []),
+  };
+  if (suppressed.all) return { source: 'none', reason: 'captured', ...basisFacts };
   const liveScopes = (suppressed.published || []).filter(e =>
     blockedState(blocked, { models: [e.model], globs: e.match || [] }) !== 'blocked');
   if (!liveScopes.length) {
-    return { source: 'none', reason: suppressed.published.length ? 'blocked' : 'unmeasured' };
+    return {
+      source: 'none',
+      reason: suppressed.published.length ? 'blocked' : 'unmeasured',
+      ...basisFacts,
+    };
   }
   // WHICH FIELD ANSWERS "WHO CAN SERVE THIS ROUTE", chosen by measurement
   // rather than by the field's name — and `band.admitted` alone is the WRONG
@@ -918,7 +960,21 @@ export function routeNaming(route, routeIndex, routing, blocked = []) {
   const syntheticScopes = scopeEntries.filter(e => e.basisSynthetic);
   const synthetic = syntheticScopes.length > 0 && syntheticScopes.length === scopeEntries.length;
   const syntheticGlobs = synthetic ? [] : syntheticScopes.flatMap(e => e.match || []);
-  return { source: 'scopes', admitted, partial: suppressed.any, basisGap, synthetic, syntheticGlobs };
+  // **ONE RULE, EVERY CONSUMER.** `synthetic` answers ALL and `syntheticGlobs`
+  // answers SOME, and every consumer that wanted "is any basis derived" had to
+  // reduce those two itself — so each reduced differently and the reductions
+  // disagreed. The dashboard glyph asked `basisGap || synthetic`, which is false
+  // on a mixed route, and rendered COMPLETE beside a status line naming the
+  // derived glob. THE PER-SCOPE TRUTH WAS ALWAYS IN THE PAYLOAD; what was
+  // missing was one place that states the reduction, so a consumer reads it
+  // instead of inventing one. A route may hold both kinds at once, and a
+  // consumer that collapses its scopes to a single answer must say which
+  // collapse it made.
+  const anySynthetic = syntheticScopes.length > 0;
+  return {
+    source: 'scopes', admitted, partial: suppressed.any, basisGap,
+    synthetic, syntheticGlobs, anySynthetic,
+  };
 }
 
 function scopeAccountNames(admitted, paint) {
@@ -1066,10 +1122,24 @@ function routingLines(routes, blocked, paint, routing) {
     // true sentence stands alone. In the partial case both survive because both
     // are then true of the line: some scopes measured and split, others not
     // measured, and each names which.
+    // **THE SENTENCE NARROWED WITH THE CLAIM, AND THAT IS RULING B.** It used to
+    // read "no id this route receives was measured" — a claim about the WORLD,
+    // asserting the basis is not a requestable id. Nothing here can decide that:
+    // `claude-haiku-4-5*` and `claude-haiku-4-*` both take the derived branch and
+    // agree on every signal a predicate can read, while one names a real id and
+    // the other does not. The old sentence was therefore FALSE on the first of
+    // those, and no better predicate could have fixed it, because the fault was
+    // in what the sentence claimed rather than in how it was decided.
+    //
+    // What the payload CAN vouch for is provenance: the representative was
+    // DERIVED by stripping the glob, not MATCHED to a metered family. So the line
+    // now says that and stops. NON-VERIFICATION, NOT NON-EXISTENCE — the figures
+    // below are computed for a string this proxy derived, which may or may not be
+    // an id anyone requests, and the line no longer pretends to know which.
     const syntheticBasis = state === 'blocked' ? ''
-      : naming.synthetic ? paint.dim(' (no id this route receives was measured)')
+      : naming.synthetic ? paint.dim(' (basis derived from the glob, not matched to a metered family)')
         : (naming.syntheticGlobs || []).length
-          ? paint.dim(` (no id measured for ${naming.syntheticGlobs.join(', ')})`) : '';
+          ? paint.dim(` (basis derived for ${naming.syntheticGlobs.join(', ')}, not matched to a metered family)`) : '';
     const partly = state === 'partial' ? paint.dim(' (partly blocked)') : '';
     const tag = route.autocreated ? paint.dim(' (auto)') : route.bucket ? paint.dim(` [${route.bucket}]`) : '';
     const pin = route.pinned ? paint.dim(` [pinned: ${route.pinned}]`) : '';

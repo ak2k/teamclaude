@@ -1275,7 +1275,19 @@ export class TUI {
         // strength of a change to the settings auto block — which is
         // unreachable for this state (see `_renderRoutes`) — while the column
         // that IS reachable went unexamined.
-        return (n.basisGap || n.synthetic)
+        // **`anySynthetic`, NOT `synthetic`, AND THAT IS THE SIXTH-FORM FIX.**
+        // `synthetic` answers ALL — every scope derived — so on a route with one
+        // matched scope and one derived scope it is FALSE, `basisGap` is null
+        // (it carries family splits, a different signal), and this column marked
+        // the account COMPLETE while the status line on the same payload named
+        // the derived glob. The commit that taught the status line the SOME case
+        // left this consumer on the ALL test.
+        //
+        // The reduction now lives once, in `routeNaming`, and this reads it. A
+        // consumer that collapses per-scope truth to one glyph must use the
+        // collapse the payload states rather than compose its own from whichever
+        // fields it happens to know about.
+        return (n.basisGap || n.anySynthetic)
           ? routeGlyphPartial(routeColorFn(r.color), r.pinned === a.name)
           : routeGlyph(routeColorFn(r.color), true, r.pinned === a.name);
       }
