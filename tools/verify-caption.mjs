@@ -413,12 +413,24 @@ if (!captured) {
 // THE REPAIR IS TO THE CHECK, NOT TO THE SENTENCE. Correcting the comment to
 // describe a two-field comparison would have left the gate as weak as it was and
 // merely honest about it; the sentence is a good specification, so the code now
-// meets it. **THE FIELD SET IS DERIVED FROM THE CAPTURED ARTIFACT**: the loop
-// walks `Object.keys(cap)`, so a field the capture grows and nobody teaches this
-// gate about reaches the UNKNOWN refusal below instead of passing unexamined.
-// Measured on the committed sample, eight of the band's nine fields reconstruct
-// and agree EXACTLY, ladder included — pressure, headroom, cumulative, rank,
-// bucket and admission reason per account.
+// meets it. Measured on the committed sample, eight of the band's nine fields
+// reconstruct and agree EXACTLY, ladder included — pressure, headroom,
+// cumulative, rank, bucket and admission reason per account.
+//
+// **AND THE FIRST REPAIR SAID "THE FIELD SET IS DERIVED FROM THE CAPTURED
+// ARTIFACT: the loop walks `Object.keys(cap)`", WHICH WAS TRUE AND WAS NOT
+// ENOUGH.** Deriving from the artifact closed ADDED and ALTERED fields and
+// opened DROPPED ones — a key the capture stops sending is not in its own key
+// list, so nothing iterates it. The loop now walks the UNION of the capture's
+// keys and the gate's required set; the reasoning is at `REQUIRED_FIELDS` below.
+//
+// THAT CORRECTION IS HERE BECAUSE THE SENTENCE ABOVE IT SURVIVED THE EDIT THAT
+// FALSIFIED IT. The paragraph promising that a missing field refuses loudly went
+// on saying so through a commit that made it false, in the same file whose
+// lesson is that a comment telling the next reader the open case is handled is
+// the dangerous half. **A FIX MUST RE-READ EVERY PROPERTY CLAIM IT TOUCHES, NOT
+// ONLY THE ONE IT SET OUT TO REPAIR** — the census pair cannot reach these,
+// since a remedy sentence quotes no withdrawn wording and lives in prose.
 //
 // EXCLUSIONS ARE STATED, NARROW, AND EACH NAMES WHY. An exclusion list is where
 // this repair could quietly become the old two-field check again, so there is
@@ -465,16 +477,34 @@ const COMPARE = {
   },
   // THE ONE EXCLUSION, AND IT IS PARTIAL. The producer builds `excluded` from
   // `_availability`, whose verdict carries the reason, bucket and detail for
-  // each account it turns away. This gate's candidate set comes from
-  // `_isAvailable`, which answers the SET question and not the WHY one, and
-  // reconstructing the verdicts needs the route-scoped `_observeOpts` the
-  // rebuild deliberately does not construct.
+  // each account it turns away.
+  //
+  // **THE REASON GIVEN HERE WAS WRONG AND IS CORRECTED.** It said reconstructing
+  // the verdicts "needs the route-scoped `_observeOpts` the rebuild deliberately
+  // does not construct" — false: `_availability(account, model, advisorModel,
+  // { observe = false, now = Date.now(), route = null } = {})` defaults every
+  // option, so this gate can call it today, and on the committed sample it
+  // returns null for all four accounts, agreeing with `excluded: []`. That
+  // sentence was written from reading a CALL SITE without checking what the
+  // CALLEE required, which is one grep of distance.
+  //
+  // THE REAL REASON IS STRONGER. The producer calls through
+  // `_observeOpts(observed, scopeRoute)` — `observe: true`, the observed fleet,
+  // the observation's `now`, and the SCOPE'S ROUTE — and the function reads
+  // `observe` and `route`. So the gate's unscoped call and the producer's scoped
+  // one are TWO DIFFERENT COMPUTATIONS. A disagreement between them would show
+  // that this gate asked a different question, not that the capture is
+  // unfaithful, and for a DEFAULT-REFUSE gate that is the expensive direction:
+  // it manufactures refusals on faithful captures, and a gate that refuses good
+  // input gets switched off. One sample where the two coincide is not a general
+  // fact about them and does not license widening.
   //
   // So the ACCOUNT SET is still compared and only the per-verdict prose is
   // dropped. That keeps the divergence worth catching — a capture excluding
-  // three accounts against a rebuild excluding none — while not pretending to
-  // check reasons this gate cannot compute. WIDENING THIS TO THE WHOLE FIELD
-  // WOULD BE THE OLD DEFECT: an exclusion broad enough to hide a set mismatch.
+  // three accounts against a rebuild excluding none — while not grading a
+  // reason this gate could only answer by asking a narrower question than the
+  // producer asked. WIDENING THIS TO THE WHOLE FIELD WOULD BE THE OLD DEFECT:
+  // an exclusion broad enough to hide a set mismatch.
   excluded: {
     rebuilt: am.accounts.filter(a => !candidates.includes(a)).map(a => a.name),
     project: v => (Array.isArray(v) ? v.map(x => (x && typeof x === 'object' ? x.account : x)) : v),
@@ -538,13 +568,46 @@ const unknown = [];
 const unran = [];
 const mism = [];
 const comparedFields = [];
-// **DERIVED FROM THE ARTIFACT.** Walking the CAPTURE's keys rather than a list
-// held here is what makes the refusal above true: the gate cannot ignore a field
-// it was never taught, because the field itself puts the entry in this loop.
-for (const field of Object.keys(cap)) {
+
+// **THE COMPARED SET IS THE UNION OF BOTH SIDES' KNOWLEDGE, AND THE FIRST
+// VERSION OF THIS REPAIR WAS THE ARTIFACT'S KEYS ALONE.**
+//
+// Deriving the field set from the capture closed the case where a capture ADDS
+// or ALTERS a field, and opened the one where it DROPS one: a field the capture
+// does not carry is never in `Object.keys(cap)`, so nothing iterates it and its
+// absence is never reported. **A GUARD DERIVED FROM THE ARTIFACT CANNOT SEE
+// WHAT THE ARTIFACT OMITS.** Reproduced against the previous tree rather than
+// argued: a sample with `band.candidates` deleted REFUSES at `da05c45` with
+// "could not RUN … captured value is absent" and GRADED at `2e1ff12`, exit 0,
+// while the same field PRESENT-but-wrong still refused at both — so the
+// comparison ran and the hole was specifically absence.
+//
+// THAT IS THE SAME CLASS AS THE DEFECT THE REPAIR FIXED, with the compared set
+// moved rather than the class removed, and it is the reason this is a union
+// instead of either side alone. The capture's keys catch what the gate has not
+// been taught; the gate's own required set catches what the capture has stopped
+// sending. Neither list can see the other's blind spot, so both are walked.
+//
+// EVERY KEY OF `COMPARE` IS REQUIRED, deliberately: the wire band emits all nine
+// fields on every path (`account-manager.js:2043`), with nulls where a variant
+// does not compute a value, so a MISSING key is a thinner capture format rather
+// than a legitimate shape. That is precisely the state the paragraph above
+// promises will fail loudly.
+const REQUIRED_FIELDS = Object.keys(COMPARE);
+const unionFields = [...new Set([...Object.keys(cap), ...REQUIRED_FIELDS])];
+
+for (const field of unionFields) {
   const spec = COMPARE[field];
   if (!spec) {
     unknown.push(field);
+    continue;
+  }
+  // ABSENT-REQUIRED. Reached only through the union arm — the capture's own key
+  // list can never produce it — and routed to the same "could not RUN" refusal
+  // as a type fault, because they are one fact: this field was not compared.
+  if (!Object.prototype.hasOwnProperty.call(cap, field)) {
+    unran.push(`${field} (captured value is absent,`
+      + ` the rebuild produces ${kindOf((spec.project || (v => v))(spec.rebuilt))})`);
     continue;
   }
   const project = spec.project || (v => v);
@@ -577,8 +640,15 @@ if (unknown.length) {
     + ' rather than grading around — add its rebuilt counterpart to COMPARE, or state it'
     + ' as an exclusion with a reason.');
 }
-console.log(`fidelity   deep-compared ${comparedFields.length} of ${Object.keys(cap).length}`
-  + ` captured band fields: ${comparedFields.join(', ')}`);
+// **THE DENOMINATOR IS THE UNION, NOT THE CAPTURE'S KEY COUNT.** With a field
+// dropped this line read "deep-compared 8 of 8 captured band fields" — full
+// coverage of a set that had silently shrunk, which is the instrument telling
+// the reader the very thing that was untrue. Against the union it reads 8 of 9
+// and names what is missing, so a narrowed capture is visible in the output even
+// on the path where some other refusal speaks first.
+console.log(`fidelity   deep-compared ${comparedFields.length} of ${unionFields.length}`
+  + ` required-or-captured band fields: ${comparedFields.join(', ')}`
+  + (unran.length ? `; NOT COMPARED: ${unran.map(u => u.split(' (')[0]).join(', ')}` : ''));
 // **MISMATCHES ARE REPORTED BEFORE TYPE FAULTS, AND THE ORDER IS THE DIAGNOSIS.**
 // Both refuse, so nothing is graded either way and the choice is only which story
 // the reader gets. When the rebuilt band is a different VARIANT from the captured

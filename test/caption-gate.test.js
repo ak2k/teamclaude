@@ -492,7 +492,7 @@ test('the fidelity comparison is derived from the capture and covers the whole b
   // ever narrows, the arms below start passing vacuously and this says so first.
   const ok = run(SAMPLE);
   assert.equal(ok.code, 0, ok.out);
-  assert.match(ok.out, /fidelity {3}deep-compared 9 of 9 captured band fields/,
+  assert.match(ok.out, /fidelity {3}deep-compared 9 of 9 required-or-captured band fields/,
     'the comparison narrowed; the arms below no longer test what they claim');
 
   // A FIELD THE GATE WAS NEVER TAUGHT — the sentence the old comment promised
@@ -500,6 +500,31 @@ test('the fidelity comparison is derived from the capture and covers the whole b
   const grown = run(write('grown', b => { b.spilloverPolicy = 'drain-oldest'; }));
   assert.notEqual(grown.code, 0, 'a band field this gate cannot check was graded around');
   assert.match(grown.out, /carries field\(s\) this gate cannot check: spilloverPolicy/);
+
+  // **A FIELD THE CAPTURE DROPS, WHICH IS THE OTHER HALF AND WAS A REGRESSION.**
+  // Deriving the compared set from the artifact alone made this unreachable: a
+  // key the capture does not carry is not in `Object.keys(cap)`, so nothing
+  // iterated it and its absence went unreported. Measured before the repair —
+  // `da05c45` REFUSED on a deleted `candidates`, `2e1ff12` GRADED it, exit 0 —
+  // while the same field present-but-wrong refused at both, so the comparison
+  // ran and the hole was specifically ABSENCE. A GUARD DERIVED FROM THE ARTIFACT
+  // CANNOT SEE WHAT THE ARTIFACT OMITS. Both required fields are driven because
+  // one is a number and one a string, and the absence branch reports the kind
+  // the rebuild produces.
+  for (const dropped of ['candidates', 'kind']) {
+    const thin = run(write(`drop-${dropped}`, b => { delete b[dropped]; }));
+    assert.notEqual(thin.code, 0,
+      `a capture with no '${dropped}' was graded — the thinner format is silent again`);
+    assert.match(thin.out, new RegExp(`could not RUN[^]*${dropped} \\(captured value is absent`),
+      `the refusal does not name '${dropped}' as the field that went uncompared`);
+    // AND THE SUMMARY LINE MUST SAY SO TOO. With the compared set taken from the
+    // capture's own keys this read "8 of 8" — full coverage of a set that had
+    // silently shrunk, the instrument asserting the one thing that was untrue.
+    assert.match(thin.out, /deep-compared 8 of 9 required-or-captured band fields/,
+      'the fidelity line reports full coverage of a narrowed set');
+    assert.match(thin.out, new RegExp(`NOT COMPARED: ${dropped}`),
+      'the fidelity line does not name the field it failed to compare');
+  }
 
   // DEEP, NOT SHALLOW. One number several levels inside the ladder, with every
   // scalar the old check read still agreeing exactly.
