@@ -1818,9 +1818,18 @@ export class AccountManager {
       // THE INVARIANT, and the mark is derived from it rather than from any
       // property that happens to correlate with it:
       //
-      //   THE MARK MEANS "THIS BASIS IS NOT AN ID THIS ROUTE CAN RECEIVE".
-      //   Nothing that IS such an id may carry it; nothing that is not may
-      //   lack it.
+      //   THE MARK MEANS "THIS BASIS WAS DERIVED FROM THE GLOB RATHER THAN
+      //   MATCHED TO A METERED FAMILY". Nothing produced by a family match may
+      //   carry it; nothing produced by the fallback strip may lack it.
+      //
+      // **THE PREVIOUS INVARIANT IS WITHDRAWN AND IT READ "THIS BASIS IS NOT AN
+      // ID THIS ROUTE CAN RECEIVE".** It was a claim about the WORLD and no
+      // predicate here can decide it: `claude-haiku-4-5*` yields a real id and
+      // `claude-haiku-4-*` a fabricated one while agreeing on every signal this
+      // code can read. AN INVARIANT MUST BE DECIDABLE BY ITS ENFORCER — this one
+      // is a property of the producer's own control flow, which it always knows.
+      // Withdrawn form kept in this comment as the redirect, since it circulates
+      // in earlier commits and in the register; see TC-045.
       //
       // So the question is whether the representative was FABRICATED, and
       // `modelsForGlob`'s fallback fabricates only when the wildcard strip

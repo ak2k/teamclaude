@@ -1561,6 +1561,14 @@ test('an admitted account is not erased by a different account sharing its name'
 // route receives means grading it on those ids, which is the sample root and
 // round 4a item 1; having the renderer guess is the display-derives-eligibility
 // class this round has found seven times.
+// **THE NAME BELOW DESCRIBES THIS FIXTURE, NOT WHAT THE MARK DECIDES**, and the
+// distinction is Ruling B's. `claude-*-4` really does strip to `claude--4`, so
+// "an id nothing can request" is true of the id THIS TEST CHOSE. It is not true
+// of the mark: `basisSynthetic` claims PROVENANCE and cannot decide
+// requestability, since `claude-haiku-4-5*` takes the same derived branch and
+// names a real id. The name is kept because the freeze document and the pass-19
+// rebind cite it at `8e13f32`, and renaming it would break a sha-anchored
+// citation to buy a clarity this comment supplies for free.
 test('a scope graded on an id nothing can request does not present it as measured', () => {
   const now = Date.now();
   const H = 3600e3;
@@ -1777,44 +1785,114 @@ test('the Decision block discloses a placeholder basis on the same screen', () =
 // was measured)" asserting nothing was measured — same line, same instant. No
 // per-form correctness check catches that, because the COMPOSITION is what is
 // false.
+//
+// **THE COLLIDING PAIR NO LONGER EXISTS AND THIS TEST MOVED WITH IT.** Ruling B
+// withdrew the non-existence sentence as undecidable and replaced it with a
+// PROVENANCE claim — derived from the glob, not matched to a metered family —
+// which asserts non-verification and says nothing about whether the figures are
+// real. Split-plus-derived therefore no longer contradicts, and the suppression
+// that had enforced the old rule was left denying TRUE splits on bases that are
+// derived and real. THE INVARIANT IS UNCHANGED; WHICH PAIR VIOLATES IT MOVED.
+//
+// So this pins both directions, and it needs both: the composition that is now
+// LEGAL must render in full, and the sentence whose return would re-create the
+// collision must be absent from the line entirely.
 test('two disclosure sentences that cannot both be true never share a line', () => {
   const REAL_BUT_PARTIAL = /split by .*other ids may go elsewhere/;
-  const NOTHING_MEASURED = /basis derived from the glob, not matched to a metered family/;
+  // RENAMED FROM `NOTHING_MEASURED`, which is what this regex meant before B and
+  // not after. A binding whose name asserts a withdrawn claim is the same rot as
+  // a comment that does; it just survives greps for the old wording.
+  const DERIVED_PROVENANCE = /basis derived from the glob, not matched to a metered family/;
+  // THE NEGATIVE PIN ON THE WITHDRAWN WORDING, and it is not decoration: a
+  // positive pin on the new phrase alone passes on a build rendering BOTH, which
+  // is a state this file has shipped before.
+  const NON_EXISTENCE = /no id this route receives was measured|no id measured for/;
 
-  // Wholly fabricated basis, with model claims that WOULD otherwise raise the
-  // split marker. The split sentence has nothing real to be partial about.
+  // A wholly derived basis WITH model claims that raise the split marker.
   // THE CLAIM MUST BE AN ID THIS GLOB REACHES, or the split marker never fires
-  // and the assertion below asserts the absence of something that was never
-  // going to be there. A first version claimed `claude-fable-5`, which
-  // `claude-*-4` does not reach — the test passed VACUOUSLY and its
-  // neutralisation row SURVIVED, which is how the vacuity was found.
-  // `claude-fable-4` IS reached by `claude-*-4`, so `familySplit` fires and
-  // there is a real split marker for the composition rule to suppress.
+  // and the assertions below are about something that was never going to be
+  // there. A first version claimed `claude-fable-5`, which `claude-*-4` does not
+  // reach — the test passed VACUOUSLY and its neutralisation row SURVIVED, which
+  // is how the vacuity was found. `claude-fable-4` IS reached by `claude-*-4`.
   const all = p20Fleet(['claude-*-4']);
   all.am.accounts[0].models = ['claude-fable-4'];
   const allLine = renderStatus(all.am.getStatus(), { color: false, now: all.now })
     .split('\n').find(l => l.includes('claude-*-4') && l.includes('→'));
-  assert.match(allLine, NOTHING_MEASURED);
-  // THE PREMISE, asserted so the check below cannot pass on a line that never
-  // had a split marker: the entry really does report a family split, so the
-  // split sentence is what suppression is removing rather than something that
-  // was absent anyway.
+  // THE PREMISE, asserted rather than assumed: with no real family split there
+  // is no composition here to check and a green below would mean nothing.
   const allEntry = all.am.getStatus().routing.find(e => e.scope === 'route' && e.route === 'r');
   assert.ok(allEntry.familySplit,
-    'the fixture no longer produces a family split, so suppressing it proves nothing');
-  assert.doesNotMatch(allLine, REAL_BUT_PARTIAL,
-    'a line whose every scope is a placeholder also claims its figures are real but partial');
+    'the fixture no longer produces a family split, so this proves nothing either way');
+  assert.match(allLine, DERIVED_PROVENANCE);
+  assert.match(allLine, REAL_BUT_PARTIAL,
+    'the split disclosure is suppressed beside a derived basis — the withdrawn rule is back');
+  assert.doesNotMatch(allLine, NON_EXISTENCE,
+    'the withdrawn non-existence sentence returned, and it collides with the split marker');
 
-  // THE CONTROL, and it is what stops this passing by deleting a true
-  // disclosure: a REAL basis that IS genuinely split must keep the split
-  // sentence.
+  // THE CONTROL, and it is what stops this passing on a build that marks every
+  // line: a MATCHED basis that is genuinely split keeps the split sentence and
+  // must never acquire the provenance one.
   const real = p20Fleet(['*fable*']);
   real.am.accounts[0].models = ['claude-fable-5'];
   const realLine = renderStatus(real.am.getStatus(), { color: false, now: real.now })
     .split('\n').find(l => l.includes('*fable*') && l.includes('→'));
   assert.match(realLine, REAL_BUT_PARTIAL,
-    'the split disclosure was suppressed on a genuinely split REAL basis');
-  assert.doesNotMatch(realLine, NOTHING_MEASURED);
+    'the split disclosure was suppressed on a genuinely split MATCHED basis');
+  assert.doesNotMatch(realLine, DERIVED_PROVENANCE);
+});
+
+// **THE SEMANTIC HALF OF THE WITHDRAWAL CENSUS, AS A TEST.** `:1090` carried
+// `&& !naming.synthetic` and nothing about that line was ever stale TEXT — it
+// read the same before Ruling B and after, mentions no withdrawn phrase, and no
+// census over the old wording could have found it. What went stale was the
+// MEANING of the word underneath: while `synthetic` claimed the basis was not a
+// requestable id, suppressing "split by …" beside it was right, because a
+// placeholder has nothing real to be partial about. B narrowed the mark to
+// provenance, under which A DERIVED BASIS CAN BE A REAL ID THAT GENUINELY SPLITS.
+//
+// THE CONTROL PAIR IS THE FIXTURE, and the two arms differ in provenance ALONE:
+// both are genuinely split by the same mechanism, and `claude-haiku-4-5` is an id
+// a client can request. Note that no predicate could have separated the arms
+// from the fabricated case — `claude-haiku-4-5*` and `claude-haiku-4-*` agree on
+// every signal readable at this line — so the choice was all-derived-suppressed
+// or all-derived-rendered, and suppression is the direction that DENIES a
+// division that exists.
+test('a derived basis that genuinely splits keeps its split disclosure', () => {
+  const SPLIT = /split by model claims; other ids may go elsewhere/;
+
+  // DERIVED arm. `claude-haiku-4-5*` strips to `claude-haiku-4-5`: no metered
+  // family answers haiku, so the representative comes from the strip and is
+  // marked — and it is nonetheless a real id.
+  const derived = p20Fleet(['claude-haiku-4-5*']);
+  derived.am.accounts[0].models = ['claude-haiku-4-5-20251001'];
+  const dStatus = derived.am.getStatus();
+  const dEntry = dStatus.routing.find(e => e.scope === 'route' && e.route === 'r');
+  // BOTH PREMISES ASSERTED. Without the mark this arm is not about a derived
+  // basis at all; without the split there is no disclosure to suppress, and the
+  // test would pass on a fixture that never exercised the condition.
+  assert.equal(dEntry.basisSynthetic, 'unmetered-glob',
+    'the fixture stopped producing a derived basis; this arm no longer tests the narrowing');
+  assert.equal(dEntry.familySplit, 'model claims',
+    'the fixture stopped producing a family split, so nothing here is being disclosed');
+  const dLine = renderStatus(dStatus, { color: false, now: derived.now })
+    .split('\n').find(l => l.includes('claude-haiku-4-5*') && l.includes('→'));
+  assert.match(dLine, SPLIT,
+    'a genuine split is suppressed because the basis was derived — the pre-B meaning is back');
+
+  // MATCHED arm, the other half of the control pair. Same mechanism, same
+  // sentence, provenance the only difference — so a build that renders the split
+  // for neither arm cannot pass by looking consistent.
+  const matched = p20Fleet(['*fable*']);
+  matched.am.accounts[0].models = ['claude-fable-5'];
+  const mStatus = matched.am.getStatus();
+  const mEntry = mStatus.routing.find(e => e.scope === 'route' && e.route === 'r');
+  assert.equal(mEntry.basisSynthetic, null,
+    'the matched arm acquired a derived mark, so the arms no longer differ in provenance alone');
+  assert.equal(mEntry.familySplit, 'model claims',
+    'the arms are no longer split by the same mechanism');
+  const mLine = renderStatus(mStatus, { color: false, now: matched.now })
+    .split('\n').find(l => l.includes('*fable*') && l.includes('→'));
+  assert.match(mLine, SPLIT, 'the matched arm lost the disclosure it always had');
 });
 
 // ============================================================================
@@ -1931,6 +2009,106 @@ test('S4 a derived SIBLING scope says so in the Other-scopes map', () => {
   if (cleanSiblings) {
     assert.doesNotMatch(cleanSiblings, /basis derived from the glob/,
       'a matched sibling scope is labelled derived');
+  }
+});
+
+// **S4 AGAIN, BECAUSE THE FIX ABOVE TAUGHT ONE OF THE MAP'S THREE RETURNS.**
+// The `derived` binding sat BELOW both early returns, so a derived scope
+// disclosed only when it was neither blocked nor captured. Measured, `blocked`
+// and `no figures, an earlier route takes its id` each dropped it — the same
+// defect one branch over, and the second time GUARDING ONE PATH IS NOT GUARDING
+// ITS SIBLINGS has been earned inside this one branch set.
+//
+// ONE TEST OVER ALL THREE RETURNS, NOT THREE TESTS. The rule is that every cell
+// computes its verdict from `e.model` and so every cell says when that model was
+// derived; a per-return test would pass while the next return added goes
+// unguarded, which is exactly the arithmetic that produced this finding.
+test('every return of the sibling map discloses a derived basis', () => {
+  const H = 3600e3;
+  const build = ({ routes, blockedModels = [], acctModels = null }) => {
+    const now = Date.now();
+    const am = new AccountManager([
+      { name: 'zulu9acct', type: 'apikey', apiKey: 'k1', ...(acctModels ? { models: acctModels } : {}) },
+      { name: 'yankee7acct', type: 'apikey', apiKey: 'k2' },
+    ], 0.98, { routes, expiryRouting: { enabled: true, coverage: 1, tolerance: 1.5, preempt: true } });
+    am.accounts.forEach((x, i) => {
+      x.quota = { ...x.quota, unified5h: 0.05 + i * 0.05, unified5hReset: now + 2 * H,
+        unified7d: 0.2 + i * 0.2, unified7dReset: now + 40 * H,
+        unified7dFable: 0.2 + i * 0.2, unified7dFableReset: now + 40 * H };
+    });
+    const status = am.getStatus();
+    if (blockedModels.length) status.blockedModels = blockedModels;
+    const others = renderStatus(status, { color: false, now }).split('\n')
+      .find(l => /Other scopes/.test(l));
+    return { status, others };
+  };
+  // **THE ASSERTIONS ARE ANCHORED TO EACH CELL'S OWN VERDICT, AND THE FIRST
+  // VERSION WAS NOT.** `Other scopes` is one line holding every sibling, so a
+  // bare /basis derived from the glob/ matches ANY cell on it. The captured
+  // fixture needs a second route whose own entry is also derived, and that
+  // route's cell satisfied the match on its own — the captured arm passed with
+  // the captured fix reverted. Red-verification caught it; a green would have
+  // certified a return nothing tested. Each pattern below therefore requires the
+  // disclosure IMMEDIATELY AFTER the verdict that identifies the cell.
+  const DERIVED = /basis derived from the glob/;
+  const BLOCKED_DERIVED = /blocked, basis derived from the glob/;
+  const CAPTURED_DERIVED = /no figures, an earlier route takes its id, basis derived from the glob/;
+
+  // R1 BLOCKED. A blocklist pattern covering one glob of a two-glob route leaves
+  // that scope blocked while its sibling still renders the block.
+  const blocked = build({
+    routes: [{ name: 'wide', match: ['*fable*', 'claude-*-4'] }],
+    blockedModels: ['claude-*-4'],
+  });
+  const bEntry = blocked.status.routing.find(e => e.model === 'claude--4');
+  assert.equal(bEntry.basisSynthetic, 'unmetered-glob',
+    'the blocked arm stopped carrying a derived basis and no longer tests anything');
+  assert.ok(blocked.others, 'no Other-scopes line rendered for the blocked arm');
+  assert.match(blocked.others, /blocked/, 'the premise: this sibling really is blocked');
+  assert.match(blocked.others, BLOCKED_DERIVED,
+    'a blocked sibling standing on a derived representative does not say so');
+
+  // R2 CAPTURED. THE FIXTURE IS FIDDLY AND ITS CONDITIONS ARE ASSERTED:
+  // `_captureDistortsFigures` needs the representative captured by an earlier
+  // route, NO accounts list on the route behind it, and a `models` claim
+  // restricting the representative. The route behind carries TWO globs on
+  // purpose — with one, every scope is captured, `routeNaming` takes its
+  // all-captured early return and the cell never reaches this map at all.
+  const captured = build({
+    routes: [
+      { name: 'exact', match: ['claude-haiku-4-5'] },
+      { name: 'behind', match: ['*opus*', 'claude-haiku-4-5*'] },
+    ],
+    acctModels: ['claude-haiku-4-5'],
+  });
+  const cEntry = captured.status.routing.find(e => e.route === 'behind' && e.model === 'claude-haiku-4-5');
+  assert.equal(cEntry.figuresAbsent, 'representative-captured',
+    'the captured arm is not captured, so this never reaches the return under test');
+  assert.equal(cEntry.basisSynthetic, 'unmetered-glob',
+    'the captured arm carries no derived basis, so there is no second fact to lose');
+  assert.ok(captured.others, 'no Other-scopes line rendered for the captured arm');
+  assert.match(captured.others, /no figures, an earlier route takes its id/,
+    'the premise: the captured cell really did take the captured return');
+  assert.match(captured.others, CAPTURED_DERIVED,
+    'a captured sibling is told an earlier route takes an id nobody configured, and not that');
+
+  // THE EXCLUSION, PINNED RATHER THAN ARGUED. The captured return deliberately
+  // omits the split qualifier because `figuresAbsent === 'representative-captured'`
+  // implies `_representativeCaptured`, the first arm of `_familySplit` — so
+  // `familySplit` there is 'an earlier route' or null and can be nothing else,
+  // and rendering it would restate the verdict in a second vocabulary. THIS IS
+  // THE FALSIFIER the comment names: the day a captured cell reports some other
+  // split reason, the exclusion is wrong and this fails.
+  assert.ok(cEntry.familySplit === 'an earlier route' || cEntry.familySplit === null,
+    `a captured cell reported familySplit '${cEntry.familySplit}', so omitting the split
+     qualifier on that return now hides a fact the verdict does not already state`);
+
+  // R3 GENERAL, and it is the CONTROL that stops the two arms above passing on a
+  // build that simply marks every cell: a MATCHED sibling must stay unqualified.
+  const general = build({ routes: [{ name: 'wide', match: ['*opus*', '*fable*'] }] });
+  if (general.others) {
+    assert.doesNotMatch(general.others, DERIVED,
+      'a sibling whose representative was MATCHED is labelled derived');
   }
 });
 

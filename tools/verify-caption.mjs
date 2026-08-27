@@ -400,12 +400,32 @@ if (!captured) {
 // THE COST IS DELIBERATE AND IS THE POINT: a capture missing a field this gate
 // requires now REFUSES instead of grading, so a thinner capture format becomes
 // a loud failure rather than a silent narrowing of what was checked.
-const REQUIRED = [
-  { field: 'candidates', type: 'number', rebuilt: candidates.length,
-    render: (r, c) => `candidates ${r} rebuilt vs ${c} captured` },
-  { field: 'kind', type: 'string', rebuilt: decision.kind,
-    render: (r, c) => `decision '${r}' rebuilt vs '${c}' captured` },
-];
+//
+// ── AND THE PARAGRAPH ABOVE USED TO OVERSTATE WHAT RAN ────────────────────────
+//
+// "a field nobody added a check for — reaches a refusal" was FALSE while the
+// comparison walked a hardcoded list of two, `candidates` and `kind`, against a
+// captured band carrying nine. A field nobody added a check for was not refused;
+// it was IGNORED, silently, which is the exact shape the sentence promised to
+// close. THE COMMENT WAS THE DANGEROUS PART: it told the next reader the open
+// case was handled, so nobody looked.
+//
+// THE REPAIR IS TO THE CHECK, NOT TO THE SENTENCE. Correcting the comment to
+// describe a two-field comparison would have left the gate as weak as it was and
+// merely honest about it; the sentence is a good specification, so the code now
+// meets it. **THE FIELD SET IS DERIVED FROM THE CAPTURED ARTIFACT**: the loop
+// walks `Object.keys(cap)`, so a field the capture grows and nobody teaches this
+// gate about reaches the UNKNOWN refusal below instead of passing unexamined.
+// Measured on the committed sample, eight of the band's nine fields reconstruct
+// and agree EXACTLY, ladder included — pressure, headroom, cumulative, rank,
+// bucket and admission reason per account.
+//
+// EXCLUSIONS ARE STATED, NARROW, AND EACH NAMES WHY. An exclusion list is where
+// this repair could quietly become the old two-field check again, so there is
+// exactly one, it is partial rather than whole-field, and it is printed in the
+// gate's own output beside what was compared.
+const nameOf = i => (am.accounts[i] ? am.accounts[i].name : `#${i}`);
+const explainedForFidelity = explainBand(snapshot);
 
 const cap = (captured && captured.band) || null;
 if (!cap || typeof cap !== 'object') {
@@ -415,14 +435,164 @@ if (!cap || typeof cap !== 'object') {
     + ' carries its band.');
 }
 
+// One entry per field the WIRE band carries (`account-manager.js:2043`), each
+// rebuilt from the product's own functions rather than from a paraphrase.
+const COMPARE = {
+  kind: { rebuilt: decision.kind },
+  reason: { rebuilt: decision.reason ?? null },
+  target: { rebuilt: decision.kind === 'sized' ? decision.target : null },
+  achieved: { rebuilt: decision.kind === 'sized' ? decision.achieved : null },
+  floor: { rebuilt: decision.kind === 'banded' ? decision.floor : null },
+  candidates: { rebuilt: candidates.length },
+  // THROUGH `_applyBand`, WHICH IS THE PRODUCT'S ONE WAY A DECISION BECOMES A
+  // LIST — and reimplementing it here as `decision.keep.map(nameOf)` was wrong
+  // within the hour: `keep` does not exist on a passthrough decision, where the
+  // band admits every candidate, so the rebuild reported nobody admitted against
+  // a capture naming one. That method's own comment says two implementations
+  // which currently agree look exactly like one; this is the gate proving it.
+  admitted: { rebuilt: am._applyBand(decision, candidates).map(a => a.name) },
+  ladder: {
+    rebuilt: explainedForFidelity.ladder.map(row => ({
+      rank: row.rank,
+      account: nameOf(row.account.index),
+      bucket: am._governingBucket(am.accounts[row.account.index], MODEL),
+      pressure: row.pressure,
+      headroom: row.headroom,
+      cumulative: row.cumulative,
+      admitted: row.admitted,
+      reason: row.reason,
+    })),
+  },
+  // THE ONE EXCLUSION, AND IT IS PARTIAL. The producer builds `excluded` from
+  // `_availability`, whose verdict carries the reason, bucket and detail for
+  // each account it turns away. This gate's candidate set comes from
+  // `_isAvailable`, which answers the SET question and not the WHY one, and
+  // reconstructing the verdicts needs the route-scoped `_observeOpts` the
+  // rebuild deliberately does not construct.
+  //
+  // So the ACCOUNT SET is still compared and only the per-verdict prose is
+  // dropped. That keeps the divergence worth catching — a capture excluding
+  // three accounts against a rebuild excluding none — while not pretending to
+  // check reasons this gate cannot compute. WIDENING THIS TO THE WHOLE FIELD
+  // WOULD BE THE OLD DEFECT: an exclusion broad enough to hide a set mismatch.
+  excluded: {
+    rebuilt: am.accounts.filter(a => !candidates.includes(a)).map(a => a.name),
+    project: v => (Array.isArray(v) ? v.map(x => (x && typeof x === 'object' ? x.account : x)) : v),
+    narrowed: 'account names only — per-verdict reason/bucket/detail need route-scoped '
+      + '_observeOpts this rebuild does not construct',
+  },
+};
+
+/**
+ * Structural equality, ORDER-SENSITIVE FOR ARRAYS. That is not a detail: the
+ * ladder's whole content is a sequence, and an order-insensitive compare here
+ * would accept a transposed band — the very defect the caption controls exist to
+ * catch, admitted through the fidelity check instead. Objects compare by key SET
+ * as well as by value, so a captured row growing a field the rebuild does not
+ * produce is a difference rather than a silent pass.
+ */
+function deepDiff(a, b, path = '') {
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b)) return `${path || 'value'}: array vs non-array`;
+    if (a.length !== b.length) return `${path || 'value'}: length ${a.length} rebuilt vs ${b.length} captured`;
+    for (let i = 0; i < a.length; i += 1) {
+      const d = deepDiff(a[i], b[i], `${path}[${i}]`);
+      if (d) return d;
+    }
+    return null;
+  }
+  if (a && b && typeof a === 'object' && typeof b === 'object') {
+    const ka = Object.keys(a).sort();
+    const kb = Object.keys(b).sort();
+    const only = [...ka.filter(k => !kb.includes(k)).map(k => `${k} (rebuilt only)`),
+      ...kb.filter(k => !ka.includes(k)).map(k => `${k} (captured only)`)];
+    if (only.length) return `${path || 'value'}: field set differs — ${only.join(', ')}`;
+    for (const k of ka) {
+      const d = deepDiff(a[k], b[k], path ? `${path}.${k}` : k);
+      if (d) return d;
+    }
+    return null;
+  }
+  // NO COLON ON A SCALAR DIFFERENCE, and that is a compatibility choice rather
+  // than a style one: `candidates 4 rebuilt vs 1 captured` is the phrasing the
+  // hand-written renderers emitted and the phrasing this gate's own tests and
+  // logs quote. The deep compare changed what is compared, deliberately, and
+  // changing how a scalar difference READS at the same time would have been an
+  // incidental break of an output contract nobody asked to move.
+  if (typeof a === 'number' && typeof b === 'number') {
+    if (a === b || (Number.isNaN(a) && Number.isNaN(b))) return null;
+    return `${path || 'value'} ${a} rebuilt vs ${b} captured`;
+  }
+  if (a === b) return null;
+  return `${path || 'value'} ${JSON.stringify(a)} rebuilt vs ${JSON.stringify(b)} captured`;
+}
+
+/**
+ * The kind of thing a value is, for the format-versus-divergence split below.
+ * `null` and arrays are their own kinds because `typeof` calls both 'object',
+ * which is how a wrong-shaped field reads as the right one.
+ */
+const kindOf = v => (v === null ? 'null' : Array.isArray(v) ? 'array' : typeof v);
+
+const unknown = [];
 const unran = [];
 const mism = [];
-for (const { field, type, rebuilt, render } of REQUIRED) {
-  if (typeof cap[field] !== type) {
-    unran.push(`${field} (captured value is ${cap[field] === undefined ? 'absent' : typeof cap[field]}, needs ${type})`);
+const comparedFields = [];
+// **DERIVED FROM THE ARTIFACT.** Walking the CAPTURE's keys rather than a list
+// held here is what makes the refusal above true: the gate cannot ignore a field
+// it was never taught, because the field itself puts the entry in this loop.
+for (const field of Object.keys(cap)) {
+  const spec = COMPARE[field];
+  if (!spec) {
+    unknown.push(field);
     continue;
   }
-  if (cap[field] !== rebuilt) mism.push(render(rebuilt, cap[field]));
+  const project = spec.project || (v => v);
+  const rebuilt = project(spec.rebuilt);
+  const value = project(cap[field]);
+  comparedFields.push(spec.narrowed ? `${field} (${spec.narrowed.split(' — ')[0]})` : field);
+  // A TYPE DISAGREEMENT AND A VALUE DISAGREEMENT ARE DIFFERENT FAULTS AND GET
+  // DIFFERENT ADVICE. A captured `candidates` of '4' is a CAPTURE FORMAT
+  // problem; a captured `candidates` of 99 is a fleet that never existed. Both
+  // refuse, and telling the second one's story about the first sends the reader
+  // hunting a routing bug in a sample that simply serialised a number as text.
+  //
+  // SCOPE, STATED SO IT IS NOT MISTAKEN FOR MORE: this splits on the field's
+  // TOP-LEVEL kind. A type fault nested inside the ladder is reported by the
+  // deep compare as a value difference with its path, which still refuses —
+  // narrower advice, never a pass.
+  if (kindOf(rebuilt) !== kindOf(value)) {
+    unran.push(`${field} (captured value is ${cap[field] === undefined ? 'absent' : kindOf(value)},`
+      + ` the rebuild produces ${kindOf(rebuilt)})`);
+    continue;
+  }
+  const diff = deepDiff(rebuilt, value, field);
+  if (diff) mism.push(diff);
+}
+
+if (unknown.length) {
+  refuse(`${SAMPLE}'s band for route '${captured.route}' carries field(s) this gate cannot`
+    + ` check: ${unknown.join(', ')}. The capture format grew and the fidelity comparison`
+    + ' did not. A field nobody added a check for is exactly the case this gate refuses'
+    + ' rather than grading around — add its rebuilt counterpart to COMPARE, or state it'
+    + ' as an exclusion with a reason.');
+}
+console.log(`fidelity   deep-compared ${comparedFields.length} of ${Object.keys(cap).length}`
+  + ` captured band fields: ${comparedFields.join(', ')}`);
+// **MISMATCHES ARE REPORTED BEFORE TYPE FAULTS, AND THE ORDER IS THE DIAGNOSIS.**
+// Both refuse, so nothing is graded either way and the choice is only which story
+// the reader gets. When the rebuilt band is a different VARIANT from the captured
+// one, several fields go null-versus-number at once as a CONSEQUENCE — measured:
+// a capture recording `passthrough` against a rebuild deciding `banded` reported
+// `floor (captured null, rebuild number)` and buried `candidates 4 rebuilt vs 1
+// captured`, which is the fact that explains the whole divergence. A type fault
+// is the headline only when nothing else disagreed, which is exactly the pure
+// capture-format case it was written for.
+if (mism.length) {
+  refuse(`the rebuilt fleet does not match the capture for route '${captured.route}': ${mism.join('; ')}.`
+    + ' The usual cause is a route with no configured accounts list: its wire view names every'
+    + ' currently eligible account and the rebuild reads that as an explicit restriction.'
+    + ' Grading a caption against this fleet would grade a fleet that never existed');
 }
 
 if (unran.length) {
@@ -430,12 +600,6 @@ if (unran.length) {
     + ` ${unran.join('; ')}. A comparison that did not execute is not a comparison`
     + ' that passed, and this gate refuses rather than grading a caption against a'
     + ' fleet nothing checked.');
-}
-if (mism.length) {
-  refuse(`the rebuilt fleet does not match the capture for route '${captured.route}': ${mism.join('; ')}.`
-    + ' The usual cause is a route with no configured accounts list: its wire view names every'
-    + ' currently eligible account and the rebuild reads that as an explicit restriction.'
-    + ' Grading a caption against this fleet would grade a fleet that never existed');
 }
 
 // Only the `sized` variant admits by coverage, which is what these captions

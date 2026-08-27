@@ -1269,6 +1269,10 @@ export class TUI {
         // payload and two screens, the precise defect the shared naming rule
         // exists to prevent. Measured that way before this line was written:
         // status `(no id this route receives was measured)` beside a `►` here.
+        // THAT QUOTED SENTENCE IS THE WITHDRAWN WORDING and is kept because it
+        // is what was on screen when the measurement was taken. Ruling B
+        // narrowed it to `(basis derived from the glob, not matched to a metered
+        // family)`; the DEFECT this note records is unchanged, only its words.
         //
         // Found by CHECKING A CLAIM I HAD ALREADY MADE. The commit that added
         // the synthetic disclosure said "the TUI carries it too" on the
@@ -1810,8 +1814,19 @@ export class TUI {
         // claimed exactly that on the strength of this branch while the
         // REACHABLE consumer — the glyph column — still marked the same state
         // COMPLETE. Unreachable code cannot carry a claim.
-        const unmeasuredBasis = n && n.synthetic ? dim('  (no id this route receives was measured)') : '';
-        lines.push(dim(`     ${r.match.join(', ')} → ${names}${why}${unmeasuredBasis}`));
+        // **THE WORDING NARROWED WITH RULING B AND THIS BRANCH HAD TO MOVE
+        // WITH IT, UNREACHABLE OR NOT.** A tripwire exists to be correct if it
+        // ever fires; one that would render a WITHDRAWN claim is worse than no
+        // tripwire, because the day it becomes reachable is the day nobody is
+        // reading it. Same sentence as the status line, from the same rule.
+        // NAMED `unmeasuredBasis` UNTIL THE SEMANTIC CENSUS REACHED IT. The
+        // withdrawal census fixed the SENTENCE this branch renders and left the
+        // binding asserting the withdrawn claim — "unmeasured" is precisely what
+        // Ruling B established this mark cannot decide. Same repair as the
+        // sentence itself, one line up the expression.
+        const derivedBasis = n && n.synthetic
+          ? dim('  (basis derived from the glob, not matched to a metered family)') : '';
+        lines.push(dim(`     ${r.match.join(', ')} → ${names}${why}${derivedBasis}`));
       }
     }
   }

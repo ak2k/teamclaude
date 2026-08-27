@@ -253,16 +253,32 @@ test('a band variant the caption does not describe is refused rather than graded
   sample.accounts = sample.accounts.slice(0, 1);
   // THE ROUTING BLOCK DESCRIBES THE FULL FLEET AND THIS FIXTURE TRUNCATES IT,
   // so the capture would contradict its own accounts — and the fidelity check
-  // now catches exactly that, refusing before the band-variant refusal this
-  // test is about. That is the check working, not interfering: a four-candidate
-  // routing entry beside a one-account fleet IS an inconsistent capture.
-  // The entry is brought into line with the truncated fleet so the fixture is
-  // internally coherent and the refusal under test is the one that fires.
+  // catches exactly that, refusing before the band-variant refusal this test is
+  // about. That is the check working, not interfering: a four-candidate routing
+  // entry beside a one-account fleet IS an inconsistent capture.
+  //
+  // **THE FIRST REPAIR PATCHED ONLY THE FIELDS THE COMPARISON THEN READ**, and
+  // the deep compare showed the rest were still describing the old fleet: a
+  // four-row ladder and an `admitted` naming an account this fixture had just
+  // deleted, beside a one-account passthrough. It satisfied the check without
+  // being coherent, which is the narrower version of the defect the gate exists
+  // to stop, living in the gate's own fixtures.
+  //
+  // So the entry is rebuilt as the band a one-account fleet actually produces,
+  // every field of it: passthrough over the single survivor, no ladder because
+  // no walk ran, no target or floor because neither variant computed one.
+  const survivor = sample.accounts[0].name;
   for (const e of sample.routing || []) {
     if (e && e.band) {
-      e.band.candidates = 1;
       e.band.kind = 'passthrough';
-      e.band.admitted = (e.band.admitted || []).slice(0, 1);
+      e.band.reason = 'single-candidate';
+      e.band.target = null;
+      e.band.achieved = null;
+      e.band.floor = null;
+      e.band.candidates = 1;
+      e.band.admitted = [survivor];
+      e.band.ladder = [];
+      e.band.excluded = [];
     }
   }
   const single = path.join(os.tmpdir(), `caption-single-${process.pid}.json`);
@@ -446,4 +462,74 @@ test('a malformed band refuses rather than grading, and the shipped sample still
   const ok = gate([`--sample=${SAMPLE}`, '--model=claude-fable-5', `--now=${NOW}`]);
   assert.equal(ok.code, 0,
     `the shipped sample stopped grading, so the refusal was bought by disabling the gate:\n${ok.out}`);
+});
+
+// PASS 22. THE FIDELITY COMPARISON READ TWO FIELDS OF A BAND THAT CARRIES NINE,
+// and the paragraph above it claimed "a field nobody added a check for reaches a
+// refusal" — false, and false in the direction that stops people looking. The
+// repair is to the CHECK: the field set is DERIVED FROM THE CAPTURED ARTIFACT by
+// walking the capture's own keys, so an untaught field cannot be ignored, and a
+// divergence anywhere in the band refuses instead of passing under two agreeing
+// scalars.
+//
+// THE ARMS DRIVE WHAT THE OLD CHECK COULD NOT SEE, which is the only kind worth
+// adding: every one below leaves `candidates` and `kind` in perfect agreement,
+// so a two-field comparison grades all of them green.
+test('the fidelity comparison is derived from the capture and covers the whole band', () => {
+  const sample = JSON.parse(fs.readFileSync(SAMPLE, 'utf8'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'caption-deep-'));
+  const write = (name, mutate) => {
+    const copy = JSON.parse(JSON.stringify(sample));
+    mutate(copy.routing.find(e => e && e.model === 'claude-fable-5').band);
+    const p = path.join(dir, `${name}.json`);
+    fs.writeFileSync(p, JSON.stringify(copy));
+    return p;
+  };
+  const run = p => gate([`--sample=${p}`, '--model=claude-fable-5', `--now=${NOW}`]);
+
+  // THE PREMISE, PRINTED BY THE INSTRUMENT ITSELF rather than assumed here: the
+  // gate reports how many of the captured band's fields it compared. If that
+  // ever narrows, the arms below start passing vacuously and this says so first.
+  const ok = run(SAMPLE);
+  assert.equal(ok.code, 0, ok.out);
+  assert.match(ok.out, /fidelity {3}deep-compared 9 of 9 captured band fields/,
+    'the comparison narrowed; the arms below no longer test what they claim');
+
+  // A FIELD THE GATE WAS NEVER TAUGHT — the sentence the old comment promised
+  // and the old code did not keep.
+  const grown = run(write('grown', b => { b.spilloverPolicy = 'drain-oldest'; }));
+  assert.notEqual(grown.code, 0, 'a band field this gate cannot check was graded around');
+  assert.match(grown.out, /carries field\(s\) this gate cannot check: spilloverPolicy/);
+
+  // DEEP, NOT SHALLOW. One number several levels inside the ladder, with every
+  // scalar the old check read still agreeing exactly.
+  const deep = run(write('deepvalue', b => { b.ladder[1].cumulative = 0.5; }));
+  assert.notEqual(deep.code, 0, 'a ladder the rebuild contradicts was graded');
+  assert.match(deep.out, /ladder\[1\]\.cumulative .* rebuilt vs 0\.5 captured/,
+    'the refusal does not name where the capture and the rebuild parted company');
+
+  // ORDER-SENSITIVE. The ladder is a SEQUENCE and this whole gate exists to
+  // grade an ordering, so a reversed ladder must refuse. Compared as a SET it is
+  // identical — same rows, same values — and an order-blind deep compare would
+  // admit precisely the transposition the caption controls are built to catch,
+  // through the fidelity check instead of the verdict.
+  const reversed = run(write('reversed', b => { b.ladder.reverse(); }));
+  assert.notEqual(reversed.code, 0, 'a reversed ladder was accepted as a faithful capture');
+  assert.match(reversed.out, /does not match the capture/);
+
+  // THE EXCLUSION IS PARTIAL, AND THIS IS WHAT KEEPS IT HONEST. Per-verdict
+  // reason/bucket/detail are not compared — the rebuild cannot compute them —
+  // but the excluded ACCOUNT SET is, so a capture turning away accounts the
+  // rebuild admits still refuses.
+  const excluded = run(write('excluded', b => {
+    b.excluded = [{ account: 'account-a', reason: 'disabled', bucket: null, detail: null }];
+  }));
+  assert.notEqual(excluded.code, 0, 'an excluded-account set the rebuild contradicts was graded');
+  assert.match(excluded.out, /excluded/);
+
+  // THE CONTROL, and it is not optional: every arm above is satisfied by a gate
+  // that refuses everything. The shipped sample must still grade.
+  const still = run(SAMPLE);
+  assert.equal(still.code, 0,
+    `the shipped sample stopped grading, so the refusals were bought by breaking the gate:\n${still.out}`);
 });

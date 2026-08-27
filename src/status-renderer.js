@@ -329,9 +329,15 @@ function decisionLines(entry, status, blocked, paint) {
   // derived, this line is rightly silent and the sibling's own cell must say so.
   // The fix for that is at the sibling map, not here: widening this to "any
   // scope" would attach a qualifier about one basis to the figures of another.
-  const placeholder = entry.basisSynthetic
+  // NAMED `placeholder` UNTIL THE SEMANTIC CENSUS REACHED IT. The sentence it
+  // builds was re-worded by Ruling B and the binding was not, so the identifier
+  // went on asserting the withdrawn claim — that the basis is not a requestable
+  // id — while the text beside it said only that the basis was derived. A name
+  // is what the next reader reasons from, and this one survives every grep for
+  // the wording that was withdrawn.
+  const derivedBasis = entry.basisSynthetic
     ? paint.dim('  (basis derived from the glob; figures below are for it)') : '';
-  out.push(`${paint.bold('Decision')}  ${paint.cyan(scope)}${family}${auto}  ${paint.dim(`[${entry.bucket}]`)}${placeholder}`);
+  out.push(`${paint.bold('Decision')}  ${paint.cyan(scope)}${family}${auto}  ${paint.dim(`[${entry.bucket}]`)}${derivedBasis}`);
 
   // BOTH DESTINATION ROWS REPORT WHAT THE PATH RETURNS. Neither describes a
   // rule, because a rule stated in the block is a claim the block cannot check:
@@ -482,15 +488,6 @@ function decisionLines(entry, status, blocked, paint) {
       // candidate, so the entry collapses to passthrough and never wins the
       // block. Disclosing it only there would disclose it exactly never.
       const split = e.familySplit ? `, split by ${e.familySplit}` : '';
-      if (state === 'blocked') return `${scopeName(e)}: blocked${split}`;
-      // A SUPPRESSED SCOPE IS NOT A BAND VARIANT. Its band reads `passthrough`
-      // because there was nothing to rank, and printing that word here would
-      // describe a decision this scope never made. It has one fact worth the
-      // line: nobody computed figures for it, because the id it is named for
-      // belongs to a route ahead of it.
-      if (e.figuresAbsent === 'representative-captured') {
-        return `${scopeName(e)}: no figures, an earlier route takes its id`;
-      }
       // **THE FIFTH SURFACE. THIS MAP READ NO DISCLOSURE SIGNAL AT ALL.** It
       // rendered `wide (other): sized` for a sibling whose basis is derived,
       // while the routing line on the same screen named that glob — one payload,
@@ -499,7 +496,52 @@ function decisionLines(entry, status, blocked, paint) {
       // The header above qualifies only the entry that WON the block, so a
       // derived SIBLING had no cell that could speak for it. Same signal, same
       // wording, every consumer.
+      //
+      // **AND THE FIX FOR IT TAUGHT ONE OF THIS MAP'S THREE RETURNS.** The
+      // binding sat below both early returns, so a derived scope disclosed only
+      // when it was neither blocked nor captured; measured, `blocked` and
+      // `no figures, an earlier route takes its id` each dropped it. GUARDING
+      // ONE PATH IS NOT GUARDING ITS SIBLINGS — the second time this round an
+      // early return has been caught exiting past a disclosure binding, the
+      // first being `routeNaming`'s `source: 'none'` returns leaving before the
+      // synthetic reduction. DIFFERENT FUNCTIONS, SAME SHAPE, and the same
+      // repair: hoist it ABOVE the returns, because a binding a return can exit
+      // past is a disclosure that return does not carry.
+      //
+      // THE RULE, AND IT IS ABOUT VERDICTS RATHER THAN FIGURES. Every one of the
+      // three verdicts is ABOUT `e.model`, and on a derived scope that string is
+      // one the proxy derived rather than one an operator configured:
+      // `scopeState` matches the blocklist against it, the producer's capture
+      // test asked whether an earlier route takes it, and the band ranked on it.
+      // So all three are verdicts about a derived thing and all three say so.
+      // On the captured cell the omission actively misleads rather than merely
+      // leaving something out — "an earlier route takes ITS ID" reads as a
+      // configured id going elsewhere, when the id is one nobody wrote down.
+      // FALSIFIER: a return here whose verdict is not about `e.model`; that one
+      // would be outside the rule and would need its own reason.
       const derived = e.basisSynthetic ? ', basis derived from the glob' : '';
+      if (state === 'blocked') return `${scopeName(e)}: blocked${derived}${split}`;
+      // A SUPPRESSED SCOPE IS NOT A BAND VARIANT. Its band reads `passthrough`
+      // because there was nothing to rank, and printing that word here would
+      // describe a decision this scope never made. It has one fact worth the
+      // line: nobody computed figures for it, because the id it is named for
+      // belongs to a route ahead of it.
+      //
+      // **`split` IS EXCLUDED HERE ALONE, AND THE EXCLUSION IS DECIDED RATHER
+      // THAN JUDGED.** This return is reached only when the producer set
+      // `figuresAbsent: 'representative-captured'`, which `_captureDistortsFigures`
+      // gates on `_representativeCaptured` — the FIRST arm of `_familySplit`.
+      // So on this return `familySplit` is `'an earlier route'`, or `null` when
+      // the wildcard-free guard above that arm fires, and it cannot be anything
+      // else. Rendering it would append ", split by an earlier route" to a cell
+      // that has just said an earlier route takes the id: the same fact in a
+      // second vocabulary, which spends the reader's attention twice on one
+      // thing. FALSIFIER, and it is pinned by a test rather than left as prose:
+      // a captured cell whose `familySplit` is neither `'an earlier route'` nor
+      // null. The day that exists this exclusion is wrong and the test says so.
+      if (e.figuresAbsent === 'representative-captured') {
+        return `${scopeName(e)}: no figures, an earlier route takes its id${derived}`;
+      }
       return `${scopeName(e)}: ${e.band.kind}${state === 'partial' ? ', partly blocked' : ''}${derived}${split}`;
     }).join(', ');
     out.push(`  ${paint.dim('Other scopes'.padEnd(13))}${paint.dim(names)}`);
@@ -1083,11 +1125,49 @@ function routingLines(routes, blocked, paint, routing) {
     // representative's answer as the route's. Without it the line named a set
     // that excluded a known server while appearing complete, which is the one
     // thing the naming rule may never do.
-    // SUPPRESSED WHEN THE WHOLE BASIS IS A PLACEHOLDER — see the composition
-    // rule below. "Split by X; other ids may go elsewhere" claims the figures
-    // are real and merely partial, which cannot be true of a line whose every
-    // scope was graded on an id nothing can request.
-    const splitBasis = naming.basisGap && state !== 'blocked' && !naming.synthetic
+    // **THIS CARRIED `&& !naming.synthetic` AND RULING B TOOK THE GROUND OUT
+    // FROM UNDER IT.** The suppression was correct while `synthetic` meant "the
+    // basis is not an id this route can receive": a placeholder basis had
+    // nothing real to be partial about, so "split by X; other ids may go
+    // elsewhere" beside it was a false honest-form. B withdrew that meaning as
+    // UNDECIDABLE and narrowed the mark to PROVENANCE — derived from the glob,
+    // not matched to a metered family — and this condition was never revisited.
+    //
+    // NOTHING ABOUT THE LINE WAS STALE TEXT. It read `!naming.synthetic` before
+    // B and reads it after; no census over the withdrawn WORDING could ever
+    // have surfaced it. What moved was the meaning of the word underneath, and
+    // A NARROWED DEFINITION SILENTLY RE-SCOPES EVERY CONDITION WRITTEN AGAINST
+    // THE OLD ONE. That is why the withdrawal census is now a PAIR and why the
+    // semantic half exists.
+    //
+    // Under B a derived basis can be A REAL ID THAT GENUINELY SPLITS, so the
+    // suppression now silences a TRUE disclosure. Reproduced, same genuine
+    // split, provenance the only difference:
+    //   *fable*            → rendered the split marker
+    //   claude-haiku-4-5*  → suppressed it, and `claude-haiku-4-5` is real
+    //
+    // AND NO PREDICATE CAN SEPARATE THOSE TWO POPULATIONS, which is the whole
+    // reason B narrowed the claim: `claude-haiku-4-5*` yields a real id from the
+    // derived branch and `claude-haiku-4-*` a fabricated one, agreeing on every
+    // signal readable here. So a condition suppressing only the fabricated case
+    // is the undecidable predicate B removed, wearing a different name. The
+    // choice is all-derived-suppressed or all-derived-rendered, and it is
+    // settled by which error the line commits when it is wrong: suppression
+    // DENIES a division that exists, and a reader told a family is whole stops
+    // looking for the part of it served elsewhere. Rendering states a true
+    // division beside a neighbouring sentence that says, on the same line, that
+    // the basis was derived — so the split sentence cannot pass itself off as
+    // resting on a verified id.
+    //
+    // THE COMPOSITION RULE BELOW IS DISCHARGED BY THE REWORDING, NOT ABANDONED.
+    // Those two sentences contradicted because the second ASSERTED NON-EXISTENCE
+    // ("no id this route receives was measured"). The sentence it was replaced
+    // with asserts non-verification and says nothing about whether the figures
+    // are real, so the pair no longer collides. FALSIFIER: a disclosure sentence
+    // on this line that again denies measurement outright — that one would
+    // collide with the split marker exactly as its predecessor did, and would
+    // need this suppression back.
+    const splitBasis = naming.basisGap && state !== 'blocked'
       ? paint.dim(` (split by ${naming.basisGap}; other ids may go elsewhere)`) : '';
     // ITS OWN SENTENCE, and it stacks with the split qualifier rather than
     // replacing it: a route can have both a synthesised scope and a genuinely
@@ -1115,13 +1195,23 @@ function routingLines(routes, blocked, paint, routing) {
     // was a written justification which named no falsifier, and the mixed
     // fixture was the falsifier, unrendered.
     //
-    // NO PER-FORM CHECK CATCHES THIS, which is why it needs a composition rule
-    // rather than a fix to either sentence: the COMPOSITION is what is false.
-    // When the whole basis is a placeholder the split qualifier has nothing
-    // real to be partial ABOUT, so it is suppressed and the stronger, wholly
-    // true sentence stands alone. In the partial case both survive because both
-    // are then true of the line: some scopes measured and split, others not
-    // measured, and each names which.
+    // NO PER-FORM CHECK CATCHES THIS, which is why it needed a composition rule
+    // rather than a fix to either sentence: the COMPOSITION was what was false.
+    //
+    // **THE REMEDY THAT RULE PRODUCED HAS SINCE BEEN WITHDRAWN, AND ONLY THE
+    // REMEDY.** It suppressed the split qualifier whenever the whole basis was
+    // derived, on the reasoning that a placeholder has nothing real to be
+    // partial about — which followed from the sentence as it then read. Ruling
+    // B replaced that sentence with a provenance claim that asserts
+    // non-verification rather than non-existence, so the contradiction the
+    // suppression existed to prevent no longer arises and the suppression was
+    // left denying true splits on derived-but-real bases. It is gone; the
+    // reasoning is at `splitBasis` above with its falsifier.
+    //
+    // THE RULE ITSELF STANDS AND IS THE PART WORTH KEEPING: sentences on one
+    // line must be simultaneously true, no per-form check can see it, and a
+    // composition claim that names no falsifier is how this one shipped wrong
+    // twice — first asserting the two stack, then asserting they never can.
     // **THE SENTENCE NARROWED WITH THE CLAIM, AND THAT IS RULING B.** It used to
     // read "no id this route receives was measured" — a claim about the WORLD,
     // asserting the basis is not a requestable id. Nothing here can decide that:
