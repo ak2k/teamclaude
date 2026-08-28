@@ -119,7 +119,7 @@ function chooseScope(routing, blocked) {
 /**
  * What the blocklist does to this scope: `blocked`, `partial` or `clear`.
  *
- * The blocklist is answered at the server with a 400 (`server.js:668`), so a
+ * The blocklist is answered at the server with a 400 (`server.js:668`, the `blockedBy` lookup), so a
  * blocked family never reaches routing at all. `routing[]` still computes a band
  * for it — the report is about the fleet, and the fleet's quota is real — but a
  * scope nothing can be routed to must not win the compact block, or the block
@@ -510,7 +510,15 @@ function decisionLines(entry, status, blocked, paint) {
       //
       // THE RULE, AND IT IS ABOUT VERDICTS RATHER THAN FIGURES. Every one of the
       // three verdicts is ABOUT `e.model`, and on a derived scope that string is
-      // one the proxy derived rather than one an operator configured:
+      // one the strip PRODUCED FROM THE GLOB rather than one MATCHED TO A
+      // METERED FAMILY. **THE CONTRAST IS DERIVED-VERSUS-MATCHED, NOT
+      // DERIVED-VERSUS-CONFIGURED** — this read "rather than one an operator
+      // configured", which is FALSE of the fixture that drives this very map:
+      // it configures `claude-haiku-4-5` in `routes[0].match` AND in
+      // `acctModels`, and the entry still carries `basisSynthetic`. A derived
+      // representative can be an id the operator wrote down; what makes it
+      // derived is that no metered family answered the glob. Ruling B's
+      // existence claim in its last disguise; see TC-055.
       // `scopeState` matches the blocklist against it, the producer's capture
       // test asked whether an earlier route takes it, and the band ranked on it.
       // So all three are verdicts about a derived thing and all three say so.

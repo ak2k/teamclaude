@@ -197,7 +197,7 @@
  *
  * `BandDecision` deliberately does not grow a ladder field: `decidingTerms` is
  * "pure, and separate from `decidePick` so that explaining a decision cannot
- * change it" (`pick-decision.js:172`), and the same posture applies here. So the
+ * change it" (`pick-decision.js:172`, the `kind: 'none', reason: 'no-candidates'` return), and the same posture applies here. So the
  * explanation is a second projection of the same work rather than a wider
  * decision, and nothing on the routing path reads it.
  *

@@ -1808,7 +1808,7 @@ export class AccountManager {
       // display-derives-eligibility class this round has found seven times. So
       // the producer states the fact and the line carries it.
       //
-      // THIS DOES REDERIVE `modelsForGlob`'s STRIP, AND THAT OBJECTION WAS
+      // THIS DID REDERIVE `modelsForGlob`'s STRIP, AND THAT OBJECTION WAS
       // MINE — the superseded version argued for membership precisely because
       // it "cannot drift from `modelsForGlob`'s branch, where a copy of the
       // strip's condition would silently stop agreeing the moment that
@@ -1875,7 +1875,8 @@ export class AccountManager {
       // measured" about a basis that IS the id it receives.
       // Adding `model &&` fixed the shared scope (`model: null`, `:1700`) and
       // left that untouched, because a null guard answers a third question
-      // again. `model.js:62` had already stated the position: a glob naming no
+      // again. `model.js:62` — the "glob names no family this proxy meters
+      // separately" comment — had already stated the position: a glob naming no
       // separately metered family reads as ONE SCOPE ON THE SHARED BUCKET,
       // not as an error.
       //
@@ -1884,7 +1885,8 @@ export class AccountManager {
       // or not, and nothing is claimed about it.
       //
       // `gpt-*` IS marked and that is correct under the invariant, which is
-      // worth stating because `model.js:62` names it. No metered family answers
+      // worth stating because `model.js:62`, the unmetered-glob comment,
+      // names it. No metered family answers
       // `gpt-*`, so its representative is DERIVED and the mark is true of it —
       // the disclosure holds on provenance, without any claim about whether
       // `gpt-` is requestable, which this code cannot decide. That comment's

@@ -1805,7 +1805,7 @@ export class TUI {
         // block renders only `autocreated` routes, and those are exactly
         // `fable` and `sonnet` — built from `*fable*` / `*sonnet*` with samples
         // `claude-fable-5` / `claude-sonnet-4-6`, both real `FAMILY_MODELS`
-        // members. Independently, `account-manager.js:1727` gives an
+        // members. Independently, `account-manager.js:1727`, the `const globs = route.autocreated ? …` binding, gives an
         // autocreated route's scope `route.sample` DIRECTLY and never calls
         // `_scopeModelsFor`, so the literal-strip fallback cannot be reached
         // here by two separate mechanisms and `n.synthetic` is always false.

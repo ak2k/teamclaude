@@ -447,7 +447,7 @@ if (!cap || typeof cap !== 'object') {
     + ' carries its band.');
 }
 
-// One entry per field the WIRE band carries (`account-manager.js:2070`, the
+// One entry per field the WIRE band carries (`account-manager.js:2080`, the
 // `band: {` literal), each rebuilt from the product's own functions rather than
 // from a paraphrase. **THE CITATION NAMES ITS EXPRESSION, NOT JUST ITS LINE** —
 // this pair pointed at `:2043` and was stranded by an edit ABOVE it one commit
@@ -594,7 +594,7 @@ const comparedFields = [];
 // sending. Neither list can see the other's blind spot, so both are walked.
 //
 // EVERY KEY OF `COMPARE` IS REQUIRED, deliberately: the wire band emits all nine
-// fields on every path (`account-manager.js:2070`, the `band: {` literal),
+// fields on every path (`account-manager.js:2080`, the `band: {` literal),
 // with nulls where a variant
 // does not compute a value, so a MISSING key is a thinner capture format rather
 // than a legitimate shape. That is precisely the state the paragraph above

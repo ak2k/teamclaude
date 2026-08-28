@@ -345,7 +345,7 @@ test('the last resort is asked at the instant the projection was taken', () => {
 // `loadFor` — so a block that says where a NEW session goes, computed over the
 // current set, is predicting from a set the request destroys on its way in.
 //
-// THE ORDER IS THE FINDING, not the state. `server.js:706` begins the session
+// THE ORDER IS THE FINDING, not the state. `server.js:706`, the `ctx.hold = accountManager.beginSession(sessionId)` line, begins the session
 // and `:999` selects, so the eviction happens BEFORE the walk that chooses. A
 // fixture that calls `getActiveAccount` alone — which is what I first built —
 // has correct state and agrees with the block, because it never performs the
