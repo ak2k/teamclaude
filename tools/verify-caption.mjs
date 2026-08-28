@@ -447,8 +447,12 @@ if (!cap || typeof cap !== 'object') {
     + ' carries its band.');
 }
 
-// One entry per field the WIRE band carries (`account-manager.js:2043`), each
-// rebuilt from the product's own functions rather than from a paraphrase.
+// One entry per field the WIRE band carries (`account-manager.js:2070`, the
+// `band: {` literal), each rebuilt from the product's own functions rather than
+// from a paraphrase. **THE CITATION NAMES ITS EXPRESSION, NOT JUST ITS LINE** —
+// this pair pointed at `:2043` and was stranded by an edit ABOVE it one commit
+// later, silently, which is the failure the three-part form exists to make
+// loud. See TC-054.
 const COMPARE = {
   kind: { rebuilt: decision.kind },
   reason: { rebuilt: decision.reason ?? null },
@@ -508,8 +512,9 @@ const COMPARE = {
   excluded: {
     rebuilt: am.accounts.filter(a => !candidates.includes(a)).map(a => a.name),
     project: v => (Array.isArray(v) ? v.map(x => (x && typeof x === 'object' ? x.account : x)) : v),
-    narrowed: 'account names only — per-verdict reason/bucket/detail need route-scoped '
-      + '_observeOpts this rebuild does not construct',
+    narrowed: 'account names only — a per-verdict reason/bucket/detail rebuilt '
+      + 'UNSCOPED is a different computation from the route-scoped one the '
+      + 'producer ran, so comparing them would grade a mismatch that is not one',
   },
 };
 
@@ -589,7 +594,8 @@ const comparedFields = [];
 // sending. Neither list can see the other's blind spot, so both are walked.
 //
 // EVERY KEY OF `COMPARE` IS REQUIRED, deliberately: the wire band emits all nine
-// fields on every path (`account-manager.js:2043`), with nulls where a variant
+// fields on every path (`account-manager.js:2070`, the `band: {` literal),
+// with nulls where a variant
 // does not compute a value, so a MISSING key is a thinner capture format rather
 // than a legitimate shape. That is precisely the state the paragraph above
 // promises will fail loudly.

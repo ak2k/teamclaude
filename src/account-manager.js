@@ -1778,7 +1778,10 @@ export class AccountManager {
       // twice gave the mutation table two identical anchors — a row that then
       // mutates whichever it finds first and reports on the other.
       const bucket = this._weeklyBucketFor(model, scopeRoute ?? this._routeForModel(model));
-      // IS THIS SCOPE'S REPRESENTATIVE A REAL ID, OR A PLACEHOLDER?
+      // WAS THIS SCOPE'S REPRESENTATIVE DERIVED FROM THE GLOB, OR MATCHED TO A
+      // METERED FAMILY? (This heading asked "A REAL ID, OR A PLACEHOLDER?" —
+      // Ruling B's withdrawn existence question, which survived unmarked while
+      // four other passages in this same block were rewritten. See TC-054.)
       //
       // `modelsForGlob` answers with the family representatives a glob can
       // carry, and falls back to the glob's own literal core when it names no
@@ -1812,12 +1815,17 @@ export class AccountManager {
       // fallback changed shape". The objection is real and it is the lesser
       // risk: membership does not drift and DOES NOT ANSWER THE QUESTION, and
       // a predicate that is stably wrong is worse than one that could go stale.
-      // TRIPWIRE, since the duplication is deliberate: if `modelsForGlob`'s
-      // fallback stops being `glob.replace(/\*/g, '') || 'model'`, this stops
-      // agreeing with it silently. The guard against that is
-      // `test/decision-block.test.js`, which asserts the fabricated
-      // representative is exactly `claude--4` before looking at any rendering —
-      // so a changed fallback fails there rather than here.
+      // **THAT TRIPWIRE IS SPENT AND IS RECORDED HERE RATHER THAN DELETED.**
+      // It read: "TRIPWIRE, since the duplication is deliberate: if
+      // `modelsForGlob`'s fallback stops being `glob.replace(/\*/g, '') ||
+      // 'model'`, this stops agreeing with it silently." **THERE IS NO
+      // DUPLICATION LEFT TO GUARD** — the strip went with the predicate that
+      // needed it, as the binding below says in its own words, so the
+      // instruction told a maintainer to preserve and test a calculation this
+      // file no longer performs. A TRIPWIRE FOR A REMOVED MECHANISM IS AN
+      // INSTRUCTION TO RE-ADD IT. The paragraph above is kept because the
+      // OBJECTION it records — that a copied condition can drift from its
+      // source — is why the mark reads the input question instead. See TC-054.
       // THE INVARIANT, and the mark is derived from it rather than from any
       // property that happens to correlate with it:
       //

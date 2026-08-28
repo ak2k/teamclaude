@@ -2093,7 +2093,9 @@ test('every return of the sibling map discloses a derived basis', () => {
   assert.match(captured.others, /no figures, an earlier route takes its id/,
     'the premise: the captured cell really did take the captured return');
   assert.match(captured.others, CAPTURED_DERIVED,
-    'a captured sibling is told an earlier route takes an id nobody configured, and not that');
+    'a captured sibling is told an earlier route takes its id, without also being told the '
+    + 'basis was derived from the glob. (This message said "an id nobody configured" — false '
+    + 'of this very fixture, which configures the id twice; see TC-054.)');
 
   // THE EXCLUSION, PINNED RATHER THAN ARGUED. The captured return deliberately
   // omits the split qualifier because `figuresAbsent === 'representative-captured'`

@@ -516,7 +516,14 @@ function decisionLines(entry, status, blocked, paint) {
       // So all three are verdicts about a derived thing and all three say so.
       // On the captured cell the omission actively misleads rather than merely
       // leaving something out — "an earlier route takes ITS ID" reads as a
-      // configured id going elsewhere, when the id is one nobody wrote down.
+      // MATCHED representative going elsewhere, when the representative was
+      // DERIVED from the glob. **THIS SAID "the id is one nobody wrote down",
+      // WHICH IS RULING B'S WITHDRAWN EXISTENCE CLAIM IN NEW WORDS** — and the
+      // fixture that drives this path configures its id explicitly, twice, so
+      // the sentence was false of the very case it describes. No census pattern
+      // keyed on "request" or "measured" could see it, and wrapping was not the
+      // problem: **A CLASS DOES NOT END WHEN ITS KNOWN SPELLINGS ARE
+      // EXHAUSTED.** See TC-054.
       // FALSIFIER: a return here whose verdict is not about `e.model`; that one
       // would be outside the rule and would need its own reason.
       const derived = e.basisSynthetic ? ', basis derived from the glob' : '';
