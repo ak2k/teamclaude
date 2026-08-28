@@ -249,7 +249,13 @@ if (shippedText !== pinned) {
 // The whole process runs at the capture clock, not just the snapshot. Passing
 // `now` into `_bandSnapshot` is not enough: the product reads the wall clock
 // directly at points selection depends on, and `_clearExpiredQuotas` NULLS
-// `unified5h` as soon as its reset is in the past (`account-manager.js:1588`).
+// `unified5h` as soon as its reset is in the past
+// (`account-manager.js:2630`, the `_clearExpiredQuotas(account)` definition).
+// STOCK DEFECT FIXED IN PASSING: this cited `:1588`, which is unrelated JSDoc
+// and was already wrong at `da05c45` — the function was at 2584 then. **A
+// CITATION CAN BE PERFECTLY FORMED, CONTENT-BEARING, AND POINT A THOUSAND LINES
+// AWAY**, which is the half of the citation class no anchor-presence measure
+// can see; see TC-056.
 // Measured rather than anticipated — the first run of this tool did exactly
 // that. A sample captured yesterday arrived with every five-hour bucket
 // cleared, so `sizeByCapacity` found no capacity signal, the band fell back to
