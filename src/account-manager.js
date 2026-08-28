@@ -1783,11 +1783,14 @@ export class AccountManager {
       // `modelsForGlob` answers with the family representatives a glob can
       // carry, and falls back to the glob's own literal core when it names no
       // family this proxy meters — `claude-*-4` has no family, so the scope is
-      // built on `claude--4`, A STRING NO CLIENT CAN EVER REQUEST. Every
-      // question downstream is then asked about that string: which weekly
-      // bucket meters it, which accounts' `models` claims own it, which of them
-      // the band admits. The answers are internally consistent and describe no
-      // traffic that exists.
+      // built on `claude--4`, A STRING THE STRIP PRODUCED RATHER THAN ONE ANY
+      // FAMILY ANSWERS. Every question downstream is then asked about that
+      // string: which weekly bucket meters it, which accounts' `models` claims
+      // own it, which of them the band admits. The answers are internally
+      // consistent and are ABOUT THE DERIVED BASIS, unverified against the ids
+      // the route receives. (Withdrawn form: "a string no client can ever
+      // request… the answers describe no traffic that exists" — Ruling B made
+      // this provenance, not existence; see TC-053.)
       //
       // WITHOUT THIS FLAG THE LINE RENDERS THAT BASIS IN THE MEASURED-COMPLETE
       // FORM. The four-form table this round shipped promises that names come
@@ -1831,14 +1834,30 @@ export class AccountManager {
       // Withdrawn form kept in this comment as the redirect, since it circulates
       // in earlier commits and in the register; see TC-045.
       //
-      // So the question is whether the representative was FABRICATED, and
-      // `modelsForGlob`'s fallback fabricates only when the wildcard strip
-      // CHANGES the glob. Asked directly: the representative is the strip's
-      // output AND the strip altered it. `claude-*-4` -> `claude--4` is
-      // fabrication; `claude-haiku-4-5` -> itself is the identity, and the
-      // literal IS an id the route receives, by construction.
+      // So the question is whether the representative was DERIVED FROM THE GLOB
+      // rather than MATCHED TO A METERED FAMILY, and that is asked of the INPUT:
+      // `familyModelsMatching(scopeGlob).length === 0`, the same call the
+      // producing branch makes. `claude-*-4` matches no family, so its
+      // representative is derived and the mark is set. **`claude-haiku-4-5` IS
+      // ALSO MARKED** — no metered family answers it either, so its
+      // representative came from the strip, and the mark says only that. It is
+      // NOT a claim that the literal is unreceivable; it plainly is receivable.
       //
-      // TWO WRONG PREDICATES PRECEDED THIS AND BOTH ARE INSTRUCTIVE.
+      // THE WITHDRAWN VERSION OF THIS PARAGRAPH ASKED WHETHER THE STRIP CHANGED
+      // THE GLOB and worked the example the other way — "`claude-haiku-4-5` ->
+      // itself is the identity, and the literal IS an id the route receives" —
+      // which is the COINCIDENCE DETECTOR named superseded 40 lines below, at
+      // the binding. The tree's own `decision-block.test.js` pins the opposite
+      // and passes: that route is marked `unmetered-glob`. **A COMMENT WHOSE
+      // WORKED EXAMPLE THE CODE CONTRADICTS IS THE MOST EXPENSIVE KIND OF ROT,
+      // because it teaches the reader a predicate the tree does not run.**
+      // See TC-053.
+      //
+      // THREE WRONG PREDICATES PRECEDED THIS AND ALL THREE ARE INSTRUCTIVE.
+      // (This header said TWO while the paragraphs below named three — the
+      // membership test, the `model &&` null guard, and the strip-change
+      // coincidence detector. A COUNT IN A HEADING IS A CLAIM ABOUT THE TEXT
+      // UNDER IT; see TC-053.)
       // `FAMILY_MODELS.includes(model)` asks about METERING — the list holds
       // one representative per SEPARATELY METERED family, not a census of real
       // ids — while the mark's sentence claims EXISTENCE. Two different
@@ -1857,10 +1876,13 @@ export class AccountManager {
       // or not, and nothing is claimed about it.
       //
       // `gpt-*` IS marked and that is correct under the invariant, which is
-      // worth stating because `model.js:62` names it. `gpt-` is not an id
-      // anything can request, so the disclosure is true. That comment's claim
-      // is about SCOPE COUNT — one scope rather than one per family — and this
-      // does not contradict it.
+      // worth stating because `model.js:62` names it. No metered family answers
+      // `gpt-*`, so its representative is DERIVED and the mark is true of it —
+      // the disclosure holds on provenance, without any claim about whether
+      // `gpt-` is requestable, which this code cannot decide. That comment's
+      // claim is about SCOPE COUNT — one scope rather than one per family — and
+      // this does not contradict it. (Withdrawn justification: "`gpt-` is not
+      // an id anything can request, so the disclosure is true"; see TC-053.)
       const scopeGlob = match.length === 1 ? match[0] : null;
       // `stripped` USED TO LIVE HERE and is gone with the predicate that needed
       // it. Comparing the model against the stripped glob was the coincidence
@@ -2034,11 +2056,16 @@ export class AccountManager {
         // Figures below are this entry's own; the suppression branch above is
         // the only path that publishes none.
         figuresAbsent: null,
-        // …and they were computed for `model`, which this says is or is not an
-        // id anything can request. `figuresAbsent` answers "are there figures";
-        // this answers "are they ABOUT anything", and the two are independent:
-        // this entry has figures, and on a synthesised basis they describe no
-        // traffic the route receives.
+        // …and they were computed for `model`, whose PROVENANCE this reports:
+        // derived from the glob, or matched to a metered family. `figuresAbsent`
+        // answers "are there figures"; this answers "was the basis they are
+        // about VERIFIED", and the two are independent: this entry has figures,
+        // and on a derived basis they are unverified against the ids the route
+        // actually receives. **THIS IS THE PUBLISHED FIELD'S CONTRACT, so it
+        // states Ruling B's meaning and not the withdrawn one** — it used to say
+        // the model "is or is not an id anything can request" and that a
+        // synthesised basis describes "no traffic the route receives", which are
+        // both NON-EXISTENCE claims nothing here can decide; see TC-053.
         basisSynthetic,
         band: {
           kind: explained.decision.kind,

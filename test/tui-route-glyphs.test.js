@@ -410,7 +410,9 @@ test('the settings auto line says WHY it names nobody', () => {
 //
 // The column's whole vocabulary is complete-vs-qualified, so both kinds of bad
 // basis must reach it: `basisGap` (real basis, does not cover the route) and
-// `synthetic` (placeholder basis, no client can request it).
+// `synthetic` (basis DERIVED from the glob, not matched to a metered family).
+// (Withdrawn form: "placeholder basis, no client can request it" — provenance,
+// not existence; see TC-053.)
 test('the glyph column does not mark a synthesised basis as a complete answer', () => {
   const now = Date.now();
   const H = 3600e3;

@@ -965,9 +965,16 @@ export function routeNaming(route, routeIndex, routing, blocked = []) {
   // aggregation and gets its OWN sentence rather than being folded into
   // `basisGap`. `basisGap` renders as "split by X; other ids may go
   // elsewhere" — a claim that the figures are real and merely partial. On a
-  // synthesised basis they are neither: the scope was graded on a placeholder
-  // (`claude--4` for `claude-*-4`) that no client can request, so no id this
-  // route receives was measured at all. Saying "split by an unmetered glob"
+  // derived basis they are neither: the scope was graded on a representative
+  // the strip produced from the glob (`claude--4` for `claude-*-4`) rather than
+  // one matched to a metered family, so the figures are ABOUT THAT DERIVED
+  // BASIS and the route's own ids are unverified against them. **RULING B: THIS
+  // SAYS NON-VERIFICATION, NOT NON-EXISTENCE** — it does not claim the basis is
+  // unrequestable, because nothing here can decide that. This sentence used to
+  // read "a placeholder that no client can request, so no id this route
+  // receives was measured at all", WRAPPED ACROSS TWO LINES, which is why the
+  // line-based census reported it clean for a whole round; see TC-053.
+  // Saying "split by an unmetered glob"
   // would be a FALSE HONEST-FORM, which is the failure this round has spent
   // three cycles removing — an honest-looking qualifier that misdescribes the
   // thing it discloses is worse than the bare line, because it spends the

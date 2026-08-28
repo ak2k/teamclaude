@@ -467,15 +467,21 @@ test('a malformed band refuses rather than grading, and the shipped sample still
 // PASS 22. THE FIDELITY COMPARISON READ TWO FIELDS OF A BAND THAT CARRIES NINE,
 // and the paragraph above it claimed "a field nobody added a check for reaches a
 // refusal" — false, and false in the direction that stops people looking. The
-// repair is to the CHECK: the field set is DERIVED FROM THE CAPTURED ARTIFACT by
-// walking the capture's own keys, so an untaught field cannot be ignored, and a
-// divergence anywhere in the band refuses instead of passing under two agreeing
-// scalars.
+// repair is to the CHECK: the field set is the UNION of the capture's own keys
+// and the required list, so neither an untaught field nor a DROPPED one can be
+// ignored, and a divergence anywhere in the band refuses instead of passing
+// under two agreeing scalars.
+//
+// **THE FIRST REPAIR WALKED THE CAPTURE'S OWN KEYS AND THAT WAS WITHDRAWN** —
+// a guard derived from the artifact cannot see what the artifact OMITS, so a
+// capture missing a field reported full coverage of a set that had silently
+// shrunk (TC-051). This header went on describing the withdrawn remedy while
+// the code below it compared the union; see TC-053.
 //
 // THE ARMS DRIVE WHAT THE OLD CHECK COULD NOT SEE, which is the only kind worth
 // adding: every one below leaves `candidates` and `kind` in perfect agreement,
 // so a two-field comparison grades all of them green.
-test('the fidelity comparison is derived from the capture and covers the whole band', () => {
+test('the fidelity comparison covers the union of captured and required band fields', () => {
   const sample = JSON.parse(fs.readFileSync(SAMPLE, 'utf8'));
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'caption-deep-'));
   const write = (name, mutate) => {

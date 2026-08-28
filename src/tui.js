@@ -1262,8 +1262,15 @@ export class TUI {
         //
         // BOTH KINDS OF BAD BASIS, and the second was missing for exactly one
         // commit. `basisGap` is "the basis is real but does not cover this
-        // route"; `synthetic` is "the basis is a placeholder no client can
-        // request". This column's entire vocabulary is complete-vs-qualified,
+        // route"; `synthetic` is "the basis was DERIVED from the glob rather
+        // than matched to a metered family" — provenance, not existence. It
+        // used to read "the basis is a placeholder no client can request",
+        // which Ruling B withdrew; the note recording that narrowing sits seven
+        // lines below and was attached to the QUOTED STATUS SENTENCE rather
+        // than to this definition, so the definition went on asserting the
+        // withdrawn form. **A CORRECTION PLACED NEAR A CLAIM DOES NOT REACH
+        // IT**; see TC-053.
+        // This column's entire vocabulary is complete-vs-qualified,
         // so both must reach it — otherwise the STATUS line disclosed the
         // synthesised basis while this column marked it COMPLETE, which is one
         // payload and two screens, the precise defect the shared naming rule

@@ -1546,10 +1546,13 @@ test('an admitted account is not erased by a different account sharing its name'
 //
 // `modelsForGlob` falls back to a glob's own literal core when the glob names no
 // family this proxy meters, so `claude-*-4` builds its scope on `claude--4` — a
-// string no client can ever request. Every question after that is asked about
-// it: which weekly bucket meters it, whose `models` claims own it, whom the band
-// admits. The answers are internally consistent and describe no traffic that
-// exists.
+// string the strip PRODUCED rather than one any metered family answers. Every
+// question after that is asked about it: which weekly bucket meters it, whose
+// `models` claims own it, whom the band admits. The answers are internally
+// consistent and are ABOUT THE DERIVED BASIS, unverified against the ids the
+// route receives. (Withdrawn form: "a string no client can ever request… the
+// answers describe no traffic that exists" — Ruling B made the mark provenance
+// rather than existence; see TC-053.)
 //
 // Before this, the line rendered that basis in the MEASURED-COMPLETE form. The
 // four-form table promises names come from a MEASURED basis, so a synthesised
